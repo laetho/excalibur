@@ -9,7 +9,7 @@ info:
   productName: "Excalibur"
   productIdentifier: "com.excalibur.app"
   description: "The board of legend"
-  copyright: "Copyright 2026 Excalibur contributors"
+  copyright: "Copyright © 2026 github.com/laetho and github.com/niklashaakonsen"
   comments: "Local and NATS-backed collaborative whiteboards"
   version: "0.1.0"
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)

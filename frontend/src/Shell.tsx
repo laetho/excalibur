@@ -1486,6 +1486,16 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
             </button>
           </div>
         </section>
+        <p className="settings-copyright">
+          Copyright © 2026{' '}
+          <a href="https://github.com/laetho" target="_blank" rel="noreferrer">
+            github.com/laetho
+          </a>{' '}
+          and{' '}
+          <a href="https://github.com/niklashaakonsen" target="_blank" rel="noreferrer">
+            github.com/niklashaakonsen
+          </a>
+        </p>
         <div className="modal-actions">
           <button className="primary" onClick={onClose}>
             Done

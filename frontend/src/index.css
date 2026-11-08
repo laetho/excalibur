@@ -674,6 +674,17 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
+.settings-copyright {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.settings-copyright a {
+  color: inherit;
+}
+
 .settings-text-input {
   flex: 1;
   min-width: 0;

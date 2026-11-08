@@ -75,3 +75,8 @@ distribution still requires Apple Developer ID signing/notarization and Windows
 code signing. A cross-compiled macOS bundle must be tested and signed on macOS.
 
 NATS sources require a server with JetStream enabled.
+
+## Copyright
+
+Copyright © 2026 [github.com/laetho](https://github.com/laetho) and
+[github.com/niklashaakonsen](https://github.com/niklashaakonsen).

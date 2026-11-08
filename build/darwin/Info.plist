@@ -25,6 +25,6 @@
 		<key>NSHighResolutionCapable</key>
 		<string>true</string>
 		<key>NSHumanReadableCopyright</key>
-		<string>Copyright 2026 Excalibur contributors</string>
+		<string>Copyright © 2026 github.com/laetho and github.com/niklashaakonsen</string>
 	</dict>
 </plist>

@@ -9,7 +9,7 @@
 			"ProductVersion": "0.1.0",
 			"CompanyName": "Excalibur",
 			"FileDescription": "The board of legend",
-			"LegalCopyright": "Copyright 2026 Excalibur contributors",
+			"LegalCopyright": "Copyright © 2026 github.com/laetho and github.com/niklashaakonsen",
 			"ProductName": "Excalibur",
 			"Comments": "Local and NATS-backed collaborative whiteboards"
 		}
