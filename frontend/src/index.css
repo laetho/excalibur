@@ -1010,6 +1010,31 @@ button.secondary:hover {
   line-height: 1.42;
 }
 
+.ai-thinking {
+  max-width: 92%;
+  margin: 0 0 6px;
+  padding: 7px 9px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--input-bg) 72%, transparent);
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  font-size: 11px;
+  text-align: left;
+}
+
+.ai-thinking summary {
+  cursor: pointer;
+  font-weight: 600;
+  user-select: none;
+}
+
+.ai-thinking > div {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
 .ai-message.user {
   text-align: right;
 }

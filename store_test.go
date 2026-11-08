@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testStore(t *testing.T) *Store {
@@ -238,13 +241,17 @@ func TestOpenAIForcedToolChoice(t *testing.T) {
 func TestOpenAIStreamingToolCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var payload struct {
-			Stream bool `json:"stream"`
+			Stream             bool            `json:"stream"`
+			ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
 		if !payload.Stream {
 			t.Error("stream was not enabled")
+		}
+		if !payload.ChatTemplateKwargs["enable_thinking"] {
+			t.Error("thinking was not enabled")
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = writer.Write([]byte(`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"apply_canvas_","arguments":"{\"expected\""}}]}}]}` + "\n\n"))
@@ -284,13 +291,88 @@ func TestOpenAIStreamingContent(t *testing.T) {
 		server.Client(), server.URL, AIConfig{Model: "test-model"},
 		[]openAIMessage{{Role: "user", Content: "hi"}},
 		[]any{canvasTool, canvasOperationsToolDefinition}, nil,
-		func(delta string) { streamed.WriteString(delta) },
+		func(kind aiStreamKind, delta string) {
+			if kind == aiStreamAnswer {
+				streamed.WriteString(delta)
+			}
+		},
 	)
 	if err != nil || message.Content != "Hello world" {
 		t.Fatalf("message = %#v, error = %v", message, err)
 	}
 	if streamed.String() != "Hello world" {
 		t.Fatalf("streamed content = %q", streamed.String())
+	}
+}
+
+func TestOpenAIStreamingThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Check \"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"thinking\":\"canvas. \",\"content\":\"Done\"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	var thinking, answer strings.Builder
+	message, err := requestAIWithToolChoiceStream(
+		server.Client(), server.URL, AIConfig{Model: "test-model"},
+		[]openAIMessage{{Role: "user", Content: "hi"}}, nil, nil,
+		func(kind aiStreamKind, delta string) {
+			if kind == aiStreamThinking {
+				thinking.WriteString(delta)
+			} else {
+				answer.WriteString(delta)
+			}
+		},
+	)
+	if err != nil || message.Content != "Done" {
+		t.Fatalf("message = %#v, error = %v", message, err)
+	}
+	if thinking.String() != "Check canvas. " || answer.String() != "Done" {
+		t.Fatalf("thinking = %q, answer = %q", thinking.String(), answer.String())
+	}
+}
+
+func TestOpenAIStreamingContentThoughtChannel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"th\"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ought\\nCheck \"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"the canvas\"}}]}\n\n"))
+		_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	var thinking, answer strings.Builder
+	message, err := requestAIWithToolChoiceStream(
+		server.Client(), server.URL, AIConfig{Model: "test-model"},
+		[]openAIMessage{{Role: "user", Content: "hi"}}, nil, nil,
+		func(kind aiStreamKind, delta string) {
+			if kind == aiStreamThinking {
+				thinking.WriteString(delta)
+			} else {
+				answer.WriteString(delta)
+			}
+		},
+	)
+	if err != nil || message.Content != "thought\nCheck the canvas" {
+		t.Fatalf("message = %#v, error = %v", message, err)
+	}
+	if thinking.String() != "thought\nCheck the canvas" || answer.Len() != 0 {
+		t.Fatalf("thinking = %q, answer = %q", thinking.String(), answer.String())
+	}
+}
+
+func TestSlidingResponseTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	body := newSlidingTimeoutBody(reader, 25*time.Millisecond)
+	defer body.Close()
+
+	_, err := body.Read(make([]byte, 1))
+	if !errors.Is(err, errAIResponseIdleTimeout) {
+		t.Fatalf("timeout error = %v", err)
 	}
 }
 

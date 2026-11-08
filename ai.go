@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +24,14 @@ const (
 	maxCanvasOperations    = 100
 	maxCanvasOperationArgs = 2 << 20
 	maxAIToolRounds        = 10
+	aiResponseIdleTimeout  = 5 * time.Minute
+)
+
+type aiStreamKind string
+
+const (
+	aiStreamAnswer   aiStreamKind = "answer"
+	aiStreamThinking aiStreamKind = "thinking"
 )
 
 type openAIMessage struct {
@@ -41,11 +51,12 @@ type openAIToolCall struct {
 }
 
 type openAIRequest struct {
-	Model      string          `json:"model"`
-	Messages   []openAIMessage `json:"messages"`
-	Tools      []any           `json:"tools,omitempty"`
-	ToolChoice any             `json:"tool_choice,omitempty"`
-	Stream     bool            `json:"stream"`
+	Model              string          `json:"model"`
+	Messages           []openAIMessage `json:"messages"`
+	Tools              []any           `json:"tools,omitempty"`
+	ToolChoice         any             `json:"tool_choice,omitempty"`
+	Stream             bool            `json:"stream"`
+	ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs,omitempty"`
 }
 
 type openAIResponse struct {
@@ -60,9 +71,12 @@ type openAIResponse struct {
 type openAIStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Role      string `json:"role,omitempty"`
-			Content   string `json:"content,omitempty"`
-			ToolCalls []struct {
+			Role             string `json:"role,omitempty"`
+			Content          string `json:"content,omitempty"`
+			ReasoningContent string `json:"reasoning_content,omitempty"`
+			Reasoning        string `json:"reasoning,omitempty"`
+			Thinking         string `json:"thinking,omitempty"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
 				Type     string `json:"type,omitempty"`
@@ -456,7 +470,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string) (string, 
 		messages = append(messages, openAIMessage{Role: message.Role, Content: message.Content})
 	}
 
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := newAIHTTPClient()
 	editRequested := false
 	for index := len(history) - 1; index >= 0; index-- {
 		if history[index].Role == "user" {
@@ -466,9 +480,9 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string) (string, 
 	}
 	canvasInspected := false
 	canvasEdited := false
-	emitDelta := func(delta string) {
+	emitDelta := func(kind aiStreamKind, delta string) {
 		if delta != "" && requestID != "" {
-			a.emit("ai:stream", map[string]string{"requestId": requestID, "delta": delta})
+			a.emit("ai:stream", map[string]string{"requestId": requestID, "kind": string(kind), "delta": delta})
 		}
 	}
 	for turn := 0; turn < maxAIToolRounds; turn++ {
@@ -478,9 +492,14 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string) (string, 
 		} else if editRequested && !canvasEdited {
 			toolChoice = forceToolChoice(canvasOperationsTool)
 		}
-		var onDelta func(string)
-		if !editRequested || canvasEdited {
-			onDelta = emitDelta
+		answerIsSafe := !editRequested || canvasEdited
+		onDelta := func(kind aiStreamKind, delta string) {
+			// Models may reason while preparing required tool calls. Surface that
+			// explicitly, but continue hiding premature prose that could falsely
+			// imply a requested canvas edit already succeeded.
+			if kind == aiStreamThinking || answerIsSafe {
+				emitDelta(kind, delta)
+			}
 		}
 		message, err := requestAIWithToolChoiceStream(client, endpoint, config, messages, []any{canvasTool, canvasOperationsToolDefinition}, toolChoice, onDelta)
 		if err != nil {
@@ -561,12 +580,15 @@ func requestAIWithToolChoice(client *http.Client, endpoint string, config AIConf
 	return requestAIWithToolChoiceStream(client, endpoint, config, messages, tools, toolChoice, nil)
 }
 
-func requestAIWithToolChoiceStream(client *http.Client, endpoint string, config AIConfig, messages []openAIMessage, tools []any, toolChoice any, onDelta func(string)) (openAIMessage, error) {
-	payload, err := json.Marshal(openAIRequest{Model: config.Model, Messages: messages, Tools: tools, ToolChoice: toolChoice, Stream: true})
+func requestAIWithToolChoiceStream(client *http.Client, endpoint string, config AIConfig, messages []openAIMessage, tools []any, toolChoice any, onDelta func(aiStreamKind, string)) (openAIMessage, error) {
+	payload, err := json.Marshal(openAIRequest{
+		Model: config.Model, Messages: messages, Tools: tools, ToolChoice: toolChoice, Stream: true,
+		ChatTemplateKwargs: map[string]bool{"enable_thinking": true},
+	})
 	if err != nil {
 		return openAIMessage{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -580,6 +602,7 @@ func requestAIWithToolChoiceStream(client *http.Client, endpoint string, config 
 	if err != nil {
 		return openAIMessage{}, fmt.Errorf("Dramallama request failed: %w", err)
 	}
+	response.Body = newSlidingTimeoutBody(response.Body, aiResponseIdleTimeout)
 	defer response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		return decodeAIStream(response.Body, onDelta)
@@ -616,12 +639,25 @@ func requestAIWithToolChoiceStream(client *http.Client, endpoint string, config 
 	return result.Choices[0].Message, nil
 }
 
-func decodeAIStream(reader io.Reader, onDelta func(string)) (openAIMessage, error) {
+func decodeAIStream(reader io.Reader, onDelta func(aiStreamKind, string)) (openAIMessage, error) {
 	message := openAIMessage{Role: "assistant"}
 	var content strings.Builder
 	toolCalls := make(map[int]*openAIToolCall)
 	maxToolIndex := -1
 	seenEvent := false
+	contentModeKnown := false
+	contentIsThinking := false
+	var pendingContent strings.Builder
+	emitContent := func(delta string) {
+		if onDelta == nil || delta == "" {
+			return
+		}
+		kind := aiStreamAnswer
+		if contentIsThinking {
+			kind = aiStreamThinking
+		}
+		onDelta(kind, delta)
+	}
 
 	scanner := bufio.NewScanner(io.LimitReader(reader, 16<<20))
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
@@ -646,9 +682,45 @@ func decodeAIStream(reader io.Reader, onDelta func(string)) (openAIMessage, erro
 			if choice.Delta.Role != "" {
 				message.Role = choice.Delta.Role
 			}
-			content.WriteString(choice.Delta.Content)
-			if onDelta != nil && choice.Delta.Content != "" {
-				onDelta(choice.Delta.Content)
+			thinking := choice.Delta.ReasoningContent + choice.Delta.Reasoning + choice.Delta.Thinking
+			if onDelta != nil && thinking != "" {
+				onDelta(aiStreamThinking, thinking)
+			}
+			contentDelta := choice.Delta.Content
+			content.WriteString(contentDelta)
+			if contentDelta != "" {
+				if !contentModeKnown {
+					pendingContent.WriteString(contentDelta)
+					pending := pendingContent.String()
+					trimmed := strings.ToLower(strings.TrimLeft(pending, " \t\r\n"))
+					// Some thinking-capable chat templates expose their channel as a
+					// leading content marker instead of reasoning_content. Keep that
+					// stream collapsible even when the inference server has no
+					// reasoning parser configured.
+					for _, marker := range []string{"thought\n", "analysis\n"} {
+						if strings.HasPrefix(trimmed, marker) {
+							contentIsThinking = true
+							contentModeKnown = true
+							break
+						}
+					}
+					if !contentModeKnown && trimmed != "" {
+						couldBeMarker := false
+						for _, marker := range []string{"thought\n", "analysis\n"} {
+							if strings.HasPrefix(marker, trimmed) {
+								couldBeMarker = true
+								break
+							}
+						}
+						contentModeKnown = !couldBeMarker
+					}
+					if contentModeKnown {
+						emitContent(pending)
+						pendingContent.Reset()
+					}
+				} else {
+					emitContent(contentDelta)
+				}
 			}
 			for _, delta := range choice.Delta.ToolCalls {
 				call := toolCalls[delta.Index]
@@ -669,6 +741,10 @@ func decodeAIStream(reader io.Reader, onDelta func(string)) (openAIMessage, erro
 	if err := scanner.Err(); err != nil {
 		return openAIMessage{}, fmt.Errorf("could not read Dramallama stream: %w", err)
 	}
+	if pendingContent.Len() > 0 {
+		contentIsThinking = false
+		emitContent(pendingContent.String())
+	}
 	if !seenEvent {
 		return openAIMessage{}, errors.New("Dramallama returned an empty stream")
 	}
@@ -687,6 +763,77 @@ func decodeAIStream(reader io.Reader, onDelta func(string)) (openAIMessage, erro
 		return openAIMessage{}, errors.New("Dramallama returned an empty streamed response")
 	}
 	return message, nil
+}
+
+var errAIResponseIdleTimeout = errors.New("Dramallama response timed out")
+
+// newAIHTTPClient limits the wait for response headers, then lets an active SSE
+// response continue indefinitely. The body wrapper below resets its five-minute
+// idle window whenever any response bytes arrive.
+func newAIHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = aiResponseIdleTimeout
+	return &http.Client{Transport: transport}
+}
+
+type slidingTimeoutBody struct {
+	body     io.ReadCloser
+	timeout  time.Duration
+	activity chan struct{}
+	done     chan struct{}
+	doneOnce sync.Once
+	timedOut atomic.Bool
+}
+
+func newSlidingTimeoutBody(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	wrapped := &slidingTimeoutBody{
+		body: body, timeout: timeout,
+		activity: make(chan struct{}, 1), done: make(chan struct{}),
+	}
+	go wrapped.watch()
+	return wrapped
+}
+
+func (body *slidingTimeoutBody) watch() {
+	timer := time.NewTimer(body.timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			body.timedOut.Store(true)
+			_ = body.body.Close()
+			return
+		case <-body.activity:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(body.timeout)
+		case <-body.done:
+			return
+		}
+	}
+}
+
+func (body *slidingTimeoutBody) Read(buffer []byte) (int, error) {
+	count, err := body.body.Read(buffer)
+	if count > 0 {
+		select {
+		case body.activity <- struct{}{}:
+		default:
+		}
+	}
+	if err != nil && body.timedOut.Load() {
+		return count, fmt.Errorf("%w after %s without data", errAIResponseIdleTimeout, body.timeout)
+	}
+	return count, err
+}
+
+func (body *slidingTimeoutBody) Close() error {
+	body.doneOnce.Do(func() { close(body.done) })
+	return body.body.Close()
 }
 
 func forceToolChoice(name string) map[string]any {

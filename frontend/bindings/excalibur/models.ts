@@ -4,6 +4,7 @@
 export interface AIChatMessage {
     "role": string;
     "content": string;
+    "thinking"?: string;
 }
 
 /**

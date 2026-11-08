@@ -41,7 +41,7 @@ export type SourceInfo = { id: string; name: string; kind: 'local' | 'nats'; gro
 export type NatsServerConfig = { id: string; name: string; url: string; username: string; password: string; buckets: string[] }
 export type AISettings = { enabled: boolean; baseUrl: string; model: string; hasApiKey: boolean }
 export type AISettingsUpdate = { enabled: boolean; baseUrl: string; model: string; apiKey: string; clearApiKey: boolean }
-export type AIChatMessage = { role: 'user' | 'assistant'; content: string }
+export type AIChatMessage = { role: 'user' | 'assistant'; content: string; thinking?: string }
 export type AIModel = { id: string; model: string }
 
 export type StoreSnapshot = {
@@ -168,9 +168,11 @@ export function onAICanvasOperations(cb: (json: string) => void): Promise<Unlist
   return listen<{ json: string }>('canvas:ai-operations', (payload) => cb(payload.json))
 }
 
-/** A text fragment from the active streamed Dramallama response. */
-export function onAIStream(cb: (requestId: string, delta: string) => void): Promise<Unlisten> {
-  return listen<{ requestId: string; delta: string }>('ai:stream', (payload) => cb(payload.requestId, payload.delta))
+/** An answer or model-thinking fragment from the active streamed Dramallama response. */
+export function onAIStream(cb: (requestId: string, kind: 'answer' | 'thinking', delta: string) => void): Promise<Unlisten> {
+  return listen<{ requestId: string; kind: 'answer' | 'thinking'; delta: string }>('ai:stream', (payload) =>
+    cb(payload.requestId, payload.kind, payload.delta),
+  )
 }
 
 /** A collaboration message (serialized scene or pointer update) arrived for the open board. */

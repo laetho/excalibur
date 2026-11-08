@@ -144,6 +144,7 @@ export default function Shell() {
   /** The NATS server a new bucket is being created on. */
   const [newBucketFor, setNewBucketFor] = useState<SourceInfo | null>(null)
   const [aiOpen, setAIOpen] = useState(false)
+  const closeAI = useCallback(() => setAIOpen(false), [])
 
   // Menu handlers and drop handlers read the latest snapshot without re-subscribing.
   const snapshotRef = useRef<StoreSnapshot | null>(null)
@@ -437,7 +438,7 @@ export default function Shell() {
               AI
             </button>
             {aiOpen && (
-              <AIChatOverlay baseUrl={snapshot.ai.baseUrl} model={snapshot.ai.model} onClose={() => setAIOpen(false)} />
+              <AIChatOverlay baseUrl={snapshot.ai.baseUrl} model={snapshot.ai.model} onClose={closeAI} />
             )}
           </>
         )}
@@ -677,16 +678,24 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelsError, setModelsError] = useState<string | null>(null)
   const [streamedAnswer, setStreamedAnswer] = useState('')
+  const [streamedThinking, setStreamedThinking] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestId = useRef(0)
   const historyRef = useRef<AIChatMessage[]>([])
   const activeRequestRef = useRef<string | null>(null)
+  const streamedThinkingRef = useRef('')
 
   useEffect(() => {
     let unlisten: (() => void) | undefined
-    void onAIStream((streamRequestId, delta) => {
-      if (streamRequestId === activeRequestRef.current) setStreamedAnswer((current) => current + delta)
+    void onAIStream((streamRequestId, kind, delta) => {
+      if (streamRequestId !== activeRequestRef.current) return
+      if (kind === 'thinking') {
+        streamedThinkingRef.current += delta
+        setStreamedThinking(streamedThinkingRef.current)
+      } else {
+        setStreamedAnswer((current) => current + delta)
+      }
     }).then((stop) => {
       unlisten = stop
     })
@@ -729,7 +738,7 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, queue, busy, errors, modelsError, streamedAnswer])
+  }, [messages, queue, busy, errors, modelsError, streamedAnswer, streamedThinking])
 
   const send = () => {
     const content = draft.trim()
@@ -750,15 +759,26 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
     const streamRequestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${request.id}`
     activeRequestRef.current = streamRequestId
     setStreamedAnswer('')
+    streamedThinkingRef.current = ''
+    setStreamedThinking('')
     void aiChat(next, request.model, streamRequestId)
       .then((answer) => {
-        historyRef.current = [...historyRef.current, { role: 'assistant', content: answer }]
+        const thinking = streamedThinkingRef.current
+        historyRef.current = [
+          ...historyRef.current,
+          // When an upstream emits a leading `thought` channel as ordinary
+          // content, it is shown live in the collapsible panel but is also the
+          // final response body. Avoid retaining the same text twice.
+          { role: 'assistant', content: answer, thinking: thinking && thinking !== answer ? thinking : undefined },
+        ]
         setMessages(historyRef.current)
       })
       .catch((err) => setErrors((current) => [...current, { id: request.id, message: String(err) }]))
       .finally(() => {
         activeRequestRef.current = null
         setStreamedAnswer('')
+        streamedThinkingRef.current = ''
+        setStreamedThinking('')
         setBusy(false)
         requestAnimationFrame(() => inputRef.current?.focus())
       })
@@ -802,18 +822,20 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
                 <CopyButton text={message.content} className="ai-message-copy" label="AI response" />
               )}
             </div>
+            {message.role === 'assistant' && message.thinking && <AIThinking text={message.thinking} />}
             <p>{message.content}</p>
           </div>
         ))}
-        {busy && streamedAnswer && (
+        {busy && (streamedAnswer || streamedThinking) && (
           <div className="ai-message assistant streaming">
             <div className="ai-message-meta">
               <span>AI</span>
             </div>
-            <p>{streamedAnswer}</p>
+            {streamedThinking && <AIThinking text={streamedThinking} streaming={!streamedAnswer} />}
+            {streamedAnswer && <p>{streamedAnswer}</p>}
           </div>
         )}
-        {busy && !streamedAnswer && <div className="ai-chat-status">Dramallama is thinking…</div>}
+        {busy && !streamedAnswer && !streamedThinking && <div className="ai-chat-status">Dramallama is thinking…</div>}
         {queue.map((request, index) => (
           <div key={request.id} className="ai-message user queued">
             <span>Queued {index + 1}</span>
@@ -866,6 +888,15 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
         </button>
       </form>
     </section>
+  )
+}
+
+function AIThinking({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  return (
+    <details className="ai-thinking" open={streaming}>
+      <summary>{streaming ? 'Thinking…' : 'Thinking'}</summary>
+      <div>{text}</div>
+    </details>
   )
 }
 

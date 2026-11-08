@@ -56,8 +56,9 @@ type AISettingsUpdate struct {
 }
 
 type AIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role     string `json:"role"`
+	Content  string `json:"content"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // AIModel separates the gateway's friendly identifier from the exact model
