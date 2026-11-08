@@ -75,6 +75,20 @@ uploads each target on its native runner. Artifacts are unsigned; public
 distribution still requires Apple Developer ID signing/notarization and Windows
 code signing. A cross-compiled macOS bundle must be tested and signed on macOS.
 
+## Releases
+
+Push an annotated semantic-version tag to publish a GitHub Release:
+
+```sh
+git tag -a v0.1.0 -m "Excalibur v0.1.0"
+git push origin v0.1.0
+```
+
+Release tags must have the exact form `vX.Y.Z`. The workflow uses the tag as the
+native application version, builds all three desktop packages, generates
+`SHA256SUMS`, and publishes the packages with automatically generated release
+notes. The release is published only after every platform build succeeds.
+
 NATS sources require a server with JetStream enabled.
 
 ## Copyright
