@@ -1,0 +1,112 @@
+package main
+
+import (
+	"embed"
+	"log"
+	"runtime"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+)
+
+//go:embed all:frontend/dist
+var assets embed.FS
+
+func main() {
+	backend := newApp()
+	wailsApp := application.New(application.Options{
+		Name:        "Excalibur",
+		Description: "The board of legend",
+		Services: []application.Service{
+			application.NewService(backend),
+		},
+		Assets: application.AssetOptions{
+			Handler: application.AssetFileServerFS(assets),
+		},
+		Mac: application.MacOptions{
+			ApplicationShouldTerminateAfterLastWindowClosed: true,
+		},
+	})
+	backend.wailsApp = wailsApp
+
+	menu := nativeMenu(backend)
+	wailsApp.Menu.Set(menu)
+	backend.window = wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+		Title:              "Excalibur",
+		Width:              1400,
+		Height:             900,
+		MinWidth:           760,
+		MinHeight:          480,
+		BackgroundColour:   application.NewRGB(248, 248, 248),
+		URL:                "/",
+		Zoom:               defaultApplicationZoom,
+		ZoomControlEnabled: true,
+	})
+	backend.window.SetMenu(menu)
+
+	if err := wailsApp.Run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func nativeMenu(app *App) *application.Menu {
+	root := application.NewMenu()
+	if runtime.GOOS == "darwin" {
+		root.AddRole(application.AppMenu)
+	}
+	emit := func(id string) func(*application.Context) {
+		return func(*application.Context) { app.emit("menu:"+id, map[string]any{}) }
+	}
+	add := func(menu *application.Menu, label, accelerator, id string) {
+		item := menu.Add(label).OnClick(emit(id))
+		if accelerator != "" {
+			item.SetAccelerator(accelerator)
+		}
+	}
+
+	file := root.AddSubmenu("File")
+	add(file, "New Board…", "CmdOrCtrl+N", "new-board")
+	add(file, "Import Boards…", "CmdOrCtrl+O", "import")
+	add(file, "Choose Boards Folder…", "", "choose-folder")
+	add(file, "Show in File Manager", "CmdOrCtrl+Shift+R", "reveal")
+	file.AddSeparator()
+	add(file, "Rename Board…", "", "rename")
+	add(file, "Duplicate Board", "", "duplicate")
+	add(file, "Move to Trash", "", "trash")
+	if runtime.GOOS != "darwin" {
+		file.AddSeparator()
+		add(file, "Settings…", "CmdOrCtrl+,", "settings")
+		file.Add("Quit").SetAccelerator("CmdOrCtrl+Q").OnClick(func(*application.Context) { app.wailsApp.Quit() })
+	}
+
+	if runtime.GOOS == "darwin" {
+		// macOS routes the native Delete role to the focused text control.
+		root.AddRole(application.EditMenu)
+	} else {
+		// Wails' non-macOS EditMenu registers Backspace as a native Delete
+		// accelerator. That consumes the key before GTK/WebView can deliver it to
+		// focused inputs. Keep the useful edit roles but let Backspace stay in the
+		// webview (Excalidraw also handles canvas deletion itself).
+		edit := root.AddSubmenu("Edit")
+		edit.AddRole(application.Undo)
+		edit.AddRole(application.Redo)
+		edit.AddSeparator()
+		edit.AddRole(application.Cut)
+		edit.AddRole(application.Copy)
+		edit.AddRole(application.Paste)
+		edit.AddSeparator()
+		edit.AddRole(application.SelectAll)
+	}
+	view := root.AddSubmenu("View")
+	view.AddRadio("Sort by Name", true).OnClick(emit("sort-name"))
+	view.AddRadio("Sort by Date Edited", false).OnClick(emit("sort-date"))
+	view.AddSeparator()
+	view.AddCheckbox("Show Thumbnails", true).OnClick(emit("show-thumbnails"))
+	view.AddSeparator()
+	view.Add("Zoom In").SetAccelerator("CmdOrCtrl+plus").OnClick(func(*application.Context) { _ = app.ChangeApplicationZoom(applicationZoomStep) })
+	view.Add("Zoom Out").SetAccelerator("CmdOrCtrl+-").OnClick(func(*application.Context) { _ = app.ChangeApplicationZoom(-applicationZoomStep) })
+	view.Add("Actual Size").SetAccelerator("CmdOrCtrl+0").OnClick(func(*application.Context) { _ = app.ResetApplicationZoom() })
+	view.AddSeparator()
+	view.Add("Toggle Full Screen").OnClick(func(*application.Context) { app.ToggleFullscreen() })
+	root.AddRole(application.WindowMenu)
+	return root
+}

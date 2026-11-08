@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Excalibur
+Comment=The board of legend
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/Excalibur %u
+Terminal=false
+Type=Application
+Icon=Excalibur
+Categories=Utility;
+StartupWMClass=Excalibur
+
+ 

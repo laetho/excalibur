@@ -1,0 +1,81 @@
+version: '3'
+
+vars:
+  APP_NAME: Excalibur
+  BIN_DIR: bin
+  PACKAGE_MANAGER: pnpm
+  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+  GOOS: '{{.GOOS | default OS}}'
+
+includes:
+  common: ./build/Taskfile.yml
+  windows: ./build/windows/Taskfile.yml
+  darwin: ./build/darwin/Taskfile.yml
+  linux: ./build/linux/Taskfile.yml
+  ios: ./build/ios/Taskfile.yml
+  android: ./build/android/Taskfile.yml
+
+tasks:
+  build:
+    desc: Build for the host operating system
+    cmds:
+      - task: '{{.GOOS}}:build'
+
+  package:
+    desc: Package for the host operating system
+    cmds:
+      - task: '{{.GOOS}}:package'
+
+  build:linux:
+    desc: Build Linux AMD64
+    cmds:
+      - task: linux:build
+        vars: { ARCH: amd64 }
+
+  build:macos:
+    desc: Build a universal macOS .app (cross-compiles with the pure-Go backend)
+    cmds:
+      - task: darwin:package:universal
+        vars: { EXTRA_TAGS: purego }
+
+  build:windows:
+    desc: Build Windows AMD64
+    cmds:
+      - task: windows:build
+        vars: { ARCH: amd64 }
+
+  dev:
+    desc: Run Wails v3 and a local JetStream-enabled NATS server
+    cmds:
+      - task --parallel dev:app dev:nats
+
+  dev:app:
+    internal: true
+    cmds:
+      - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  dev:nats:
+    desc: Run a local NATS server with JetStream on nats://127.0.0.1:42222
+    cmds:
+      - go run ./cmd/devnats
+
+  test:
+    desc: Run Go tests and verify the frontend production build
+    cmds:
+      - go test ./...
+      - task: common:build:frontend
+
+  run:
+    desc: Run the built application and local JetStream-enabled NATS server
+    cmds:
+      - task --parallel run:app dev:nats
+
+  run:app:
+    desc: Run only the built application
+    cmds:
+      - task: '{{.GOOS}}:run'
+
+  setup:docker:
+    desc: Build Wails' cross-compilation image
+    cmds:
+      - task: common:setup:docker

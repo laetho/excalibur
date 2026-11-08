@@ -1,0 +1,6 @@
+/build/bin/
+/bin/
+/frontend/dist/
+/frontend/node_modules/
+*.log
+/.dev/

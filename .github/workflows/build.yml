@@ -1,0 +1,92 @@
+name: Cross-platform build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            task: build:linux
+            artifact: Excalibur-linux-amd64
+          - os: macos-latest
+            task: build:macos
+            artifact: Excalibur-macos-universal
+          - os: windows-latest
+            task: build:windows
+            artifact: Excalibur-windows-amd64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.49.1
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Install Wails v3 CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Run checks
+        run: task test
+
+      - name: Build native package
+        run: task ${{ matrix.task }}
+
+      - name: Archive Linux package
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -C bin -czf dist/Excalibur-linux-amd64.tar.gz Excalibur
+
+      - name: Archive macOS package
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent bin/Excalibur.app dist/Excalibur-macos-universal.zip
+
+      - name: Archive Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path bin/Excalibur.exe -DestinationPath dist/Excalibur-windows-amd64.zip
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
