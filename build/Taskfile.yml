@@ -7,6 +7,11 @@ tasks:
     # Universal/multi-arch builds invoke this concurrently from parallel deps;
     # two `go mod tidy` processes racing on go.mod can corrupt it (#4637).
     run: once
+    sources:
+      - "**/*.go"
+      - go.mod
+    generates:
+      - go.sum
     cmds:
       - go mod tidy
 
@@ -49,7 +54,9 @@ tasks:
       - package.json
       - pnpm-lock.yaml
     generates:
-      - node_modules
+      # A concrete pnpm metadata file gives Task a stable generated target;
+      # checksumming the node_modules directory caused needless install runs.
+      - node_modules/.modules.yaml
     preconditions:
       - sh: pnpm --version
         msg: "pnpm not found"
@@ -82,6 +89,9 @@ tasks:
     sources:
       - "**/*"
       - exclude: node_modules/**/*
+      # dist is this task's output, not an input. Including it makes the source
+      # checksum depend on files the task itself replaces.
+      - exclude: dist/**/*
     generates:
       - dist/**/*
     deps:

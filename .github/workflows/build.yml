@@ -43,6 +43,21 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      # setup-go and setup-node already cache the Go build/module caches and
+      # pnpm's content-addressed store. Cache only reproducible generated
+      # outputs here; node_modules and native packages are deliberately rebuilt.
+      # There is no restore prefix because stale bindings or embedded assets
+      # are less useful than a miss. OS/architecture scoping also keeps Task's
+      # platform-specific checksums isolated.
+      - name: Restore generated build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .task/checksum
+            frontend/bindings
+            frontend/dist
+          key: generated-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum', 'Taskfile.yml', 'build/**/Taskfile.yml', 'frontend/**') }}
+
       - uses: arduino/setup-task@v2
         with:
           version: 3.49.1
