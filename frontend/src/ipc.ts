@@ -42,7 +42,7 @@ export type NatsServerConfig = { id: string; name: string; url: string; username
 export type AISettings = { enabled: boolean; baseUrl: string; model: string; hasApiKey: boolean }
 export type AISettingsUpdate = { enabled: boolean; baseUrl: string; model: string; apiKey: string; clearApiKey: boolean }
 export type AIChatMessage = { role: 'user' | 'assistant'; content: string; thinking?: string }
-export type AIModel = { id: string; model: string }
+export type AIModel = { id: string; model: string; thinking: boolean }
 
 export type StoreSnapshot = {
   folder: string
@@ -102,8 +102,8 @@ export const setApplicationZoom = (zoom: number) => app().SetApplicationZoom(zoo
 export const discoverAIModels = (baseUrl: string, apiKey: string, clearApiKey: boolean) =>
   app().DiscoverAIModels(baseUrl, apiKey, clearApiKey) as Promise<AIModel[]>
 export const setAISettings = (settings: AISettingsUpdate) => app().SetAISettings(settings)
-export const aiChat = (messages: AIChatMessage[], model: string, requestId: string) =>
-  app().AIChat(messages, model, requestId) as Promise<string>
+export const aiChat = (messages: AIChatMessage[], model: string, requestId: string, enableThinking: boolean) =>
+  app().AIChat(messages, model, requestId, enableThinking) as Promise<string>
 export const dismissAlert = () => app().DismissAlert()
 export const setWindowTitle = (title: string) => app().SetWindowTitle(title)
 /** Native open dialog for the canvas' "Insert image" / library "Open". */

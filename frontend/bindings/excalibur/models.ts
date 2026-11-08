@@ -14,6 +14,7 @@ export interface AIChatMessage {
 export interface AIModel {
     "id": string;
     "model": string;
+    "thinking": boolean;
 }
 
 /**

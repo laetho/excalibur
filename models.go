@@ -32,10 +32,11 @@ type NatsServerConfig struct {
 }
 
 type AIConfig struct {
-	Enabled bool   `json:"enabled"`
-	BaseURL string `json:"baseUrl"`
-	Model   string `json:"model"`
-	APIKey  string `json:"apiKey,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"baseUrl"`
+	Model          string `json:"model"`
+	APIKey         string `json:"apiKey,omitempty"`
+	EnableThinking bool   `json:"-"`
 }
 
 // AISettings is safe to expose to the webview: the stored API key is never
@@ -64,8 +65,9 @@ type AIChatMessage struct {
 // AIModel separates the gateway's friendly identifier from the exact model
 // name required by the chat-completions dataplane.
 type AIModel struct {
-	ID    string `json:"id"`
-	Model string `json:"model"`
+	ID       string `json:"id"`
+	Model    string `json:"model"`
+	Thinking bool   `json:"thinking"`
 }
 
 type Preferences struct {

@@ -671,9 +671,9 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
   const [messages, setMessages] = useState<AIChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
-  const [queue, setQueue] = useState<{ id: number; content: string; model: string }[]>([])
+  const [queue, setQueue] = useState<{ id: number; content: string; model: string; thinking: boolean }[]>([])
   const [errors, setErrors] = useState<{ id: number; message: string }[]>([])
-  const [models, setModels] = useState<AIModel[]>(model ? [{ id: model, model }] : [])
+  const [models, setModels] = useState<AIModel[]>(model ? [{ id: model, model, thinking: false }] : [])
   const [selectedModel, setSelectedModel] = useState(model)
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelsError, setModelsError] = useState<string | null>(null)
@@ -717,6 +717,7 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
       })
       .catch((err) => {
         if (!active) return
+        setModels([])
         setModelsError(String(err))
       })
       .finally(() => {
@@ -742,8 +743,9 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
 
   const send = () => {
     const content = draft.trim()
-    if (!content || !selectedModel) return
-    setQueue((current) => [...current, { id: ++requestId.current, content, model: selectedModel }])
+    const selected = models.find((available) => available.model === selectedModel)
+    if (!content || modelsLoading || !selected) return
+    setQueue((current) => [...current, { id: ++requestId.current, content, model: selected.model, thinking: selected.thinking }])
     setDraft('')
     requestAnimationFrame(() => inputRef.current?.focus())
   }
@@ -761,7 +763,7 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
     setStreamedAnswer('')
     streamedThinkingRef.current = ''
     setStreamedThinking('')
-    void aiChat(next, request.model, streamRequestId)
+    void aiChat(next, request.model, streamRequestId, request.thinking)
       .then((answer) => {
         const thinking = streamedThinkingRef.current
         historyRef.current = [
@@ -883,7 +885,11 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
             }
           }}
         />
-        <button className="primary" type="submit" disabled={!draft.trim() || !selectedModel}>
+        <button
+          className="primary"
+          type="submit"
+          disabled={!draft.trim() || modelsLoading || !models.some((available) => available.model === selectedModel)}
+        >
           {busy || queue.length > 0 ? 'Queue' : 'Send'}
         </button>
       </form>

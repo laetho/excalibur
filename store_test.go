@@ -135,7 +135,7 @@ func TestRequestAIModels(t *testing.T) {
 			t.Errorf("authorization = %q", got)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"data":[{"id":"zeta-id","model":"zeta"},{"id":"alpha-id","model":"alpha"},{"id":"duplicate-id","model":"alpha"},{"id":"id-only"},{"model":""}]}`))
+		_, _ = writer.Write([]byte(`{"data":[{"id":"zeta-id","model":"zeta","reasoning":true},{"id":"alpha-id","model":"alpha","reasoning":true,"options":{"chat_template_kwargs":{"enable_thinking":false}}},{"id":"duplicate-id","model":"alpha"},{"id":"id-only"},{"model":""}]}`))
 	}))
 	defer server.Close()
 
@@ -143,7 +143,7 @@ func TestRequestAIModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []AIModel{{ID: "alpha-id", Model: "alpha"}, {ID: "zeta-id", Model: "zeta"}}
+	want := []AIModel{{ID: "alpha-id", Model: "alpha", Thinking: false}, {ID: "zeta-id", Model: "zeta", Thinking: true}}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %#v", models)
 	}
@@ -158,8 +158,9 @@ func TestOpenAIRequestIncludesCanvasToolAndOptionalKey(t *testing.T) {
 			t.Errorf("authorization = %q", got)
 		}
 		var payload struct {
-			Model string `json:"model"`
-			Tools []struct {
+			Model              string          `json:"model"`
+			ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs"`
+			Tools              []struct {
 				Function struct {
 					Name string `json:"name"`
 				} `json:"function"`
@@ -172,6 +173,9 @@ func TestOpenAIRequestIncludesCanvasToolAndOptionalKey(t *testing.T) {
 		}
 		if payload.Model != "test-model" || len(payload.Tools) != 2 || payload.Tools[0].Function.Name != canvasToolName || payload.Tools[1].Function.Name != canvasOperationsTool {
 			t.Errorf("unexpected request: %#v", payload)
+		}
+		if payload.ChatTemplateKwargs != nil {
+			t.Errorf("thinking options were sent for a non-thinking model: %#v", payload.ChatTemplateKwargs)
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
@@ -261,7 +265,7 @@ func TestOpenAIStreamingToolCall(t *testing.T) {
 	defer server.Close()
 
 	message, err := requestAIWithToolChoice(
-		server.Client(), server.URL, AIConfig{Model: "test-model"},
+		server.Client(), server.URL, AIConfig{Model: "test-model", EnableThinking: true},
 		[]openAIMessage{{Role: "user", Content: "draw a box"}},
 		[]any{canvasTool, canvasOperationsToolDefinition}, forceToolChoice(canvasOperationsTool),
 	)

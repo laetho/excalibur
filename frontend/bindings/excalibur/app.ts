@@ -13,8 +13,8 @@ import * as $models from "./models.js";
  * AIChat runs a small OpenAI-compatible tool loop. Dramallama can inspect the
  * current canvas and make bounded, granular, undoable element changes.
  */
-export function AIChat(history: $models.AIChatMessage[] | null, model: string, requestID: string): $CancellablePromise<string> {
-    return $Call.ByID(2573821225, history, model, requestID);
+export function AIChat(history: $models.AIChatMessage[] | null, model: string, requestID: string, enableThinking: boolean): $CancellablePromise<string> {
+    return $Call.ByID(2573821225, history, model, requestID, enableThinking);
 }
 
 export function ActivateSource(sourceID: string, groupID: string): $CancellablePromise<void> {

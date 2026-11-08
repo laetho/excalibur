@@ -93,7 +93,14 @@ type openAIStreamChunk struct {
 }
 
 type openAIModelsResponse struct {
-	Data  []AIModel `json:"data"`
+	Data []struct {
+		ID        string `json:"id"`
+		Model     string `json:"model"`
+		Reasoning bool   `json:"reasoning"`
+		Options   struct {
+			ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs"`
+		} `json:"options"`
+	} `json:"data"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -415,11 +422,14 @@ func requestAIModels(client *http.Client, endpoint, apiKey string) ([]AIModel, e
 			continue
 		}
 		seen[model] = struct{}{}
-		item.Model = model
 		if item.ID == "" {
 			item.ID = model
 		}
-		models = append(models, item)
+		thinking := item.Reasoning
+		if enabled, advertised := item.Options.ChatTemplateKwargs["enable_thinking"]; advertised {
+			thinking = enabled
+		}
+		models = append(models, AIModel{ID: item.ID, Model: model, Thinking: thinking})
 	}
 	if len(models) == 0 {
 		return nil, errors.New("Dramallama returned no models")
@@ -432,7 +442,7 @@ func requestAIModels(client *http.Client, endpoint, apiKey string) ([]AIModel, e
 
 // AIChat runs a small OpenAI-compatible tool loop. Dramallama can inspect the
 // current canvas and make bounded, granular, undoable element changes.
-func (a *App) AIChat(history []AIChatMessage, model, requestID string) (string, error) {
+func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThinking bool) (string, error) {
 	a.mu.Lock()
 	if a.store == nil {
 		a.mu.Unlock()
@@ -451,6 +461,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string) (string, 
 		return "", errors.New("choose a model")
 	}
 	config.Model = model
+	config.EnableThinking = enableThinking
 	endpoint, err := chatCompletionsURL(config.BaseURL)
 	if err != nil {
 		return "", err
@@ -581,9 +592,13 @@ func requestAIWithToolChoice(client *http.Client, endpoint string, config AIConf
 }
 
 func requestAIWithToolChoiceStream(client *http.Client, endpoint string, config AIConfig, messages []openAIMessage, tools []any, toolChoice any, onDelta func(aiStreamKind, string)) (openAIMessage, error) {
+	var chatTemplateKwargs map[string]bool
+	if config.EnableThinking {
+		chatTemplateKwargs = map[string]bool{"enable_thinking": true}
+	}
 	payload, err := json.Marshal(openAIRequest{
 		Model: config.Model, Messages: messages, Tools: tools, ToolChoice: toolChoice, Stream: true,
-		ChatTemplateKwargs: map[string]bool{"enable_thinking": true},
+		ChatTemplateKwargs: chatTemplateKwargs,
 	})
 	if err != nil {
 		return openAIMessage{}, err
