@@ -61,9 +61,12 @@ tasks:
 
   test:
     desc: Run Go tests and verify the frontend production build
+    deps:
+      # main.go embeds frontend/dist, so a clean checkout must build the
+      # frontend before `go test` compiles the root package.
+      - task: common:build:frontend
     cmds:
       - go test ./...
-      - task: common:build:frontend
 
   run:
     desc: Run the built application and local JetStream-enabled NATS server

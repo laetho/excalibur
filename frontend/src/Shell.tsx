@@ -411,6 +411,7 @@ export default function Shell() {
       <main className="main">
         <Canvas
           canvasAppearance={snapshot.canvasAppearance}
+          boardId={snapshot.selection}
           collab={
             snapshot.activeSource.startsWith('nats:') && snapshot.selection
               ? { sourceId: snapshot.activeSource, bucket: snapshot.activeGroup, boardId: snapshot.selection }
@@ -431,14 +432,22 @@ export default function Shell() {
             <button
               className={`ai-launcher${aiOpen ? ' open' : ''}`}
               onClick={() => setAIOpen((open) => !open)}
-              title={aiOpen ? 'Close AI assistant' : 'Open AI assistant'}
+              disabled={!openBoard}
+              title={!openBoard ? 'Select a board to use the AI assistant' : aiOpen ? 'Close AI assistant' : 'Open AI assistant'}
               aria-expanded={aiOpen}
               aria-controls="ai-chat-panel"
             >
               AI
             </button>
-            {aiOpen && (
-              <AIChatOverlay baseUrl={snapshot.ai.baseUrl} model={snapshot.ai.model} onClose={closeAI} />
+            {aiOpen && openBoard && (
+              <AIChatOverlay
+                key={openBoard.id}
+                baseUrl={snapshot.ai.baseUrl}
+                model={snapshot.ai.model}
+                boardId={openBoard.id}
+                boardName={openBoard.name}
+                onClose={closeAI}
+              />
             )}
           </>
         )}
@@ -667,7 +676,19 @@ function SourcesNav({
 
 // MARK: - AI assistant
 
-function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: string; onClose: () => void }) {
+function AIChatOverlay({
+  baseUrl,
+  model,
+  boardId,
+  boardName,
+  onClose,
+}: {
+  baseUrl: string
+  model: string
+  boardId: string
+  boardName: string
+  onClose: () => void
+}) {
   const [messages, setMessages] = useState<AIChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -763,7 +784,7 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
     setStreamedAnswer('')
     streamedThinkingRef.current = ''
     setStreamedThinking('')
-    void aiChat(next, request.model, streamRequestId, request.thinking)
+    void aiChat(next, request.model, streamRequestId, boardId, request.thinking)
       .then((answer) => {
         const thinking = streamedThinkingRef.current
         historyRef.current = [
@@ -784,13 +805,13 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
         setBusy(false)
         requestAnimationFrame(() => inputRef.current?.focus())
       })
-  }, [busy, queue])
+  }, [boardId, busy, queue])
 
   return (
     <section id="ai-chat-panel" className="ai-chat-panel" aria-label="Dramallama assistant">
       <header className="ai-chat-header">
         <div>
-          <strong>Dramallama</strong>
+          <strong>Dramallama · {boardName}</strong>
           <select
             aria-label="AI model"
             value={selectedModel}
@@ -812,8 +833,8 @@ function AIChatOverlay({ baseUrl, model, onClose }: { baseUrl: string; model: st
       <div className="ai-chat-messages" aria-live="polite">
         {messages.length === 0 && (
           <div className="ai-chat-empty">
-            <strong>Ask about your canvas</strong>
-            <p>Dramallama can inspect the open .excalidraw file through the canvas tool when it needs it.</p>
+            <strong>Ask about {boardName}</strong>
+            <p>Dramallama reads this board at the start of each turn, so answers and edits stay grounded in the canvas.</p>
           </div>
         )}
         {messages.map((message, index) => (

@@ -169,11 +169,14 @@ export default function Canvas({
   canvasAppearance,
   showEmptyPlaceholder = true,
   collab = null,
+  boardId = null,
 }: {
   canvasAppearance: CanvasAppearance
   showEmptyPlaceholder?: boolean
   /** When set, the open board is on a NATS source and edits/pointers are shared over NATS. */
   collab?: CollabInfo | null
+  /** Wails board identity used to reject late AI edits after a board switch. */
+  boardId?: string | null
 }) {
   const [board, setBoard] = useState<OpenBoard | null>(null)
   const systemTheme = useSystemTheme()
@@ -182,6 +185,7 @@ export default function Canvas({
   const api = useRef<ExcalidrawImperativeAPI | null>(null)
   /** The collaboration target for the current board, kept in a ref so memoized callbacks can read it. */
   const collabRef = useRef(collab)
+  const boardIdRef = useRef(boardId)
   /** True right after a remote scene was applied, so the resulting onChange isn't broadcast back. */
   const applyingRemote = useRef(false)
   const pending = useRef<PendingScene | null>(null)
@@ -206,6 +210,9 @@ export default function Canvas({
   useEffect(() => {
     collabRef.current = collab
   }, [collab])
+  useEffect(() => {
+    boardIdRef.current = boardId
+  }, [boardId])
 
   // Show progress while a library file is imported; Excalidraw itself gives no feedback until it's done.
   useEffect(() => {
@@ -326,7 +333,8 @@ export default function Canvas({
           pendingResult(requestId, null, null)
         }
       }),
-	      onAICanvasOperations((json) => {
+	      onAICanvasOperations((targetBoardId, json) => {
+	        if (targetBoardId !== boardIdRef.current) return
 	        const instance = api.current
 	        if (!instance) return
 	        try {

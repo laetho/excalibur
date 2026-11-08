@@ -89,7 +89,7 @@ export function onCanvasSetLibrary(cb: (json: string | null) => void): Promise<U
 }
 
 /** Granular canvas operations produced by the Wails AI harness. */
-export function onAICanvasOperations(cb: (json: string) => void): Promise<Unlisten> {
+export function onAICanvasOperations(cb: (boardId: string, json: string) => void): Promise<Unlisten> {
   if (isWails) return ipc.onAICanvasOperations(cb)
   return Promise.resolve(() => {})
 }

@@ -126,6 +126,25 @@ func TestAIModelsURLUsesGatewayRoute(t *testing.T) {
 	}
 }
 
+func TestAIChatRejectsBoardSwitch(t *testing.T) {
+	store := testStore(t)
+	if err := store.createBoard("First"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.createBoard("Second"); err != nil {
+		t.Fatal(err)
+	}
+	app := newApp()
+	app.store = store
+
+	if _, _, err := app.canvasDataForAI("First.excalidraw"); !errors.Is(err, errAIChatBoardChanged) {
+		t.Fatalf("canvasDataForAI() error = %v, want board-changed error", err)
+	}
+	if _, err := app.AIChat([]AIChatMessage{{Role: "user", Content: "What is here?"}}, "test-model", "request", "First.excalidraw", false); !errors.Is(err, errAIChatBoardChanged) {
+		t.Fatalf("AIChat() error = %v, want board-changed error", err)
+	}
+}
+
 func TestRequestAIModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/gate/v1/models" {

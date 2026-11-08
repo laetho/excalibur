@@ -102,8 +102,8 @@ export const setApplicationZoom = (zoom: number) => app().SetApplicationZoom(zoo
 export const discoverAIModels = (baseUrl: string, apiKey: string, clearApiKey: boolean) =>
   app().DiscoverAIModels(baseUrl, apiKey, clearApiKey) as Promise<AIModel[]>
 export const setAISettings = (settings: AISettingsUpdate) => app().SetAISettings(settings)
-export const aiChat = (messages: AIChatMessage[], model: string, requestId: string, enableThinking: boolean) =>
-  app().AIChat(messages, model, requestId, enableThinking) as Promise<string>
+export const aiChat = (messages: AIChatMessage[], model: string, requestId: string, boardId: string, enableThinking: boolean) =>
+  app().AIChat(messages, model, requestId, boardId, enableThinking) as Promise<string>
 export const dismissAlert = () => app().DismissAlert()
 export const setWindowTitle = (title: string) => app().SetWindowTitle(title)
 /** Native open dialog for the canvas' "Insert image" / library "Open". */
@@ -164,8 +164,8 @@ export function onTakePending(cb: (requestId: string) => void): Promise<Unlisten
 }
 
 /** A validated granular AI edit to apply through Excalidraw's normal undo/save path. */
-export function onAICanvasOperations(cb: (json: string) => void): Promise<Unlisten> {
-  return listen<{ json: string }>('canvas:ai-operations', (payload) => cb(payload.json))
+export function onAICanvasOperations(cb: (boardId: string, json: string) => void): Promise<Unlisten> {
+  return listen<{ boardId: string; json: string }>('canvas:ai-operations', (payload) => cb(payload.boardId, payload.json))
 }
 
 /** An answer or model-thinking fragment from the active streamed Dramallama response. */

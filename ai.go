@@ -27,6 +27,8 @@ const (
 	aiResponseIdleTimeout  = 5 * time.Minute
 )
 
+var errAIChatBoardChanged = errors.New("the chat board is no longer open")
+
 type aiStreamKind string
 
 const (
@@ -442,13 +444,20 @@ func requestAIModels(client *http.Client, endpoint, apiKey string) ([]AIModel, e
 
 // AIChat runs a small OpenAI-compatible tool loop. Dramallama can inspect the
 // current canvas and make bounded, granular, undoable element changes.
-func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThinking bool) (string, error) {
+func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, enableThinking bool) (string, error) {
 	a.mu.Lock()
 	if a.store == nil {
 		a.mu.Unlock()
 		return "", errors.New("store is not ready")
 	}
 	config := a.store.prefs.AI
+	board := a.store.board(strings.TrimSpace(boardID))
+	if board == nil || a.store.selection != board.ID {
+		a.mu.Unlock()
+		return "", errAIChatBoardChanged
+	}
+	boardID = board.ID
+	boardName := board.Name
 	a.mu.Unlock()
 	if !config.Enabled {
 		return "", errors.New("Dramallama is disabled in Settings")
@@ -472,7 +481,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 
 	messages := []openAIMessage{{
 		Role:    "system",
-		Content: "You are the AI assistant inside Excalibur. Use get_canvas_file whenever answering requires seeing the current drawing. You can modify the drawing with apply_canvas_operations, which exposes the full persisted Excalidraw element model plus z-ordering. Always inspect first, preserve unrelated elements, use existing IDs for updates/deletes/reordering, and prefer a small number of precise operations. x/y are absolute scene coordinates; line, arrow, and freedraw points are numeric [x,y] pairs relative to the element's x/y. Use ellipse for circles. Excalidraw has no triangle type, so use a closed line. Use frameId to place elements in frames, groupIds for groups, containerId/boundElements for bound text, and startBinding/endBinding for connected arrows. Image fileId values must already exist in the inspected document's files map. Use reorder instead of trying to edit Excalidraw's managed index field. After an edit succeeds, normally report the result instead of repeatedly reading and editing. When a tool reports an error, correct the arguments and retry. Never claim to have inspected or changed the canvas unless the corresponding tool succeeded.",
+		Content: fmt.Sprintf("You are the AI assistant inside Excalibur. This conversation belongs only to the currently edited board %q (file %q). The current board is provided through get_canvas_file at the start of every user turn; ground your answer in that board and do not carry assumptions from another board. You can modify the drawing with apply_canvas_operations, which exposes the full persisted Excalidraw element model plus z-ordering. Always inspect first, preserve unrelated elements, use existing IDs for updates/deletes/reordering, and prefer a small number of precise operations. x/y are absolute scene coordinates; line, arrow, and freedraw points are numeric [x,y] pairs relative to the element's x/y. Use ellipse for circles. Excalidraw has no triangle type, so use a closed line. Use frameId to place elements in frames, groupIds for groups, containerId/boundElements for bound text, and startBinding/endBinding for connected arrows. Image fileId values must already exist in the inspected document's files map. Use reorder instead of trying to edit Excalidraw's managed index field. After an edit succeeds, normally report the result instead of repeatedly reading and editing. When a tool reports an error, correct the arguments and retry. Never claim to have inspected or changed the canvas unless the corresponding tool succeeded.", boardName, boardID),
 	}}
 	for _, message := range history {
 		if (message.Role != "user" && message.Role != "assistant") || strings.TrimSpace(message.Content) == "" {
@@ -498,12 +507,12 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 	}
 	for turn := 0; turn < maxAIToolRounds; turn++ {
 		var toolChoice any
-		if editRequested && !canvasInspected {
+		if !canvasInspected {
 			toolChoice = forceToolChoice(canvasToolName)
 		} else if editRequested && !canvasEdited {
 			toolChoice = forceToolChoice(canvasOperationsTool)
 		}
-		answerIsSafe := !editRequested || canvasEdited
+		answerIsSafe := canvasInspected && (!editRequested || canvasEdited)
 		onDelta := func(kind aiStreamKind, delta string) {
 			// Models may reason while preparing required tool calls. Surface that
 			// explicitly, but continue hiding premature prose that could falsely
@@ -521,6 +530,13 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 			if !ok || strings.TrimSpace(content) == "" {
 				return "", errors.New("Dramallama returned an empty response")
 			}
+			if !canvasInspected {
+				messages = append(messages, message, openAIMessage{
+					Role:    "system",
+					Content: "You must inspect the current board with get_canvas_file before answering. Invoke that function now instead of answering from assumptions.",
+				})
+				continue
+			}
 			if editRequested && !canvasEdited {
 				// Some OpenAI-compatible models ignore tool_choice and print a JSON
 				// blueprint as prose. Do not present that as a successful canvas edit.
@@ -537,7 +553,10 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 			result := ""
 			switch call.Function.Name {
 			case canvasToolName:
-				result, err = a.canvasFileForAI()
+				result, err = a.canvasFileForAI(boardID)
+				if errors.Is(err, errAIChatBoardChanged) {
+					return "", err
+				}
 				if err != nil {
 					encoded, _ := json.Marshal(map[string]string{"error": err.Error()})
 					result = string(encoded)
@@ -545,7 +564,14 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 					canvasInspected = true
 				}
 			case canvasOperationsTool:
-				result, err = a.applyCanvasOperationsForAI(call.Function.Arguments)
+				if !canvasInspected {
+					err = errors.New("inspect the current board with get_canvas_file before editing it")
+				} else {
+					result, err = a.applyCanvasOperationsForAI(boardID, call.Function.Arguments)
+				}
+				if errors.Is(err, errAIChatBoardChanged) {
+					return "", err
+				}
 				if err != nil {
 					encoded, _ := json.Marshal(map[string]string{"error": err.Error()})
 					result = string(encoded)
@@ -557,6 +583,9 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID string, enableThi
 			}
 			messages = append(messages, openAIMessage{Role: "tool", ToolCallID: call.ID, Content: result})
 		}
+	}
+	if !canvasInspected {
+		return "", errors.New("Dramallama did not inspect the current board; no contextual answer was produced")
 	}
 	if editRequested && !canvasEdited {
 		return "", errors.New("Dramallama did not invoke the required canvas editing tool; no canvas changes were applied")
@@ -893,8 +922,8 @@ func boundedResponseMessage(body []byte) string {
 	return message
 }
 
-func (a *App) canvasFileForAI() (string, error) {
-	name, data, err := a.canvasDataForAI()
+func (a *App) canvasFileForAI(boardID string) (string, error) {
+	name, data, err := a.canvasDataForAI(boardID)
 	if err != nil {
 		return "", err
 	}
@@ -910,8 +939,18 @@ func (a *App) canvasFileForAI() (string, error) {
 
 // canvasDataForAI obtains the freshest webview state. takePending consumes the
 // frontend's pending save, so persist it immediately before returning it.
-func (a *App) canvasDataForAI() (string, []byte, error) {
+func (a *App) canvasDataForAI(boardID string) (string, []byte, error) {
+	boardID = strings.TrimSpace(boardID)
+	a.mu.Lock()
+	selected := a.store != nil && boardID != "" && a.store.selection == boardID
+	a.mu.Unlock()
+	if !selected {
+		return "", nil, errAIChatBoardChanged
+	}
 	if pending := a.takePending(); pending != nil {
+		if pending.Name+fileExtension != boardID {
+			return "", nil, errAIChatBoardChanged
+		}
 		if err := a.CanvasChange(pending.Name, pending.JSON); err != nil {
 			return "", nil, err
 		}
@@ -919,10 +958,10 @@ func (a *App) canvasDataForAI() (string, []byte, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.store == nil || a.store.selection == "" {
-		return "", nil, errors.New("no canvas is currently selected")
+	if a.store == nil || a.store.selection != boardID {
+		return "", nil, errAIChatBoardChanged
 	}
-	board := a.store.board(a.store.selection)
+	board := a.store.board(boardID)
 	if board == nil {
 		return "", nil, errors.New("the selected canvas is unavailable")
 	}
@@ -930,11 +969,11 @@ func (a *App) canvasDataForAI() (string, []byte, error) {
 	return board.ID, data, err
 }
 
-func (a *App) applyCanvasOperationsForAI(arguments string) (string, error) {
+func (a *App) applyCanvasOperationsForAI(boardID, arguments string) (string, error) {
 	if len(arguments) > maxCanvasOperationArgs {
 		return "", errors.New("canvas operation request is too large")
 	}
-	name, data, err := a.canvasDataForAI()
+	name, data, err := a.canvasDataForAI(boardID)
 	if err != nil {
 		return "", err
 	}
@@ -945,7 +984,7 @@ func (a *App) applyCanvasOperationsForAI(arguments string) (string, error) {
 	// The frontend restores/normalizes the elements before applying them and
 	// captures the update in Excalidraw's undo stack. Its regular onChange path
 	// then persists and broadcasts the scene.
-	a.emit("canvas:ai-operations", map[string]any{"json": string(updated)})
+	a.emit("canvas:ai-operations", map[string]any{"boardId": boardID, "json": string(updated)})
 	result["filename"] = name
 	encoded, err := json.Marshal(result)
 	return string(encoded), err
