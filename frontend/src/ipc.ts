@@ -38,7 +38,15 @@ export type GroupInfo = { id: string; name: string; kind: 'folder' | 'bucket' }
 export type SourceInfo = { id: string; name: string; kind: 'local' | 'nats'; groups: GroupInfo[] }
 
 /** A NATS server the user added (persisted in preferences). */
-export type NatsServerConfig = { id: string; name: string; url: string; username: string; password: string; buckets: string[] }
+export type NatsServerConfig = {
+  id: string
+  name: string
+  url: string
+  username: string
+  password: string
+  credentialsFile: string
+  buckets: string[]
+}
 export type AISettings = { enabled: boolean; baseUrl: string; model: string; hasApiKey: boolean }
 export type AISettingsUpdate = { enabled: boolean; baseUrl: string; model: string; apiKey: string; clearApiKey: boolean }
 export type AIChatMessage = { role: 'user' | 'assistant'; content: string; thinking?: string }
@@ -52,6 +60,7 @@ export type StoreSnapshot = {
   showThumbnails: boolean
   canvasAppearance: CanvasAppearance
   applicationZoom: number
+  collaborationNickname: string
   alerts: Notice[]
   isAlertPresented: boolean
   /** The navigation tree: local folder + NATS servers with their buckets. */
@@ -99,6 +108,7 @@ export const setSort = (order: BoardSortOrder) => app().SetSort(order)
 export const setShowThumbnails = (show: boolean) => app().SetShowThumbnails(show)
 export const setCanvasAppearance = (appearance: CanvasAppearance) => app().SetCanvasAppearance(appearance)
 export const setApplicationZoom = (zoom: number) => app().SetApplicationZoom(zoom)
+export const setCollaborationNickname = (nickname: string) => app().SetCollaborationNickname(nickname)
 export const discoverAIModels = (baseUrl: string, apiKey: string, clearApiKey: boolean) =>
   app().DiscoverAIModels(baseUrl, apiKey, clearApiKey) as Promise<AIModel[]>
 export const setAISettings = (settings: AISettingsUpdate) => app().SetAISettings(settings)
@@ -115,6 +125,8 @@ export const saveFile = (fileName: string, dataUrl: string) => app().SaveFile(fi
 
 /** Adds a NATS server (connects, lists its buckets, persists it in preferences). */
 export const addNatsServer = (config: NatsServerConfig) => app().AddNatsServer(config)
+/** Opens a native picker and returns a NATS .creds path without reading its secret contents into the webview. */
+export const chooseNatsCredentialsFile = () => app().ChooseNatsCredentialsFile() as Promise<string>
 /** Removes a NATS server by id. */
 export const removeNatsServer = (id: string) => app().RemoveNatsServer(id)
 /** Adds a bucket to a NATS source (creates it on the server if needed). */

@@ -23,12 +23,13 @@ type Viewport struct {
 }
 
 type NatsServerConfig struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	URL      string   `json:"url"`
-	Username string   `json:"username,omitempty"`
-	Password string   `json:"password,omitempty"`
-	Buckets  []string `json:"buckets"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	URL             string   `json:"url"`
+	Username        string   `json:"username,omitempty"`
+	Password        string   `json:"password,omitempty"`
+	CredentialsFile string   `json:"credentialsFile,omitempty"`
+	Buckets         []string `json:"buckets"`
 }
 
 type AIConfig struct {
@@ -78,6 +79,7 @@ type Preferences struct {
 	CanvasAppearance string              `json:"canvasAppearance"`
 	ApplicationZoom  float64             `json:"applicationZoom"`
 	ShowThumbnails   *bool               `json:"showThumbnails,omitempty"`
+	CollabNickname   string              `json:"collaborationNickname,omitempty"`
 	NatsServers      []NatsServerConfig  `json:"natsServers"`
 	ActiveSource     string              `json:"activeSource,omitempty"`
 	ActiveGroup      string              `json:"activeGroup,omitempty"`
@@ -136,6 +138,7 @@ type StoreSnapshot struct {
 	ShowThumbnails   bool         `json:"showThumbnails"`
 	CanvasAppearance string       `json:"canvasAppearance"`
 	ApplicationZoom  float64      `json:"applicationZoom"`
+	CollabNickname   string       `json:"collaborationNickname"`
 	Alerts           []Notice     `json:"alerts"`
 	IsAlertPresented bool         `json:"isAlertPresented"`
 	Sources          []SourceInfo `json:"sources"`

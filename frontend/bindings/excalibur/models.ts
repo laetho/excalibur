@@ -58,6 +58,7 @@ export interface NatsServerConfig {
     "url": string;
     "username"?: string;
     "password"?: string;
+    "credentialsFile"?: string;
     "buckets": string[] | null;
 }
 
@@ -87,6 +88,7 @@ export interface StoreSnapshot {
     "showThumbnails": boolean;
     "canvasAppearance": string;
     "applicationZoom": number;
+    "collaborationNickname": string;
     "alerts": Notice[] | null;
     "isAlertPresented": boolean;
     "sources": SourceInfo[] | null;

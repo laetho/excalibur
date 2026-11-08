@@ -699,6 +699,17 @@ button.secondary:hover {
   border-color: var(--accent);
 }
 
+.collaboration-nickname-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collaboration-nickname-value .settings-text-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .ai-enabled-row {
   align-items: center;
 }
@@ -816,6 +827,22 @@ button.secondary:hover {
 
 .nats-add-server input:focus {
   border-color: var(--accent);
+}
+
+.nats-credentials-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nats-credentials-picker input {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.modal > .nats-credentials-picker {
+  margin-top: 10px;
 }
 
 .segmented {

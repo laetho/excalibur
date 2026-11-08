@@ -57,6 +57,14 @@ export function ChooseImport(): $CancellablePromise<void> {
     return $Call.ByID(3562449701);
 }
 
+/**
+ * ChooseNatsCredentialsFile returns only the selected path. The credential
+ * contents and private NKey seed never enter the webview.
+ */
+export function ChooseNatsCredentialsFile(): $CancellablePromise<string> {
+    return $Call.ByID(3631643292);
+}
+
 export function CollabJoin(sourceID: string, bucket: string, boardID: string): $CancellablePromise<void> {
     return $Call.ByID(2020783928, sourceID, bucket, boardID);
 }
@@ -158,6 +166,14 @@ export function SetApplicationZoom(zoom: number): $CancellablePromise<void> {
 
 export function SetCanvasAppearance(appearance: string): $CancellablePromise<void> {
     return $Call.ByID(1923369469, appearance);
+}
+
+/**
+ * SetCollaborationNickname sets the name shown beside this client's cursor in
+ * NATS collaboration sessions. An empty value keeps the anonymous peer label.
+ */
+export function SetCollaborationNickname(nickname: string): $CancellablePromise<void> {
+    return $Call.ByID(3675270744, nickname);
 }
 
 export function SetShowThumbnails(show: boolean): $CancellablePromise<void> {

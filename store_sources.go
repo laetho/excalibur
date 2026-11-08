@@ -42,10 +42,10 @@ func (s *Store) importPaths(paths []string) error {
 }
 
 func (s *Store) addNatsServer(config NatsServerConfig) error {
-	config.ID, config.Name, config.URL = strings.TrimSpace(config.ID), strings.TrimSpace(config.Name), strings.TrimSpace(config.URL)
-	config.Username = strings.TrimSpace(config.Username)
-	if config.ID == "" || config.Name == "" || config.URL == "" {
-		return errors.New("server name and URL are required")
+	var err error
+	config, err = normalizeNatsServerConfig(config)
+	if err != nil {
+		return err
 	}
 	for _, existing := range s.prefs.NatsServers {
 		if existing.ID == config.ID {

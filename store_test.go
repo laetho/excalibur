@@ -95,6 +95,86 @@ func TestDataURLAndCollaborationSubject(t *testing.T) {
 	}
 }
 
+func TestNormalizeCollaborationNickname(t *testing.T) {
+	if got, err := normalizeCollaborationNickname("  Merlin  "); err != nil || got != "Merlin" {
+		t.Fatalf("normalized nickname = %q, %v", got, err)
+	}
+	if got, err := normalizeCollaborationNickname("   "); err != nil || got != "" {
+		t.Fatalf("blank nickname = %q, %v", got, err)
+	}
+	if _, err := normalizeCollaborationNickname("line\nbreak"); err == nil {
+		t.Fatal("nickname containing a control character should be rejected")
+	}
+	if _, err := normalizeCollaborationNickname(strings.Repeat("x", maxCollaborationNicknameLength+1)); err == nil {
+		t.Fatal("overlong nickname should be rejected")
+	}
+	if got, err := normalizeCollaborationNickname(strings.Repeat("🗡", maxCollaborationNicknameLength)); err != nil || got == "" {
+		t.Fatalf("rune-length nickname = %q, %v", got, err)
+	}
+}
+
+func TestSetCollaborationNicknamePersists(t *testing.T) {
+	store := testStore(t)
+	app := newApp()
+	app.store = store
+	if err := app.SetCollaborationNickname("  Merlin  "); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.snapshot().CollabNickname; got != "Merlin" {
+		t.Fatalf("snapshot nickname = %q", got)
+	}
+	data, err := os.ReadFile(store.prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prefs Preferences
+	if err = json.Unmarshal(data, &prefs); err != nil {
+		t.Fatal(err)
+	}
+	if prefs.CollabNickname != "Merlin" {
+		t.Fatalf("persisted nickname = %q", prefs.CollabNickname)
+	}
+}
+
+func TestNormalizeNatsServerConfigCredentialsFile(t *testing.T) {
+	credentials := filepath.Join(t.TempDir(), "operator.creds")
+	if err := os.WriteFile(credentials, []byte("test credentials"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := normalizeNatsServerConfig(NatsServerConfig{
+		ID:              " server ",
+		Name:            " Secure NATS ",
+		URL:             " nats://example.test:4222 ",
+		Username:        " ignored ",
+		Password:        "ignored",
+		CredentialsFile: " " + credentials + " ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ID != "server" || config.Name != "Secure NATS" || config.URL != "nats://example.test:4222" {
+		t.Fatalf("server fields were not normalized: %#v", config)
+	}
+	if config.CredentialsFile != credentials {
+		t.Fatalf("credentials file = %q, want %q", config.CredentialsFile, credentials)
+	}
+	if config.Username != "" || config.Password != "" {
+		t.Fatalf("credentials file should replace username/password: %#v", config)
+	}
+}
+
+func TestNormalizeNatsServerConfigRejectsInvalidCredentialsPath(t *testing.T) {
+	base := NatsServerConfig{ID: "server", Name: "Secure NATS", URL: "nats://example.test:4222"}
+	base.CredentialsFile = filepath.Join(t.TempDir(), "missing.creds")
+	if _, err := normalizeNatsServerConfig(base); err == nil || !strings.Contains(err.Error(), "could not access NATS credentials file") {
+		t.Fatalf("missing credentials error = %v", err)
+	}
+	base.CredentialsFile = t.TempDir()
+	if _, err := normalizeNatsServerConfig(base); err == nil || !strings.Contains(err.Error(), "is not a file") {
+		t.Fatalf("directory credentials error = %v", err)
+	}
+}
+
 func TestChatCompletionsURL(t *testing.T) {
 	cases := map[string]string{
 		"https://ai.example":                     "https://ai.example/v1/chat/completions",

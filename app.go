@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fsnotify/fsnotify"
 	nats "github.com/nats-io/nats.go"
@@ -373,6 +375,15 @@ func (a *App) ChooseFolder() error {
 	return nil
 }
 
+// ChooseNatsCredentialsFile returns only the selected path. The credential
+// contents and private NKey seed never enter the webview.
+func (a *App) ChooseNatsCredentialsFile() (string, error) {
+	return a.wailsApp.Dialog.OpenFile().
+		SetTitle("Choose NATS Credentials File").
+		AddFilter("NATS credentials", "*.creds").
+		PromptForSingleSelection()
+}
+
 func revealPath(path string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
@@ -434,6 +445,36 @@ func (a *App) SetCanvasAppearance(appearance string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.store.prefs.CanvasAppearance = appearance
+	a.store.savePrefs()
+	a.emitSnapshotLocked()
+	return nil
+}
+
+const maxCollaborationNicknameLength = 40
+
+func normalizeCollaborationNickname(nickname string) (string, error) {
+	nickname = strings.TrimSpace(nickname)
+	if utf8.RuneCountInString(nickname) > maxCollaborationNicknameLength {
+		return "", fmt.Errorf("nickname must be %d characters or fewer", maxCollaborationNicknameLength)
+	}
+	for _, r := range nickname {
+		if unicode.IsControl(r) {
+			return "", errors.New("nickname cannot contain control characters")
+		}
+	}
+	return nickname, nil
+}
+
+// SetCollaborationNickname sets the name shown beside this client's cursor in
+// NATS collaboration sessions. An empty value keeps the anonymous peer label.
+func (a *App) SetCollaborationNickname(nickname string) error {
+	nickname, err := normalizeCollaborationNickname(nickname)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store.prefs.CollabNickname = nickname
 	a.store.savePrefs()
 	a.emitSnapshotLocked()
 	return nil

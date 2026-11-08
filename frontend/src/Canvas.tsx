@@ -64,7 +64,7 @@ const PEER_COLORS = [
 
 type CollabMessage =
   | { type: 'scene'; json: string }
-  | { type: 'pointer'; peerId: string; x: number; y: number; tool: 'pointer' | 'laser' }
+  | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser' }
 
 type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems }
 
@@ -73,6 +73,15 @@ type OpenBoard = { name: string; data: ImportedDataState; key: number; library: 
  * (`hasContent` tells whether to wait for the board's elements to arrive before fitting).
  */
 type InitialView = { saved: Viewport | null; hasContent: boolean }
+
+function collaborationDisplayName(remotePeerId: string, nickname?: string): string {
+  const cleaned = Array.from(nickname?.trim() ?? '').filter((character) => {
+    const code = character.codePointAt(0) ?? 0
+    return code > 31 && (code < 127 || code > 159)
+  })
+  const limited = cleaned.slice(0, 40).join('')
+  return limited || `Peer ${remotePeerId.slice(0, 4)}`
+}
 
 /** The latest unsaved scene. Serialized only when it's actually sent, not on every change (which can be every mouse move). */
 type PendingScene = { name: string; elements: readonly ExcalidrawElement[]; appState: AppState; files: BinaryFiles }
@@ -170,6 +179,7 @@ export default function Canvas({
   showEmptyPlaceholder = true,
   collab = null,
   boardId = null,
+  collaborationNickname = '',
 }: {
   canvasAppearance: CanvasAppearance
   showEmptyPlaceholder?: boolean
@@ -177,6 +187,8 @@ export default function Canvas({
   collab?: CollabInfo | null
   /** Wails board identity used to reject late AI edits after a board switch. */
   boardId?: string | null
+  /** Name advertised beside this client's cursor during NATS collaboration. */
+  collaborationNickname?: string
 }) {
   const [board, setBoard] = useState<OpenBoard | null>(null)
   const systemTheme = useSystemTheme()
@@ -395,7 +407,7 @@ export default function Canvas({
         const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
         collaborators.set(message.peerId as SocketId, {
           pointer: { x: message.x, y: message.y, tool: message.tool },
-          username: `Peer ${message.peerId.slice(0, 4)}`,
+          username: collaborationDisplayName(message.peerId, message.nickname),
           color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
         })
         api.current?.updateScene({ collaborators })
@@ -478,7 +490,8 @@ export default function Canvas({
         onPointerUpdate={(payload) => {
           const target = collabRef.current
           if (!target) return
-          const message: CollabMessage = { type: 'pointer', peerId, x: payload.pointer.x, y: payload.pointer.y, tool: 'pointer' }
+          const nickname = collaborationNickname.trim() || undefined
+          const message: CollabMessage = { type: 'pointer', peerId, nickname, x: payload.pointer.x, y: payload.pointer.y, tool: 'pointer' }
           collabSend(target.boardId, JSON.stringify(message))
         }}
         onLibraryChange={(items) => {

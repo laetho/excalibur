@@ -31,7 +31,8 @@ Build for the host with `task build` and run checks with `task test`.
 `nats://127.0.0.1:42222`, with persistent development data in `.dev/nats`.
 Run only the server with `task dev:nats`. An already-running local server is
 reused after verifying that JetStream is available. Add the local URL in Settings; NATS
-username and password are optional.
+username/password or a standard `.creds` credentials file are optional. Credentials-file
+contents remain on the native side and are loaded directly by the NATS client.
 Set `EXCALIBUR_DEV_NATS_PORT` to use another development port. The former
 `EXCALIWAILS_DEV_NATS_PORT` name remains supported for compatibility.
 `task run` also starts or reuses this server while running the built application.

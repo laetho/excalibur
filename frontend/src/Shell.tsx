@@ -7,6 +7,7 @@ import {
   aiChat,
   chooseFolder,
   chooseImport,
+  chooseNatsCredentialsFile,
   copyBoardToSource,
   createBoard,
   discoverAIModels,
@@ -26,6 +27,7 @@ import {
   selectBoard,
   setCanvasAppearance,
   setApplicationZoom,
+  setCollaborationNickname,
   setAISettings,
   setShowThumbnails,
   setSort,
@@ -411,6 +413,7 @@ export default function Shell() {
       <main className="main">
         <Canvas
           canvasAppearance={snapshot.canvasAppearance}
+          collaborationNickname={snapshot.collaborationNickname}
           boardId={snapshot.selection}
           collab={
             snapshot.activeSource.startsWith('nats:') && snapshot.selection
@@ -985,12 +988,38 @@ function CopyableAIError({ message, onDismiss }: { message: string; onDismiss?: 
   )
 }
 
-/** Dialog for adding a NATS server (name + URL). Buckets are listed after connecting. */
+function NatsCredentialsPicker({ value, onChange }: { value: string; onChange: (path: string) => void }) {
+  const choose = async () => {
+    try {
+      const path = await chooseNatsCredentialsFile()
+      if (path) onChange(path)
+    } catch (err) {
+      log('error', `Could not choose a NATS credentials file: ${String(err)}`)
+    }
+  }
+
+  return (
+    <div className="nats-credentials-picker">
+      <input value={value} readOnly placeholder="Credentials file (.creds, optional)" aria-label="NATS credentials file" title={value} />
+      <button type="button" className="secondary" onClick={choose}>
+        Choose…
+      </button>
+      {value && (
+        <button type="button" className="secondary" onClick={() => onChange('')}>
+          Clear
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Dialog for adding a NATS server. Buckets are listed after connecting. */
 function AddServerDialog({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [credentialsFile, setCredentialsFile] = useState('')
   const [busy, setBusy] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -1004,7 +1033,15 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
   const confirm = async () => {
     if (problem || busy) return
     setBusy(true)
-    const config: NatsServerConfig = { id: newServerId(), name: trimmedName, url: trimmedUrl, username: username.trim(), password, buckets: [] }
+    const config: NatsServerConfig = {
+      id: newServerId(),
+      name: trimmedName,
+      url: trimmedUrl,
+      username: username.trim(),
+      password,
+      credentialsFile,
+      buckets: [],
+    }
     try {
       await addNatsServer(config)
       onClose()
@@ -1046,6 +1083,7 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
           value={username}
           autoComplete="username"
           placeholder="Username (optional)"
+          disabled={Boolean(credentialsFile)}
           onChange={(event) => setUsername(event.target.value)}
         />
         <input
@@ -1053,13 +1091,24 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
           type="password"
           autoComplete="current-password"
           placeholder="Password (optional)"
+          disabled={Boolean(credentialsFile)}
           onChange={(event) => setPassword(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') confirm()
             if (event.key === 'Escape') onClose()
           }}
         />
-        <p className={problem ? 'problem' : 'hint'}>{problem ?? 'Boards live in buckets on this server.'}</p>
+        <NatsCredentialsPicker
+          value={credentialsFile}
+          onChange={(path) => {
+            setCredentialsFile(path)
+            if (path) {
+              setUsername('')
+              setPassword('')
+            }
+          }}
+        />
+        <p className={problem ? 'problem' : 'hint'}>{problem ?? 'Authenticate with username/password or a standard NATS .creds file.'}</p>
         <div className="modal-actions">
           <button className="secondary" disabled={busy} onClick={onClose}>
             Cancel
@@ -1222,6 +1271,10 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
   const [serverUrl, setServerUrl] = useState('')
   const [serverUsername, setServerUsername] = useState('')
   const [serverPassword, setServerPassword] = useState('')
+  const [serverCredentialsFile, setServerCredentialsFile] = useState('')
+  const [collaborationNickname, setCollaborationNicknameValue] = useState(snapshot.collaborationNickname)
+  const [collaborationNicknameError, setCollaborationNicknameError] = useState<string | null>(null)
+  const [collaborationNicknameSaving, setCollaborationNicknameSaving] = useState(false)
   const [bucketFor, setBucketFor] = useState<string | null>(null)
   const [bucketName, setBucketName] = useState('')
   const [aiEnabled, setAIEnabled] = useState(snapshot.ai.enabled)
@@ -1236,6 +1289,19 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
   const loadedInitialAIModels = useRef(false)
 
   const natsSources = snapshot.sources.filter((source) => source.kind === 'nats')
+
+  const saveCollaborationNickname = async () => {
+    setCollaborationNicknameSaving(true)
+    setCollaborationNicknameError(null)
+    try {
+      await setCollaborationNickname(collaborationNickname)
+      setCollaborationNicknameValue(collaborationNickname.trim())
+    } catch (err) {
+      setCollaborationNicknameError(String(err))
+    } finally {
+      setCollaborationNicknameSaving(false)
+    }
+  }
 
   const loadAIModels = useCallback(async () => {
     setAIModelsLoading(true)
@@ -1265,13 +1331,22 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
     const name = serverName.trim()
     const url = serverUrl.trim()
     if (!name || !url) return
-    const config: NatsServerConfig = { id: newServerId(), name, url, username: serverUsername.trim(), password: serverPassword, buckets: [] }
+    const config: NatsServerConfig = {
+      id: newServerId(),
+      name,
+      url,
+      username: serverUsername.trim(),
+      password: serverPassword,
+      credentialsFile: serverCredentialsFile,
+      buckets: [],
+    }
     try {
       await addNatsServer(config)
       setServerName('')
       setServerUrl('')
       setServerUsername('')
       setServerPassword('')
+      setServerCredentialsFile('')
     } catch (err) {
       log('error', `Could not add the NATS server: ${String(err)}`)
     }
@@ -1383,6 +1458,35 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
         </section>
         <section>
           <h3>NATS Servers</h3>
+          <div className="settings-row">
+            <span className="settings-label">Collaboration nickname</span>
+            <div className="settings-value collaboration-nickname-value">
+              <input
+                className="settings-text-input"
+                value={collaborationNickname}
+                maxLength={40}
+                placeholder="Peer name (optional)"
+                aria-label="Collaboration nickname"
+                onChange={(event) => {
+                  setCollaborationNicknameValue(event.target.value)
+                  setCollaborationNicknameError(null)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !collaborationNicknameSaving) void saveCollaborationNickname()
+                }}
+              />
+              <button
+                className="secondary"
+                disabled={collaborationNicknameSaving || collaborationNickname.trim() === snapshot.collaborationNickname}
+                onClick={() => void saveCollaborationNickname()}
+              >
+                {collaborationNicknameSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+          <p className={collaborationNicknameError ? 'problem' : 'settings-note'}>
+            {collaborationNicknameError ?? 'Shown beside your cursor in collaboration sessions. Leave blank to use an anonymous Peer name.'}
+          </p>
           {natsSources.length === 0 ? (
             <p className="settings-note">
               No NATS servers yet. Add one to keep boards on a server (in buckets) and collaborate live. Boards stay on the server when you
@@ -1449,17 +1553,34 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
                 if (event.key === 'Enter') addServer()
               }}
             />
-            <input value={serverUsername} placeholder="Username (optional)" onChange={(event) => setServerUsername(event.target.value)} />
+            <input
+              value={serverUsername}
+              placeholder="Username (optional)"
+              disabled={Boolean(serverCredentialsFile)}
+              onChange={(event) => setServerUsername(event.target.value)}
+            />
             <input
               value={serverPassword}
               type="password"
               placeholder="Password (optional)"
+              disabled={Boolean(serverCredentialsFile)}
               onChange={(event) => setServerPassword(event.target.value)}
+            />
+            <NatsCredentialsPicker
+              value={serverCredentialsFile}
+              onChange={(path) => {
+                setServerCredentialsFile(path)
+                if (path) {
+                  setServerUsername('')
+                  setServerPassword('')
+                }
+              }}
             />
             <button className="primary" onClick={addServer}>
               Add Server
             </button>
           </div>
+          <p className="settings-note">Use username/password or choose a standard NATS .creds file. Credential contents stay outside the webview.</p>
         </section>
         <section>
           <h3>AI Assistant</h3>
