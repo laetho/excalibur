@@ -234,7 +234,7 @@ func (s *Store) writeBoard(id string, data []byte, createOnly bool) error {
 	if err != nil {
 		return err
 	}
-	return client.writeObjectMerged(s.activeGroup, id, data)
+	return client.writeObject(s.activeGroup, id, data)
 }
 
 func atomicWrite(path string, data []byte) error {

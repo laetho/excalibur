@@ -14,8 +14,10 @@ import {
 import '@excalidraw/excalidraw/index.css'
 import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
-import type { AppState, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
+import type { AppState, BinaryFileData, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
+import * as Y from 'yjs'
 import {
   canvasChange,
   canvasLibrary,
@@ -65,8 +67,49 @@ const PEER_COLORS = [
 ]
 
 type CollabMessage =
-  | { type: 'scene'; json: string }
+  | { type: 'yjs'; from: string; update: string }
+  | { type: 'sync'; from: string; sv: string }
+  | { type: 'sync-reply'; from: string; update: string }
   | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser' }
+
+/**
+ * AppState keys shared with collaborators through the Yjs document. Selection,
+ * cursor and editing state stay local; only the visual defaults (background and
+ * current tool style) are shared.
+ */
+const APP_STATE_KEYS = [
+  'viewBackgroundColor',
+  'currentItemStrokeColor',
+  'currentItemBackgroundColor',
+  'currentItemFillStyle',
+  'currentItemStrokeWidth',
+  'currentItemStrokeStyle',
+  'currentItemRoughness',
+  'currentItemOpacity',
+  'currentItemFontFamily',
+  'currentItemFontSize',
+  'currentItemTextAlign',
+  'currentItemStartArrowhead',
+  'currentItemEndArrowhead',
+  'currentItemRoundness',
+] as const
+
+/** One element inside the Yjs `elements` array: the whole element plus its z-order key. */
+type YElementItem = { map: Y.Map<unknown>; el: ExcalidrawElement; pos: string }
+
+/** Yjs binary updates ride over NATS as base64 strings. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
 
 type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems }
 
@@ -102,20 +145,192 @@ function parseBoard(json: string): ImportedDataState {
  * scene without clobbering disjoint concurrent edits. Local order is preserved;
  * the remote element wins for overlapping ids; remote-only elements are appended.
  */
-function mergeElements(local: readonly ExcalidrawElement[], remote: readonly ExcalidrawElement[]): ExcalidrawElement[] {
-  const remoteById = new Map(remote.map((element) => [element.id, element]))
+
+function comparePos(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** The elements stored in the Yjs document, in array order (not yet z-sorted). */
+function ydocElements(doc: Y.Doc): YElementItem[] {
+  return (doc.getArray('elements').toArray() as Y.Map<unknown>[]).map((map) => ({
+    map,
+    el: map.get('el') as ExcalidrawElement,
+    pos: map.get('pos') as string,
+  }))
+}
+
+/** The elements in z-order (frontmost last), as Excalidraw expects them. */
+function ydocElementsSorted(doc: Y.Doc): ExcalidrawElement[] {
+  return ydocElements(doc)
+    .sort((a, b) => comparePos(a.pos, b.pos))
+    .map((item) => item.el)
+}
+
+/** The whitelisted AppState keys currently stored in the Yjs document. */
+function ydocAppState(doc: Y.Doc): Partial<AppState> {
+  const map = doc.getMap('appState')
+  const result: Partial<AppState> = {}
+  for (const key of APP_STATE_KEYS) {
+    if (map.has(key)) (result as Record<string, unknown>)[key] = map.get(key)
+  }
+  return result
+}
+
+function ydocFiles(doc: Y.Doc): BinaryFiles {
+  const map = doc.getMap('files')
+  const result: BinaryFiles = {}
+  for (const [id, file] of map) result[id] = file as BinaryFiles[string]
+  return result
+}
+
+/**
+ * Whether an element changed in a way worth writing back to the Yjs document.
+ * Excalidraw bumps `versionNonce` on every mutation, so equal bookkeeping means
+ * unchanged. When it differs, compare the content (excluding the version fields)
+ * so a re-normalization-only bump on an applied remote scene is not echoed back
+ * out as a new edit (which would loop).
+ */
+function elementChanged(a: ExcalidrawElement, b: ExcalidrawElement): boolean {
+  if (a.version === b.version && a.versionNonce === b.versionNonce) return false
+  const strip = ({ version, versionNonce, updated, ...rest }: ExcalidrawElement) => rest
+  return JSON.stringify(strip(a)) !== JSON.stringify(strip(b))
+}
+
+/** Build a Yjs document from a loaded scene (elements, whitelisted appState, files). */
+function buildYdoc(data: ImportedDataState): Y.Doc {
+  const doc = new Y.Doc()
+  doc.transact(() => {
+    const elements = doc.getArray('elements')
+    const items = data.elements ?? []
+    const keys = generateNKeysBetween(null, null, Math.max(items.length, 1))
+    for (let i = 0; i < items.length; i++) {
+      const map = new Y.Map<unknown>()
+      map.set('el', items[i])
+      map.set('pos', keys[i])
+      elements.push([map])
+    }
+    const appState = doc.getMap('appState')
+    for (const key of APP_STATE_KEYS) {
+      const value = (data.appState as Partial<AppState> | undefined)?.[key]
+      if (value !== undefined) appState.set(key, value)
+    }
+    const files = doc.getMap('files')
+    for (const [id, file] of Object.entries(data.files ?? {})) {
+      files.set(id, file)
+    }
+  }, 'local')
+  return doc
+}
+
+/**
+ * Write the current Excalidraw scene into the Yjs document (origin 'local').
+ * Elements are matched by id: changed ones are updated, new ones inserted with a
+ * fractional index between their neighbours, and ones no longer present are
+ * removed. Returns whether anything was written.
+ */
+function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]): boolean {
+  const yArray = doc.getArray('elements')
+  const current = new Map<string, YElementItem>()
+  for (const item of ydocElements(doc)) current.set(item.el.id, item)
+
   const seen = new Set<string>()
-  const merged = local.map((element) => {
-    seen.add(element.id)
-    return remoteById.get(element.id) ?? element
-  })
-  for (const element of remote) {
-    if (!seen.has(element.id)) {
-      seen.add(element.id)
-      merged.push(element)
+  let prevPos: string | null = null
+  const inserts: { el: ExcalidrawElement; pos: string }[] = []
+  const updates: { map: Y.Map<unknown>; el: ExcalidrawElement }[] = []
+  const reorders: { map: Y.Map<unknown>; pos: string }[] = []
+  const removals: Y.Map<unknown>[] = []
+
+  for (let i = 0; i < elements.length; i++) {
+    const el = elements[i]
+    const existing = current.get(el.id)
+    if (existing) {
+      seen.add(el.id)
+      if (prevPos !== null && existing.pos <= prevPos) {
+        // The element moved before its previous neighbour: give it a fresh index.
+        let next = nextPosInNewArray(elements, current, i)
+        if (next !== null && next <= prevPos) next = null
+        const pos = generateKeyBetween(prevPos, next)
+        reorders.push({ map: existing.map, pos })
+        prevPos = pos
+      } else {
+        prevPos = existing.pos
+      }
+      if (elementChanged(existing.el, el)) updates.push({ map: existing.map, el })
+    } else {
+      seen.add(el.id)
+      let next = nextPosInNewArray(elements, current, i)
+      if (prevPos !== null && next !== null && next <= prevPos) next = null
+      const pos = generateKeyBetween(prevPos, next)
+      inserts.push({ el, pos })
+      prevPos = pos
     }
   }
-  return merged
+  for (const [id, item] of current) {
+    if (!seen.has(id)) removals.push(item.map)
+  }
+
+  if (inserts.length + updates.length + reorders.length + removals.length === 0) return false
+
+  doc.transact(() => {
+    for (const { el, pos } of inserts) {
+      const map = new Y.Map<unknown>()
+      map.set('el', el)
+      map.set('pos', pos)
+      yArray.push([map])
+    }
+    for (const { map, el } of updates) map.set('el', el)
+    for (const { map, pos } of reorders) map.set('pos', pos)
+    for (const map of removals) {
+      const index = yArray.toArray().indexOf(map)
+      if (index >= 0) yArray.delete(index)
+    }
+  }, 'local')
+  return true
+}
+
+/** The z-order key of the next element in `elements` (from index i) that is already in the document. */
+function nextPosInNewArray(
+  elements: readonly ExcalidrawElement[],
+  current: Map<string, YElementItem>,
+  i: number,
+): string | null {
+  for (let j = i + 1; j < elements.length; j++) {
+    const existing = current.get(elements[j].id)
+    if (existing) return existing.pos
+  }
+  return null
+}
+
+/** Copy the whitelisted AppState keys into the Yjs document (origin 'local'). */
+function syncAppStateToYdoc(doc: Y.Doc, appState: AppState): void {
+  const map = doc.getMap('appState')
+  doc.transact(() => {
+    for (const key of APP_STATE_KEYS) {
+      const value = appState[key]
+      if (value === undefined) continue
+      if (map.get(key) !== value) map.set(key, value)
+    }
+  }, 'local')
+}
+
+/** Copy files that are new or changed into the Yjs document (origin 'local'). */
+function syncFilesToYdoc(doc: Y.Doc, files: BinaryFiles): void {
+  const map = doc.getMap('files')
+  doc.transact(() => {
+    for (const [id, file] of Object.entries(files)) {
+      if (map.get(id) !== file) map.set(id, file)
+    }
+  }, 'local')
+}
+
+/** Serialize the Yjs document back into a plain scene for persistence. */
+function ydocToScene(doc: Y.Doc): PendingScene {
+  return {
+    name: '',
+    elements: ydocElementsSorted(doc),
+    appState: ydocAppState(doc) as AppState,
+    files: ydocFiles(doc),
+  }
 }
 
 function loadLegacyLibrary(): LibraryItems {
@@ -221,8 +436,14 @@ export default function Canvas({
   /** The collaboration target for the current board, kept in a ref so memoized callbacks can read it. */
   const collabRef = useRef(collab)
   const boardIdRef = useRef(boardId)
-  /** Hash of the scene right after the last remote scene was applied, so the resulting onChange (which fires after render) is recognized as an echo and not broadcast back. */
-  const remoteVersion = useRef<number | null>(null)
+  /** Name of the open board, for serializing the Yjs document on flush. */
+  const boardNameRef = useRef('')
+  /** The Yjs document backing collaboration for the current NATS board, or null when not collaborating. */
+  const ydoc = useRef<Y.Doc | null>(null)
+  /** File ids already handed to Excalidraw (via addFiles), so remote file updates are not re-added. */
+  const appliedFileIds = useRef<Set<string>>(new Set())
+  /** The Yjs document changed since the last flush, so it must be persisted. */
+  const ydocDirty = useRef(false)
   const pending = useRef<PendingScene | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const lastVersion = useRef<number | null>(null)
@@ -285,21 +506,98 @@ export default function Canvas({
 
   const flush = useCallback(() => {
     clearTimeout(timer.current)
-    const scene = pending.current
-    pending.current = null
-    if (scene) {
+    // While collaborating the Yjs document is the source of truth: persist it as a
+    // plain scene snapshot (live sharing happens through Yjs updates, not here).
+    const doc = ydoc.current
+    if (doc && ydocDirty.current) {
+      ydocDirty.current = false
+      const scene = ydocToScene(doc)
+      scene.name = boardNameRef.current
       const { name, json } = serialize(scene)
       canvasChange(name, json)
-      // Share the same scene with collaborators on a NATS board.
-      const target = collabRef.current
-      if (target) {
-        const message: CollabMessage = { type: 'scene', json }
-        collabSend(target.boardId, JSON.stringify(message))
+    } else {
+      const scene = pending.current
+      pending.current = null
+      if (scene) {
+        const { name, json } = serialize(scene)
+        canvasChange(name, json)
       }
     }
     flushView()
     return true
   }, [flushView])
+
+  /**
+   * Push a remote Yjs change into Excalidraw (never captured into undo history),
+   * hand new files to the API, and persist the change. Called from the Yjs
+   * observers for anything that did not originate locally.
+   */
+  const observeYdoc = useCallback(() => {
+    const doc = ydoc.current
+    const instance = api.current
+    if (!doc || !instance) return
+    const elements = ydocElementsSorted(doc)
+    const appState = ydocAppState(doc)
+    const files = ydocFiles(doc)
+    if (hashElementsVersion(elements) !== hashElementsVersion(instance.getSceneElementsIncludingDeleted())) {
+      instance.updateScene({ elements, captureUpdate: CaptureUpdateAction.NEVER })
+    }
+    const current = instance.getAppState()
+    const merged: Partial<AppState> = {}
+    let appChanged = false
+    for (const key of APP_STATE_KEYS) {
+      const value = appState[key]
+      if (value !== undefined && value !== current[key]) {
+        ;(merged as Record<string, unknown>)[key] = value
+        appChanged = true
+      }
+    }
+    if (appChanged) instance.updateScene({ appState: merged as AppState })
+    const newFiles: BinaryFileData[] = []
+    for (const [id, file] of Object.entries(files)) {
+      if (!appliedFileIds.current.has(id)) {
+        appliedFileIds.current.add(id)
+        newFiles.push(file)
+      }
+    }
+    if (newFiles.length > 0) instance.addFiles(newFiles)
+    // Remote changes must be persisted too; the Yjs document is the source of truth.
+    ydocDirty.current = true
+    clearTimeout(timer.current)
+    timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
+  }, [flush])
+
+  /** Yjs observers: ignore local writes (already applied) and the initial build. */
+  const onYdocChange = useCallback((event: Y.YEvent<any>) => {
+    if (event.transaction.origin === 'local' || event.transaction.origin === 'init') return
+    observeYdoc()
+  }, [observeYdoc])
+
+  /** Broadcast our own edits (origin 'local') to collaborators as Yjs binary updates. */
+  const onYdocUpdate = useCallback((_update: Uint8Array, origin: unknown) => {
+    if (origin !== 'local') return
+    const target = collabRef.current
+    if (!target) return
+    const message: CollabMessage = { type: 'yjs', from: peerId, update: bytesToBase64(_update) }
+    collabSend(target.boardId, JSON.stringify(message))
+  }, [])
+
+  const wireYdoc = useCallback(
+    (doc: Y.Doc) => {
+      doc.getArray('elements').observe(onYdocChange)
+      doc.getMap('appState').observe(onYdocChange)
+      doc.getMap('files').observe(onYdocChange)
+      doc.on('update', onYdocUpdate)
+    },
+    [onYdocChange, onYdocUpdate],
+  )
+
+  const teardownYdoc = useCallback(() => {
+    const doc = ydoc.current
+    ydoc.current = null
+    ydocDirty.current = false
+    if (doc) doc.destroy()
+  }, [])
 
   useEffect(() => {
     let key = 0
@@ -312,6 +610,7 @@ export default function Canvas({
         try {
           const data = parseBoard(json)
           setBoard({ name, data, key: ++key, library: library.current })
+          boardNameRef.current = name
           lastVersion.current = null
           trackingView.current = false
           lastView.current = null
@@ -319,12 +618,20 @@ export default function Canvas({
             saved: isViewport(view) ? view : null,
             hasContent: (data.elements ?? []).some((e) => !e.isDeleted),
           }
+          // A NATS board gets a fresh Yjs document; local boards stay on the plain JSON path.
+          teardownYdoc()
+          if (collabRef.current) {
+            ydoc.current = buildYdoc(data)
+            appliedFileIds.current = new Set(Object.keys(data.files ?? {}))
+            wireYdoc(ydoc.current)
+          }
         } catch (err) {
           log('error', `Could not read ${name}: ${String(err)}`)
         }
       }),
       onCanvasRename((name) => {
         setBoard((current) => (current ? { ...current, name } : current))
+        boardNameRef.current = name
         if (pending.current) pending.current = { ...pending.current, name }
         if (pendingView.current) pendingView.current = { ...pendingView.current, name }
       }),
@@ -358,9 +665,10 @@ export default function Canvas({
       }),
       onTakePending((requestId) => {
         clearTimeout(timer.current)
-        const scene = pending.current
-        pending.current = null
         flushView()
+        const doc = ydoc.current
+        const scene = doc ? { ...ydocToScene(doc), name: boardNameRef.current } : pending.current
+        pending.current = null
         if (scene) {
           const { name, json } = serialize(scene)
           pendingResult(requestId, name, json)
@@ -389,18 +697,27 @@ export default function Canvas({
     window.addEventListener('pagehide', flush)
     return () => {
       window.removeEventListener('pagehide', flush)
+      teardownYdoc()
       unlistens.forEach((p) => p.then((unlisten) => unlisten()))
     }
-  }, [flush, flushView])
+  }, [flush, flushView, teardownYdoc, wireYdoc])
 
-  // Join collaboration when a NATS board is open (the backend relays messages as `canvas:collab`).
+  // Join collaboration when a NATS board is open (the backend relays messages as `canvas:collab`),
+  // then ask peers for anything our (bucket-loaded) Yjs document is missing.
   useEffect(() => {
     if (!board || !collab) return
     const { sourceId, bucket, boardId } = collab
-    collabJoin(sourceId, bucket, boardId).catch((err: unknown) => log('error', `Could not join collaboration: ${String(err)}`))
+    collabJoin(sourceId, bucket, boardId)
+      .then(() => {
+        const doc = ydoc.current
+        if (!doc) return
+        const message: CollabMessage = { type: 'sync', from: peerId, sv: bytesToBase64(Y.encodeStateVector(doc)) }
+        collabSend(boardId, JSON.stringify(message))
+      })
+      .catch((err: unknown) => log('error', `Could not join collaboration: ${String(err)}`))
   }, [board?.name, collab])
 
-  // Apply remote scenes and show remote cursors.
+  // Apply remote Yjs updates, answer sync requests, and show remote cursors.
   useEffect(() => {
     let unlisten: (() => void) | undefined
     onCollab((boardId, data) => {
@@ -412,31 +729,36 @@ export default function Canvas({
       } catch {
         return
       }
-      if (message.type === 'scene') {
+      // NATS echoes our own published messages back; ignore them.
+      if ('from' in message && message.from === peerId) return
+      const doc = ydoc.current
+      if (message.type === 'yjs') {
+        if (!doc) return
         try {
-          const scene = JSON.parse(message.json)
-          const elements = scene.elements as ExcalidrawElement[]
-          if (!Array.isArray(elements)) return
-          // Persist and broadcast any unsaved local edits before the remote
-          // scene lands, so the merge below can't clobber them.
-          if (pending.current) flush()
-          const instance = api.current
-          if (!instance) return
-          // Merge by element id instead of replacing, so disjoint concurrent
-          // edits on both sides survive.
-          const merged = mergeElements(instance.getSceneElementsIncludingDeleted(), elements)
-          // Don't capture the remote scene into undo history, and don't broadcast it back.
-          instance.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER })
-          // Remember the exact post-apply hash: the onChange this triggers fires
-          // asynchronously (after render), so match on the hash, not a time window.
-          remoteVersion.current = hashElementsVersion(instance.getSceneElementsIncludingDeleted())
+          Y.applyUpdate(doc, base64ToBytes(message.update), 'remote')
         } catch (err) {
-          log('error', `Could not apply a remote scene: ${String(err)}`)
+          log('error', `Could not apply a remote Yjs update: ${String(err)}`)
+        }
+      } else if (message.type === 'sync') {
+        if (!doc) return
+        try {
+          // The state vector arrives base64-encoded; encodeStateAsUpdate takes it raw.
+          const update = Y.encodeStateAsUpdate(doc, base64ToBytes(message.sv))
+          if (update.byteLength > 0) {
+            const reply: CollabMessage = { type: 'sync-reply', from: peerId, update: bytesToBase64(update) }
+            collabSend(target.boardId, JSON.stringify(reply))
+          }
+        } catch (err) {
+          log('error', `Could not answer a collaboration sync request: ${String(err)}`)
+        }
+      } else if (message.type === 'sync-reply') {
+        if (!doc) return
+        try {
+          Y.applyUpdate(doc, base64ToBytes(message.update), 'remote')
+        } catch (err) {
+          log('error', `Could not apply a collaboration sync reply: ${String(err)}`)
         }
       } else if (message.type === 'pointer') {
-        // NATS delivers our own published messages back to this subscription too.
-        // Ignore them so the local user does not get a second, remote-style cursor.
-        if (message.peerId === peerId) return
         const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
         collaborators.set(message.peerId as SocketId, {
           pointer: { x: message.x, y: message.y, tool: message.tool },
@@ -451,7 +773,7 @@ export default function Canvas({
     return () => {
       unlisten?.()
     }
-  }, [flush])
+  }, [])
 
   const onChange = (elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     if (!board) return
@@ -482,6 +804,9 @@ export default function Canvas({
     // onChange also fires for scrolling, selection etc. Only save when the drawing itself changed.
     const version = hashElementsVersion(elements)
     const fileCount = Object.keys(files).length
+    // Share the whitelisted AppState (background, current style) even when no element changed.
+    const doc = ydoc.current
+    if (doc) syncAppStateToYdoc(doc, appState)
     if (lastVersion.current === null) {
       lastVersion.current = version
       lastFileCount.current = fileCount
@@ -490,17 +815,22 @@ export default function Canvas({
     if (version === lastVersion.current && fileCount === lastFileCount.current) return
     lastVersion.current = version
     lastFileCount.current = fileCount
-    // This change is the echo of the remote scene we just applied; don't save it or broadcast it back.
-    if (version === remoteVersion.current) {
-      remoteVersion.current = null
-      return
+    if (doc) {
+      // Write the diff into the Yjs document (origin 'local'). The observer skips
+      // these, and the diff-based sync means applying a remote scene produces no
+      // writes here, so remote state is never echoed back out.
+      const wrote = syncElementsToYdoc(doc, elements)
+      syncFilesToYdoc(doc, files)
+      if (wrote) {
+        ydocDirty.current = true
+        clearTimeout(timer.current)
+        timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
+      }
+    } else {
+      pending.current = { name: board.name, elements, appState, files }
+      clearTimeout(timer.current)
+      timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
     }
-    remoteVersion.current = null
-    pending.current = { name: board.name, elements, appState, files }
-    clearTimeout(timer.current)
-    // While collaborating, share edits sooner so remote clients see them quickly.
-    const delay = collabRef.current ? COLLAB_DEBOUNCE_MS : SAVE_DEBOUNCE_MS
-    timer.current = setTimeout(flush, delay)
   }
 
   if (!board) {

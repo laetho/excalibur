@@ -95,44 +95,6 @@ func TestDataURLAndCollaborationSubject(t *testing.T) {
 	}
 }
 
-func TestMergeScenesUnionsElementsAndFiles(t *testing.T) {
-	current := []byte(`{"type":"excalidraw","version":2,"elements":[{"id":"a","x":0},{"id":"b","x":1}],"appState":{"viewBackgroundColor":"#fff"},"files":{"f1":"one"}}`)
-	newer := []byte(`{"type":"excalidraw","version":2,"elements":[{"id":"b","x":99},{"id":"c","x":2}],"appState":{"viewBackgroundColor":"#000"},"files":{"f2":"two"}}`)
-
-	merged, err := mergeScenes(current, newer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var scene struct {
-		Elements []map[string]any `json:"elements"`
-		Files    map[string]string `json:"files"`
-	}
-	if err := json.Unmarshal(merged, &scene); err != nil {
-		t.Fatal(err)
-	}
-	// b is in both (newer wins); a is current-only (kept first); c is newer-only (appended).
-	if len(scene.Elements) != 3 {
-		t.Fatalf("elements = %#v", scene.Elements)
-	}
-	if scene.Elements[0]["id"] != "a" || scene.Elements[1]["id"] != "b" || scene.Elements[1]["x"] != float64(99) || scene.Elements[2]["id"] != "c" {
-		t.Fatalf("merged elements = %#v", scene.Elements)
-	}
-	// Files are unioned by key.
-	if len(scene.Files) != 2 || scene.Files["f1"] != "one" || scene.Files["f2"] != "two" {
-		t.Fatalf("merged files = %#v", scene.Files)
-	}
-}
-
-func TestMergeScenesFallsBackOnUnparsableCurrent(t *testing.T) {
-	merged, err := mergeScenes([]byte("not json"), []byte(`{"elements":[{"id":"a"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(merged) != `{"elements":[{"id":"a"}]}` {
-		t.Fatalf("merged = %s", merged)
-	}
-}
-
 func TestNormalizeCollaborationNickname(t *testing.T) {
 	if got, err := normalizeCollaborationNickname("  Merlin  "); err != nil || got != "Merlin" {
 		t.Fatalf("normalized nickname = %q, %v", got, err)
