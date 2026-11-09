@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -153,6 +155,135 @@ func (c *natsClient) deleteObject(bucket, name string) error {
 		return err
 	}
 	return store.Delete(name)
+}
+
+// Collaboration leader lease, stored as a JetStream KV entry per board. The KV
+// compare-and-swap (expected revision) makes acquisition atomic: exactly one
+// client can hold the lease, so only that client writes the board's bucket
+// object (single-writer persistence). The lease expires after a TTL, so a
+// crashed or suspended client is replaced by a follower.
+
+const lockBucket = "excalibur-locks"
+
+type lockValue struct {
+	Owner     string `json:"owner"`
+	ExpiresAt int64  `json:"expiresAt"` // unix milliseconds
+}
+
+func lockKey(bucket, boardID string) string { return bucket + "/" + boardID }
+
+func (c *natsClient) lockKV() (nats.KeyValue, error) {
+	kv, err := c.js.KeyValue(lockBucket)
+	if err == nil {
+		return kv, nil
+	}
+	kv, err = c.js.CreateKeyValue(&nats.KeyValueConfig{Bucket: lockBucket})
+	if err != nil {
+		return nil, fmt.Errorf("could not create lock bucket %q on %s: %w", lockBucket, c.config.Name, err)
+	}
+	return kv, nil
+}
+
+// acquireLock tries to become the leader for a board. It succeeds if the lock
+// is free (or the current holder's lease has expired) and this client's CAS
+// wins. Returns whether this client now owns the lease.
+func (c *natsClient) acquireLock(bucket, boardID, owner string, ttl time.Duration) (bool, error) {
+	kv, err := c.lockKV()
+	if err != nil {
+		return false, err
+	}
+	key := lockKey(bucket, boardID)
+	value, err := json.Marshal(lockValue{Owner: owner, ExpiresAt: time.Now().Add(ttl).UnixMilli()})
+	if err != nil {
+		return false, err
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err = kv.Create(key, value)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, nats.ErrKeyExists) {
+			return false, err
+		}
+		entry, err := kv.Get(key)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			continue // released between Create and Get; retry Create
+		}
+		if err != nil {
+			return false, err
+		}
+		var current lockValue
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			return false, nil
+		}
+		if current.ExpiresAt > time.Now().UnixMilli() {
+			return false, nil // still held
+		}
+		_, err = kv.Update(key, value, entry.Revision())
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, nats.ErrKeyExists) {
+			return false, nil // lost the CAS race to another client
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// renewLock extends the lease if this client still owns it. Returns false when
+// the lease was lost (another client owns it, or it was released).
+func (c *natsClient) renewLock(bucket, boardID, owner string, ttl time.Duration) (bool, error) {
+	kv, err := c.lockKV()
+	if err != nil {
+		return false, err
+	}
+	key := lockKey(bucket, boardID)
+	entry, err := kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var current lockValue
+	if err := json.Unmarshal(entry.Value(), &current); err != nil {
+		return false, nil
+	}
+	if current.Owner != owner {
+		return false, nil
+	}
+	value, err := json.Marshal(lockValue{Owner: owner, ExpiresAt: time.Now().Add(ttl).UnixMilli()})
+	if err != nil {
+		return false, err
+	}
+	_, err = kv.Update(key, value, entry.Revision())
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, nats.ErrKeyExists) {
+		return false, nil
+	}
+	return false, err
+}
+
+// releaseLock removes the lease, but only if this client still owns it (so a
+// stale releaser cannot clobber a lease that was renewed or taken over).
+func (c *natsClient) releaseLock(bucket, boardID, owner string) error {
+	kv, err := c.lockKV()
+	if err != nil {
+		return err
+	}
+	key := lockKey(bucket, boardID)
+	entry, err := kv.Get(key)
+	if err != nil {
+		return err
+	}
+	var current lockValue
+	if err := json.Unmarshal(entry.Value(), &current); err != nil {
+		return nil
+	}
+	if current.Owner != owner {
+		return nil
+	}
+	return kv.Delete(key, nats.LastRevision(entry.Revision()))
 }
 
 var subjectUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]`)

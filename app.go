@@ -663,6 +663,52 @@ func (a *App) CollabJoin(sourceID, bucket, boardID string) error {
 	return nil
 }
 
+// CollabAcquireLock tries to become the single writer for a board. The lease
+// lives in a JetStream KV bucket and is acquired atomically (CAS), so only one
+// client can hold it at a time.
+func (a *App) CollabAcquireLock(boardID, owner string, ttlSeconds int) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store.isLocal() {
+		return true, nil
+	}
+	client, err := a.store.clientFor(a.store.activeSource)
+	if err != nil {
+		return false, err
+	}
+	return client.acquireLock(a.store.activeGroup, boardID, owner, time.Duration(ttlSeconds)*time.Second)
+}
+
+// CollabRenewLock extends the leader lease. Returns false when this client no
+// longer owns it (it should immediately stop writing the bucket).
+func (a *App) CollabRenewLock(boardID, owner string, ttlSeconds int) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store.isLocal() {
+		return true, nil
+	}
+	client, err := a.store.clientFor(a.store.activeSource)
+	if err != nil {
+		return false, err
+	}
+	return client.renewLock(a.store.activeGroup, boardID, owner, time.Duration(ttlSeconds)*time.Second)
+}
+
+// CollabReleaseLock drops the leader lease, but only if this client still owns
+// it. Safe to call when not the owner.
+func (a *App) CollabReleaseLock(boardID, owner string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store.isLocal() {
+		return nil
+	}
+	client, err := a.store.clientFor(a.store.activeSource)
+	if err != nil {
+		return err
+	}
+	return client.releaseLock(a.store.activeGroup, boardID, owner)
+}
+
 func (a *App) SetWindowTitle(title string) {
 	if a.window != nil {
 		a.window.SetTitle(title)

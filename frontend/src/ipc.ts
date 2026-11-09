@@ -147,6 +147,12 @@ export const copyBoardToSource = (boardId: string, targetSource: string, targetG
 export const collabSend = (boardId: string, data: string) => app().CollabSend(boardId, data)
 /** Subscribes the backend to collaboration messages for a board (relayed as `canvas:collab` events). */
 export const collabJoin = (sourceId: string, bucket: string, boardId: string) => app().CollabJoin(sourceId, bucket, boardId)
+/** Tries to become the single writer for a board; the lease is held in a JetStream KV bucket. */
+export const collabAcquireLock = (boardId: string, owner: string, ttlSeconds: number) => app().CollabAcquireLock(boardId, owner, ttlSeconds)
+/** Extends the leader lease; resolves false when this client no longer owns it. */
+export const collabRenewLock = (boardId: string, owner: string, ttlSeconds: number) => app().CollabRenewLock(boardId, owner, ttlSeconds)
+/** Drops the leader lease (only if this client still owns it). */
+export const collabReleaseLock = (boardId: string, owner: string) => app().CollabReleaseLock(boardId, owner)
 
 // MARK: - Events (Rust → JS)
 

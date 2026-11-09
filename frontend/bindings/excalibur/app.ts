@@ -65,8 +65,33 @@ export function ChooseNatsCredentialsFile(): $CancellablePromise<string> {
     return $Call.ByID(3631643292);
 }
 
+/**
+ * CollabAcquireLock tries to become the single writer for a board. The lease
+ * lives in a JetStream KV bucket and is acquired atomically (CAS), so only one
+ * client can hold it at a time.
+ */
+export function CollabAcquireLock(boardID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
+    return $Call.ByID(1857448547, boardID, owner, ttlSeconds);
+}
+
 export function CollabJoin(sourceID: string, bucket: string, boardID: string): $CancellablePromise<void> {
     return $Call.ByID(2020783928, sourceID, bucket, boardID);
+}
+
+/**
+ * CollabReleaseLock drops the leader lease, but only if this client still owns
+ * it. Safe to call when not the owner.
+ */
+export function CollabReleaseLock(boardID: string, owner: string): $CancellablePromise<void> {
+    return $Call.ByID(3755115010, boardID, owner);
+}
+
+/**
+ * CollabRenewLock extends the leader lease. Returns false when this client no
+ * longer owns it (it should immediately stop writing the bucket).
+ */
+export function CollabRenewLock(boardID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
+    return $Call.ByID(3323947914, boardID, owner, ttlSeconds);
 }
 
 export function CollabSend(boardID: string, data: string): $CancellablePromise<void> {

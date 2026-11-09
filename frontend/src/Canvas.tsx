@@ -23,7 +23,10 @@ import {
   canvasLibrary,
   canvasReady,
   canvasView,
+  collabAcquireLock,
   collabJoin,
+  collabReleaseLock,
+  collabRenewLock,
   collabSend,
   log,
 	  onAICanvasOperations,
@@ -44,6 +47,9 @@ import { FILE_CHOSEN_EVENT } from './shims/browser-fs-access'
 const SAVE_DEBOUNCE_MS = 300
 /** While collaborating, scenes are shared more eagerly so remote edits land quickly. */
 const COLLAB_DEBOUNCE_MS = 80
+/** Leader lease TTL and how often it is renewed/contested while collaborating. */
+const LOCK_TTL_SECONDS = 30
+const LOCK_RENEW_MS = 10_000
 /** Scrolling and zooming are reported less often than edits; only the last position matters. */
 const VIEW_DEBOUNCE_MS = 500
 const LIBRARY_FILE = /\.excalidrawlib$/i
@@ -218,22 +224,28 @@ function buildYdoc(data: ImportedDataState): Y.Doc {
     for (const [id, file] of Object.entries(data.files ?? {})) {
       files.set(id, file)
     }
-  }, 'local')
+    // Origin 'init' (not 'local'): the loaded state is the baseline, not an edit
+    // to broadcast. Broadcasting it would resend the whole bucket (including all
+    // files) to every peer on every board open.
+  }, 'init')
   return doc
 }
 
 /**
  * Write the current Excalidraw scene into the Yjs document (origin 'local').
  * Elements are matched by id: changed ones are updated, new ones inserted with a
- * fractional index between their neighbours, and ones no longer present are
- * removed. Returns whether anything was written.
+ * fractional index between their neighbours, and ones that are actually deleted
+ * are removed. Returns whether anything was written.
+ *
+ * Removal is keyed on `isDeleted`, NOT on absence from the scene: the scene can
+ * lag the Yjs document while Excalidraw is mounting or applying a remote update,
+ * and removing those elements would delete them everywhere.
  */
 function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]): boolean {
   const yArray = doc.getArray('elements')
   const current = new Map<string, YElementItem>()
   for (const item of ydocElements(doc)) current.set(item.el.id, item)
 
-  const seen = new Set<string>()
   let prevPos: string | null = null
   const inserts: { el: ExcalidrawElement; pos: string }[] = []
   const updates: { map: Y.Map<unknown>; el: ExcalidrawElement }[] = []
@@ -244,7 +256,6 @@ function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]):
     const el = elements[i]
     const existing = current.get(el.id)
     if (existing) {
-      seen.add(el.id)
       if (prevPos !== null && existing.pos <= prevPos) {
         // The element moved before its previous neighbour: give it a fresh index.
         let next = nextPosInNewArray(elements, current, i)
@@ -256,8 +267,9 @@ function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]):
         prevPos = existing.pos
       }
       if (elementChanged(existing.el, el)) updates.push({ map: existing.map, el })
-    } else {
-      seen.add(el.id)
+    } else if (!el.isDeleted) {
+      // A new element. Deleted elements absent from the document are not
+      // resurrected (they were already removed).
       let next = nextPosInNewArray(elements, current, i)
       if (prevPos !== null && next !== null && next <= prevPos) next = null
       const pos = generateKeyBetween(prevPos, next)
@@ -265,8 +277,11 @@ function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]):
       prevPos = pos
     }
   }
-  for (const [id, item] of current) {
-    if (!seen.has(id)) removals.push(item.map)
+  // Remove only elements that are actually deleted. Absence from the scene is
+  // not a removal signal (see above); this also drops deleted elements once
+  // their `isDeleted` flag has been written into the document.
+  for (const item of current.values()) {
+    if (item.el.isDeleted) removals.push(item.map)
   }
 
   if (inserts.length + updates.length + reorders.length + removals.length === 0) return false
@@ -301,16 +316,21 @@ function nextPosInNewArray(
   return null
 }
 
-/** Copy the whitelisted AppState keys into the Yjs document (origin 'local'). */
-function syncAppStateToYdoc(doc: Y.Doc, appState: AppState): void {
+/** Copy the whitelisted AppState keys into the Yjs document (origin 'local'). Returns whether anything was written. */
+function syncAppStateToYdoc(doc: Y.Doc, appState: AppState): boolean {
   const map = doc.getMap('appState')
+  let wrote = false
   doc.transact(() => {
     for (const key of APP_STATE_KEYS) {
       const value = appState[key]
       if (value === undefined) continue
-      if (map.get(key) !== value) map.set(key, value)
+      if (map.get(key) !== value) {
+        map.set(key, value)
+        wrote = true
+      }
     }
   }, 'local')
+  return wrote
 }
 
 /** Copy files that are new or changed into the Yjs document (origin 'local'). */
@@ -444,6 +464,12 @@ export default function Canvas({
   const appliedFileIds = useRef<Set<string>>(new Set())
   /** The Yjs document changed since the last flush, so it must be persisted. */
   const ydocDirty = useRef(false)
+  /** Whether this client currently holds the leader lease (the single bucket writer). */
+  const isLeader = useRef(false)
+  /** Bumped on every lease acquisition/loss; guards a stale flush across a takeover. */
+  const leaderEpoch = useRef(0)
+  /** Timer for the leader renewal / follower contest loop. */
+  const lockTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const pending = useRef<PendingScene | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const lastVersion = useRef<number | null>(null)
@@ -508,13 +534,17 @@ export default function Canvas({
     clearTimeout(timer.current)
     // While collaborating the Yjs document is the source of truth: persist it as a
     // plain scene snapshot (live sharing happens through Yjs updates, not here).
+    // Only the leader writes the bucket — followers keep the Yjs document dirty
+    // and let the leader persist it (single-writer persistence).
     const doc = ydoc.current
     if (doc && ydocDirty.current) {
-      ydocDirty.current = false
-      const scene = ydocToScene(doc)
-      scene.name = boardNameRef.current
-      const { name, json } = serialize(scene)
-      canvasChange(name, json)
+      if (isLeader.current) {
+        ydocDirty.current = false
+        const scene = ydocToScene(doc)
+        scene.name = boardNameRef.current
+        const { name, json } = serialize(scene)
+        canvasChange(name, json)
+      }
     } else {
       const scene = pending.current
       pending.current = null
@@ -597,7 +627,62 @@ export default function Canvas({
     ydoc.current = null
     ydocDirty.current = false
     if (doc) doc.destroy()
+    // Stop the election loop and drop the leader lease (only if we still own it).
+    clearInterval(lockTimer.current)
+    lockTimer.current = undefined
+    if (isLeader.current) {
+      isLeader.current = false
+      leaderEpoch.current++
+      const target = collabRef.current
+      if (target) {
+        collabReleaseLock(target.boardId, peerId).catch((err: unknown) =>
+          log('error', `Could not release the collaboration lock: ${String(err)}`),
+        )
+      }
+    }
   }, [])
+
+  /** Stop being the leader: stop renewing and stop writing the bucket. */
+  const loseLeadership = useCallback(() => {
+    if (!isLeader.current) return
+    isLeader.current = false
+    leaderEpoch.current++
+    // Drop any queued flush; it must not write the bucket as a follower.
+    clearTimeout(timer.current)
+  }, [])
+
+  /** Become the leader; the lease is already held. Persist anything that changed while a follower. */
+  const becomeLeader = useCallback(() => {
+    if (isLeader.current) return
+    isLeader.current = true
+    leaderEpoch.current++
+    if (ydocDirty.current) {
+      clearTimeout(timer.current)
+      timer.current = setTimeout(flush, 0)
+    }
+  }, [flush])
+
+  /**
+   * One tick of the leader election loop: the leader renews its lease (stepping
+   * down if it lost it), followers try to take over an expired lease.
+   */
+  const lockLoop = useCallback(() => {
+    const board = boardIdRef.current
+    if (!board) return
+    if (isLeader.current) {
+      collabRenewLock(board, peerId, LOCK_TTL_SECONDS)
+        .then((ok) => {
+          if (!ok) loseLeadership()
+        })
+        .catch(() => loseLeadership())
+    } else {
+      collabAcquireLock(board, peerId, LOCK_TTL_SECONDS)
+        .then((won) => {
+          if (won) becomeLeader()
+        })
+        .catch((err: unknown) => log('error', `Could not acquire the collaboration lock: ${String(err)}`))
+    }
+  }, [becomeLeader, loseLeadership])
 
   useEffect(() => {
     let key = 0
@@ -703,19 +788,28 @@ export default function Canvas({
   }, [flush, flushView, teardownYdoc, wireYdoc])
 
   // Join collaboration when a NATS board is open (the backend relays messages as `canvas:collab`),
-  // then ask peers for anything our (bucket-loaded) Yjs document is missing.
+  // ask peers for anything our (bucket-loaded) Yjs document is missing, and start leader election:
+  // one client wins the lease and becomes the single bucket writer; followers take over when it expires.
   useEffect(() => {
     if (!board || !collab) return
     const { sourceId, bucket, boardId } = collab
     collabJoin(sourceId, bucket, boardId)
       .then(() => {
         const doc = ydoc.current
-        if (!doc) return
-        const message: CollabMessage = { type: 'sync', from: peerId, sv: bytesToBase64(Y.encodeStateVector(doc)) }
-        collabSend(boardId, JSON.stringify(message))
+        if (doc) {
+          const message: CollabMessage = { type: 'sync', from: peerId, sv: bytesToBase64(Y.encodeStateVector(doc)) }
+          collabSend(boardId, JSON.stringify(message))
+        }
+        lockLoop()
+        lockTimer.current = setInterval(lockLoop, LOCK_RENEW_MS)
       })
       .catch((err: unknown) => log('error', `Could not join collaboration: ${String(err)}`))
-  }, [board?.name, collab])
+    return () => {
+      clearInterval(lockTimer.current)
+      lockTimer.current = undefined
+      loseLeadership()
+    }
+  }, [board?.name, collab, lockLoop, loseLeadership])
 
   // Apply remote Yjs updates, answer sync requests, and show remote cursors.
   useEffect(() => {
@@ -804,9 +898,14 @@ export default function Canvas({
     // onChange also fires for scrolling, selection etc. Only save when the drawing itself changed.
     const version = hashElementsVersion(elements)
     const fileCount = Object.keys(files).length
-    // Share the whitelisted AppState (background, current style) even when no element changed.
+    // Share the whitelisted AppState (background, current style) even when no element changed,
+    // and persist it (the background must survive a reload).
     const doc = ydoc.current
-    if (doc) syncAppStateToYdoc(doc, appState)
+    if (doc && syncAppStateToYdoc(doc, appState)) {
+      ydocDirty.current = true
+      clearTimeout(timer.current)
+      timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
+    }
     if (lastVersion.current === null) {
       lastVersion.current = version
       lastFileCount.current = fileCount
@@ -851,6 +950,9 @@ export default function Canvas({
         initialData={{ ...board.data, libraryItems: board.library }}
         excalidrawAPI={(instance) => {
           api.current = instance
+          // Apply any remote Yjs state that arrived before Excalidraw finished
+          // mounting (observeYdoc returns early while api.current is null).
+          if (instance && ydoc.current) setTimeout(() => observeYdoc(), 0)
         }}
         onChange={onChange}
         onPointerUpdate={(payload) => {
