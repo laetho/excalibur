@@ -32,6 +32,18 @@ type NatsServerConfig struct {
 	Buckets         []string `json:"buckets"`
 }
 
+// NatsServerSettings is safe to expose to the webview. Passwords remain on the
+// native side; the UI only needs to know whether one is already saved.
+type NatsServerSettings struct {
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	URL             string   `json:"url"`
+	Username        string   `json:"username"`
+	CredentialsFile string   `json:"credentialsFile"`
+	Buckets         []string `json:"buckets"`
+	HasPassword     bool     `json:"hasPassword"`
+}
+
 type AIConfig struct {
 	Enabled        bool   `json:"enabled"`
 	BaseURL        string `json:"baseUrl"`
@@ -131,20 +143,21 @@ type SourceInfo struct {
 }
 
 type StoreSnapshot struct {
-	Folder           string       `json:"folder"`
-	Boards           []BoardInfo  `json:"boards"`
-	Selection        *string      `json:"selection"`
-	SortOrder        string       `json:"sortOrder"`
-	ShowThumbnails   bool         `json:"showThumbnails"`
-	CanvasAppearance string       `json:"canvasAppearance"`
-	ApplicationZoom  float64      `json:"applicationZoom"`
-	CollabNickname   string       `json:"collaborationNickname"`
-	Alerts           []Notice     `json:"alerts"`
-	IsAlertPresented bool         `json:"isAlertPresented"`
-	Sources          []SourceInfo `json:"sources"`
-	ActiveSource     string       `json:"activeSource"`
-	ActiveGroup      string       `json:"activeGroup"`
-	AI               AISettings   `json:"ai"`
+	Folder           string               `json:"folder"`
+	Boards           []BoardInfo          `json:"boards"`
+	Selection        *string              `json:"selection"`
+	SortOrder        string               `json:"sortOrder"`
+	ShowThumbnails   bool                 `json:"showThumbnails"`
+	CanvasAppearance string               `json:"canvasAppearance"`
+	ApplicationZoom  float64              `json:"applicationZoom"`
+	CollabNickname   string               `json:"collaborationNickname"`
+	Alerts           []Notice             `json:"alerts"`
+	IsAlertPresented bool                 `json:"isAlertPresented"`
+	Sources          []SourceInfo         `json:"sources"`
+	NatsServers      []NatsServerSettings `json:"natsServers"`
+	ActiveSource     string               `json:"activeSource"`
+	ActiveGroup      string               `json:"activeGroup"`
+	AI               AISettings           `json:"ai"`
 }
 
 type PickFileResult struct {

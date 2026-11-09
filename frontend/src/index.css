@@ -774,6 +774,11 @@ button.secondary:hover {
   font-size: 13px;
 }
 
+.nats-server-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .nats-buckets {
   display: flex;
   flex-wrap: wrap;

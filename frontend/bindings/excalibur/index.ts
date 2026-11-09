@@ -14,6 +14,7 @@ export type {
     BoardInfo,
     GroupInfo,
     NatsServerConfig,
+    NatsServerSettings,
     Notice,
     PickFileResult,
     SourceInfo,

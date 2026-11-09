@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -64,6 +65,71 @@ func (s *Store) addNatsServer(config NatsServerConfig) error {
 	config.Buckets = buckets
 	s.natsClients[config.ID] = client
 	s.prefs.NatsServers = append(s.prefs.NatsServers, config)
+	s.savePrefs()
+	return nil
+}
+
+// updateNatsServer verifies the replacement connection before changing the
+// saved configuration. An empty password can retain the native-side secret so
+// editing a name or URL never sends the old password to the webview.
+func (s *Store) updateNatsServer(config NatsServerConfig, keepPassword bool) error {
+	index := -1
+	for i := range s.prefs.NatsServers {
+		if s.prefs.NatsServers[i].ID == strings.TrimSpace(config.ID) {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return errors.New("NATS server not found")
+	}
+
+	existing := s.prefs.NatsServers[index]
+	if keepPassword && config.Password == "" {
+		config.Password = existing.Password
+	}
+	client, err := connectNATS(config)
+	if err != nil {
+		return err
+	}
+	buckets, err := client.listBuckets()
+	if err != nil {
+		client.close()
+		return err
+	}
+	config = client.config
+	config.Buckets = buckets
+
+	oldClient := s.natsClients[config.ID]
+	oldSource, oldGroup, oldSelection := s.activeSource, s.activeGroup, s.selection
+	oldBoards := s.boards
+	s.prefs.NatsServers[index] = config
+	s.natsClients[config.ID] = client
+	if s.activeSource == "nats:"+config.ID {
+		if !slices.Contains(buckets, s.activeGroup) {
+			if len(buckets) > 0 {
+				s.activeGroup = buckets[0]
+			} else {
+				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+			}
+			s.selection = ""
+		}
+		if err = s.scan(); err != nil {
+			s.prefs.NatsServers[index] = existing
+			s.activeSource, s.activeGroup, s.selection, s.boards = oldSource, oldGroup, oldSelection, oldBoards
+			if oldClient != nil {
+				s.natsClients[config.ID] = oldClient
+			} else {
+				delete(s.natsClients, config.ID)
+			}
+			client.close()
+			return err
+		}
+		s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = s.activeSource, s.activeGroup, s.selection
+	}
+	if oldClient != nil {
+		oldClient.close()
+	}
 	s.savePrefs()
 	return nil
 }

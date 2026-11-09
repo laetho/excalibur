@@ -21,6 +21,7 @@ import {
   onMenu,
   onStoreChanged,
   removeNatsServer,
+  updateNatsServer,
   renameBoard,
   reveal,
   revealFolder,
@@ -39,6 +40,7 @@ import {
   type AIChatMessage,
   type AIModel,
   type NatsServerConfig,
+  type NatsServerSettings,
   type SourceInfo,
   type StoreSnapshot,
 } from './ipc'
@@ -1122,6 +1124,122 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
+/** Dialog for editing a saved NATS server without exposing its password. */
+function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onClose: () => void }) {
+  const [name, setName] = useState(server.name)
+  const [url, setUrl] = useState(server.url)
+  const [username, setUsername] = useState(server.username)
+  const [password, setPassword] = useState('')
+  const [credentialsFile, setCredentialsFile] = useState(server.credentialsFile)
+  const [removePassword, setRemovePassword] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  const trimmedName = name.trim()
+  const trimmedUrl = url.trim()
+  const problem = !trimmedName ? 'Enter a name.' : !trimmedUrl ? 'Enter a server URL.' : null
+  const confirm = async () => {
+    if (problem || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await updateNatsServer(
+        {
+          id: server.id,
+          name: trimmedName,
+          url: trimmedUrl,
+          username: username.trim(),
+          password,
+          credentialsFile,
+          buckets: server.buckets,
+        },
+        server.hasPassword && !removePassword && !password && !credentialsFile,
+      )
+      onClose()
+    } catch (err) {
+      setError(String(err))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose()
+      }}
+    >
+      <div className="modal" role="dialog" aria-modal="true">
+        <h2>Edit NATS Server</h2>
+        <input ref={inputRef} value={name} placeholder="Server name" onChange={(event) => setName(event.target.value)} />
+        <input value={url} placeholder="nats://host:port" onChange={(event) => setUrl(event.target.value)} />
+        <input
+          value={username}
+          autoComplete="username"
+          placeholder="Username (optional)"
+          disabled={Boolean(credentialsFile)}
+          onChange={(event) => setUsername(event.target.value)}
+        />
+        <input
+          value={password}
+          type="password"
+          autoComplete="new-password"
+          placeholder={server.hasPassword && !removePassword ? 'Saved — enter a new password to replace' : 'Password (optional)'}
+          disabled={Boolean(credentialsFile) || removePassword}
+          onChange={(event) => {
+            setPassword(event.target.value)
+            if (event.target.value) setRemovePassword(false)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') void confirm()
+            if (event.key === 'Escape' && !busy) onClose()
+          }}
+        />
+        {server.hasPassword && !credentialsFile && (
+          <label className="clear-key">
+            <input
+              type="checkbox"
+              checked={removePassword}
+              onChange={(event) => {
+                setRemovePassword(event.target.checked)
+                if (event.target.checked) setPassword('')
+              }}
+            />
+            Remove saved password
+          </label>
+        )}
+        <NatsCredentialsPicker
+          value={credentialsFile}
+          onChange={(path) => {
+            setCredentialsFile(path)
+            if (path) {
+              setUsername('')
+              setPassword('')
+              setRemovePassword(false)
+            }
+          }}
+        />
+        <p className={error || problem ? 'problem' : 'hint'}>
+          {error ?? problem ?? 'The new connection is verified before these settings replace the saved server.'}
+        </p>
+        <div className="modal-actions">
+          <button className="secondary" disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary" disabled={problem !== null || busy} onClick={() => void confirm()}>
+            {busy ? 'Connecting…' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Dialog for creating a bucket on a NATS server (boards are stored in buckets). */
 function NewBucketDialog({ source, onClose }: { source: SourceInfo; onClose: () => void }) {
   const [name, setName] = useState('')
@@ -1277,6 +1395,7 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
   const [collaborationNicknameSaving, setCollaborationNicknameSaving] = useState(false)
   const [bucketFor, setBucketFor] = useState<string | null>(null)
   const [bucketName, setBucketName] = useState('')
+  const [editingServer, setEditingServer] = useState<NatsServerSettings | null>(null)
   const [aiEnabled, setAIEnabled] = useState(snapshot.ai.enabled)
   const [aiBaseUrl, setAIBaseUrl] = useState(snapshot.ai.baseUrl)
   const [aiModel, setAIModel] = useState(snapshot.ai.model)
@@ -1497,9 +1616,17 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
               <div key={source.id} className="nats-server">
                 <div className="nats-server-head">
                   <span className="nats-server-name">{source.name}</span>
-                  <button className="secondary" onClick={() => removeNatsServer(rawServerId(source.id))}>
-                    Remove
-                  </button>
+                  <div className="nats-server-actions">
+                    <button
+                      className="secondary"
+                      onClick={() => setEditingServer(snapshot.natsServers.find((server) => server.id === rawServerId(source.id)) ?? null)}
+                    >
+                      Edit…
+                    </button>
+                    <button className="secondary" onClick={() => removeNatsServer(rawServerId(source.id))}>
+                      Remove
+                    </button>
+                  </div>
                 </div>
                 <div className="nats-buckets">
                   {source.groups.map((group) => (
@@ -1681,6 +1808,7 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
           </button>
         </div>
       </div>
+      {editingServer && <EditServerDialog server={editingServer} onClose={() => setEditingServer(null)} />}
     </div>
   )
 }

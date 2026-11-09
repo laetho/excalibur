@@ -175,6 +175,34 @@ func TestNormalizeNatsServerConfigRejectsInvalidCredentialsPath(t *testing.T) {
 	}
 }
 
+func TestNatsServerSnapshotRedactsPassword(t *testing.T) {
+	store := testStore(t)
+	store.prefs.NatsServers = []NatsServerConfig{{
+		ID:       "private",
+		Name:     "Private NATS",
+		URL:      "nats://example.test:4222",
+		Username: "merlin",
+		Password: "sword-in-the-stone",
+		Buckets:  []string{"boards"},
+	}}
+
+	snapshot := store.snapshot()
+	if len(snapshot.NatsServers) != 1 {
+		t.Fatalf("NATS settings count = %d, want 1", len(snapshot.NatsServers))
+	}
+	settings := snapshot.NatsServers[0]
+	if settings.ID != "private" || settings.Username != "merlin" || !settings.HasPassword {
+		t.Fatalf("NATS settings = %#v", settings)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "sword-in-the-stone") {
+		t.Fatal("snapshot exposed the saved NATS password")
+	}
+}
+
 func TestChatCompletionsURL(t *testing.T) {
 	cases := map[string]string{
 		"https://ai.example":                     "https://ai.example/v1/chat/completions",

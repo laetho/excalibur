@@ -62,6 +62,20 @@ export interface NatsServerConfig {
     "buckets": string[] | null;
 }
 
+/**
+ * NatsServerSettings is safe to expose to the webview. Passwords remain on the
+ * native side; the UI only needs to know whether one is already saved.
+ */
+export interface NatsServerSettings {
+    "id": string;
+    "name": string;
+    "url": string;
+    "username": string;
+    "credentialsFile": string;
+    "buckets": string[] | null;
+    "hasPassword": boolean;
+}
+
 export interface Notice {
     "id": string;
     "title": string;
@@ -92,6 +106,7 @@ export interface StoreSnapshot {
     "alerts": Notice[] | null;
     "isAlertPresented": boolean;
     "sources": SourceInfo[] | null;
+    "natsServers": NatsServerSettings[] | null;
     "activeSource": string;
     "activeGroup": string;
     "ai": AISettings;

@@ -587,19 +587,21 @@ func (s *Store) snapshot() StoreSnapshot {
 		selection = &value
 	}
 	sources := []SourceInfo{{ID: localSourceID, Name: "Local", Kind: "local", Groups: []GroupInfo{{ID: s.localFolder, Name: displayPath(s.localFolder), Kind: "folder"}}}}
+	natsServers := make([]NatsServerSettings, 0, len(s.prefs.NatsServers))
 	for _, server := range s.prefs.NatsServers {
 		groups := make([]GroupInfo, 0, len(server.Buckets))
 		for _, bucket := range server.Buckets {
 			groups = append(groups, GroupInfo{ID: bucket, Name: bucket, Kind: "bucket"})
 		}
 		sources = append(sources, SourceInfo{ID: "nats:" + server.ID, Name: server.Name, Kind: "nats", Groups: groups})
+		natsServers = append(natsServers, NatsServerSettings{ID: server.ID, Name: server.Name, URL: server.URL, Username: server.Username, CredentialsFile: server.CredentialsFile, Buckets: append([]string(nil), server.Buckets...), HasPassword: server.Password != ""})
 	}
 	folder := ""
 	if s.isLocal() {
 		folder = displayPath(s.activeGroup)
 	}
 	ai := AISettings{Enabled: s.prefs.AI.Enabled, BaseURL: s.prefs.AI.BaseURL, Model: s.prefs.AI.Model, HasAPIKey: s.prefs.AI.APIKey != ""}
-	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, AI: ai}
+	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, AI: ai}
 }
 
 func displayPath(path string) string {

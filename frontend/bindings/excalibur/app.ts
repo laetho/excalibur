@@ -203,3 +203,7 @@ export function ToggleFullscreen(): $CancellablePromise<void> {
 export function TrashBoard(id: string): $CancellablePromise<void> {
     return $Call.ByID(218553747, id);
 }
+
+export function UpdateNatsServer(config: $models.NatsServerConfig, keepPassword: boolean): $CancellablePromise<void> {
+    return $Call.ByID(3051798635, config, keepPassword);
+}

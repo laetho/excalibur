@@ -539,6 +539,17 @@ func (a *App) AddNatsServer(config NatsServerConfig) error {
 	a.emitSnapshotLocked()
 	return nil
 }
+func (a *App) UpdateNatsServer(config NatsServerConfig, keepPassword bool) error {
+	a.savePending()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.store.updateNatsServer(config, keepPassword); err != nil {
+		return err
+	}
+	a.clearNatsSubscriptions(config.ID)
+	a.emitSnapshotLocked()
+	return nil
+}
 func (a *App) RemoveNatsServer(id string) error {
 	a.savePending()
 	a.mu.Lock()
@@ -546,8 +557,21 @@ func (a *App) RemoveNatsServer(id string) error {
 	if err := a.store.removeNatsServer(id); err != nil {
 		return err
 	}
+	a.clearNatsSubscriptions(id)
 	a.emitSnapshotLocked()
 	return nil
+}
+
+func (a *App) clearNatsSubscriptions(id string) {
+	prefix := "nats:" + id + "\x00"
+	a.subMu.Lock()
+	defer a.subMu.Unlock()
+	for key, subscription := range a.subscriptions {
+		if strings.HasPrefix(key, prefix) {
+			_ = subscription.Unsubscribe()
+			delete(a.subscriptions, key)
+		}
+	}
 }
 func (a *App) AddBucket(sourceID, bucket string) error {
 	a.mu.Lock()

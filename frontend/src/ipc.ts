@@ -47,6 +47,7 @@ export type NatsServerConfig = {
   credentialsFile: string
   buckets: string[]
 }
+export type NatsServerSettings = Omit<NatsServerConfig, 'password'> & { hasPassword: boolean }
 export type AISettings = { enabled: boolean; baseUrl: string; model: string; hasApiKey: boolean }
 export type AISettingsUpdate = { enabled: boolean; baseUrl: string; model: string; apiKey: string; clearApiKey: boolean }
 export type AIChatMessage = { role: 'user' | 'assistant'; content: string; thinking?: string }
@@ -65,6 +66,8 @@ export type StoreSnapshot = {
   isAlertPresented: boolean
   /** The navigation tree: local folder + NATS servers with their buckets. */
   sources: SourceInfo[]
+  /** Editable NATS configuration with passwords redacted. */
+  natsServers: NatsServerSettings[]
   /** The active source id ("local" or "nats:<id>"). */
   activeSource: string
   /** The active group id (a folder path or a bucket name). */
@@ -125,6 +128,8 @@ export const saveFile = (fileName: string, dataUrl: string) => app().SaveFile(fi
 
 /** Adds a NATS server (connects, lists its buckets, persists it in preferences). */
 export const addNatsServer = (config: NatsServerConfig) => app().AddNatsServer(config)
+/** Updates a server after verifying the replacement connection. */
+export const updateNatsServer = (config: NatsServerConfig, keepPassword: boolean) => app().UpdateNatsServer(config, keepPassword)
 /** Opens a native picker and returns a NATS .creds path without reading its secret contents into the webview. */
 export const chooseNatsCredentialsFile = () => app().ChooseNatsCredentialsFile() as Promise<string>
 /** Removes a NATS server by id. */

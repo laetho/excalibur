@@ -89,6 +89,11 @@ native application version, builds all three desktop packages, generates
 `SHA256SUMS`, and publishes the packages with automatically generated release
 notes. The release is published only after every platform build succeeds.
 
+To recover or publish an existing tag manually, run **Cross-platform build and
+release** from the repository's Actions page and enter that tag in
+`release_tag`. Manual releases always check out the existing tag itself; they do
+not create tags from the branch selected in the workflow form.
+
 NATS sources require a server with JetStream enabled.
 
 ## Copyright
