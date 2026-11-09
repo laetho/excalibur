@@ -3,9 +3,9 @@
   <img src="excalibur-dark.svg#gh-dark-mode-only" alt="Excalibur logo" width="180">
 </p>
 
-# Excalibur
+# Excalibur — The board of legend
 
-**The board of legend.** A Wails v3 desktop wrapper for Excalidraw with local `.excalidraw` boards, NATS JetStream Object Store sources, and live collaboration over NATS subjects.
+A Wails v3 desktop wrapper for Excalidraw with local `.excalidraw` boards, NATS JetStream Object Store sources, and live collaboration over NATS subjects.
 
 ## NATS collaboration
 
