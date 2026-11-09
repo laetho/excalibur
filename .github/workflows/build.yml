@@ -206,3 +206,74 @@ jobs:
             --verify-tag \
             --title "Excalibur $tag" \
             --generate-notes
+
+      # The source repository is private, while the Homebrew tap is public.
+      # GitHub returns 404 for release assets in private repositories to
+      # unauthenticated clients, so mirror the assets to the public tap.
+      - name: Require Homebrew tap token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$TAP_TOKEN" ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN must grant write access to laetho/homebrew-excalibur." >&2
+            exit 1
+          fi
+
+      - name: Check out public Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: laetho/homebrew-excalibur
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Publish mirrored release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$MANUAL_RELEASE_TAG"
+          fi
+          if ! gh release view "$tag" --repo laetho/homebrew-excalibur >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo laetho/homebrew-excalibur \
+              --title "Excalibur $tag" \
+              --notes "Public mirror of the Excalibur $tag release assets for anonymous Homebrew downloads."
+          fi
+          gh release upload "$tag" release/* \
+            --repo laetho/homebrew-excalibur \
+            --clobber
+
+      - name: Update Homebrew cask
+        env:
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
+        working-directory: tap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${MANUAL_RELEASE_TAG#v}"
+          fi
+          sha="$(sha256sum "$GITHUB_WORKSPACE/release/Excalibur-macos-universal.zip" | cut -d' ' -f1)"
+          python3 - "$version" "$sha" <<'PY'
+          import re
+          import sys
+
+          version, sha = sys.argv[1], sys.argv[2]
+          path = "Casks/excalibur.rb"
+          text = open(path).read()
+          text, version_count = re.subn(r'^  version ".*"$', f'  version "{version}"', text, count=1, flags=re.M)
+          text, sha_count = re.subn(r'^  sha256 ".*"$', f'  sha256 "{sha}"', text, count=1, flags=re.M)
+          if version_count != 1 or sha_count != 1:
+              raise SystemExit("failed to update the version and sha256 in the Excalibur cask")
+          open(path, "w").write(text)
+          PY
+          if [[ -z "$(git status --porcelain -- Casks/excalibur.rb)" ]]; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/excalibur.rb
+          git commit -m "chore: update excalibur cask to v${version}"
+          git push origin HEAD:main
