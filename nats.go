@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +11,14 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 type natsClient struct {
 	config NatsServerConfig
 	conn   *nats.Conn
 	js     nats.JetStreamContext
+	jsm    jetstream.JetStream
 }
 
 func connectNATS(config NatsServerConfig) (*natsClient, error) {
@@ -39,7 +42,12 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 		nc.Close()
 		return nil, fmt.Errorf("JetStream is unavailable on %q: %w", config.Name, err)
 	}
-	return &natsClient{config: config, conn: nc, js: js}, nil
+	jsm, err := jetstream.New(nc)
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("could not initialise JetStream on %q: %w", config.Name, err)
+	}
+	return &natsClient{config: config, conn: nc, js: js, jsm: jsm}, nil
 }
 
 // normalizeNatsServerConfig validates authentication before a connection is
@@ -88,10 +96,19 @@ func (c *natsClient) objectStore(bucket string) (nats.ObjectStore, error) {
 	return store, nil
 }
 
+// listBuckets returns the object-store bucket names on the server. It uses the
+// jetstream package's lister, which trims the internal "OBJ_" stream prefix and
+// surfaces any error encountered while paging through the stores.
 func (c *natsClient) listBuckets() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var names []string
-	for name := range c.js.ObjectStoreNames() {
+	lister := c.jsm.ObjectStoreNames(ctx)
+	for name := range lister.Name() {
 		names = append(names, name)
+	}
+	if err := lister.Error(); err != nil {
+		return nil, fmt.Errorf("could not list buckets on %q: %w", c.config.Name, err)
 	}
 	sort.Strings(names)
 	return names, nil

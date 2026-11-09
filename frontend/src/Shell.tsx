@@ -22,6 +22,7 @@ import {
   onStoreChanged,
   removeNatsServer,
   updateNatsServer,
+  refreshBuckets,
   renameBoard,
   reveal,
   revealFolder,
@@ -33,6 +34,7 @@ import {
   setShowThumbnails,
   setSort,
   setWindowTitle,
+  showAlert,
   trashBoard,
   type BoardInfo,
   type BoardSortOrder,
@@ -141,6 +143,8 @@ export default function Shell() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [viewOptionsOpen, setViewOptionsOpen] = useState(false)
   const [addServerOpen, setAddServerOpen] = useState(false)
+  /** True while the sources refresh button is re-listing NATS buckets. */
+  const [refreshingSources, setRefreshingSources] = useState(false)
   const [dropTargeted, setDropTargeted] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; board: BoardInfo } | null>(null)
   /** Right-click menu on a NATS server heading in the sources list. */
@@ -299,6 +303,19 @@ export default function Shell() {
     }
   }, [])
 
+  /** Re-lists the buckets on every configured NATS server. */
+  const handleRefreshSources = useCallback(async () => {
+    setRefreshingSources(true)
+    try {
+      await refreshBuckets()
+    } catch (err) {
+      log('error', `Could not refresh the sources: ${String(err)}`)
+      showAlert(String(err)).catch((alertErr) => log('error', `Could not show an alert: ${String(alertErr)}`))
+    } finally {
+      setRefreshingSources(false)
+    }
+  }, [])
+
   if (!snapshot) {
     return (
       <div className="shell">
@@ -359,9 +376,19 @@ export default function Shell() {
         <div className="sources">
           <div className="sources-header">
             <span className="sources-title">Sources</span>
-            <button className="icon-button" onClick={() => setAddServerOpen(true)} title="Add a NATS server">
-              +
-            </button>
+            <div className="sources-header-actions">
+              <button
+                className={`icon-button${refreshingSources ? ' refreshing' : ''}`}
+                onClick={handleRefreshSources}
+                disabled={refreshingSources}
+                title="Refresh buckets"
+              >
+                ↻
+              </button>
+              <button className="icon-button" onClick={() => setAddServerOpen(true)} title="Add a NATS server">
+                +
+              </button>
+            </div>
           </div>
           <SourcesNav
             sources={snapshot.sources}

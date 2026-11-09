@@ -404,6 +404,9 @@ export default function Canvas({
           log('error', `Could not apply a remote scene: ${String(err)}`)
         }
       } else if (message.type === 'pointer') {
+        // NATS delivers our own published messages back to this subscription too.
+        // Ignore them so the local user does not get a second, remote-style cursor.
+        if (message.peerId === peerId) return
         const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
         collaborators.set(message.peerId as SocketId, {
           pointer: { x: message.x, y: message.y, tool: message.tool },

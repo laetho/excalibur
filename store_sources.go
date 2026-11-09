@@ -191,6 +191,48 @@ func (s *Store) addBucket(sourceID, bucket string) error {
 	return fmt.Errorf("unknown NATS source %q", sourceID)
 }
 
+// refreshBuckets re-lists the object stores on every configured NATS server and
+// updates the saved bucket list. When the active source is a server whose
+// active bucket disappeared, it falls back to the first remaining bucket (or to
+// the local folder when none are left) and clears the selection. It never scans
+// — callers scan afterwards so the active group is validated against the new
+// list. Errors are collected per server and joined.
+func (s *Store) refreshBuckets() error {
+	var errs []error
+	changed := false
+	for i := range s.prefs.NatsServers {
+		server := &s.prefs.NatsServers[i]
+		client, err := s.clientFor("nats:" + server.ID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", server.Name, err))
+			continue
+		}
+		buckets, err := client.listBuckets()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", server.Name, err))
+			continue
+		}
+		if !slices.Equal(buckets, server.Buckets) {
+			server.Buckets = buckets
+			changed = true
+		}
+		if s.activeSource == "nats:"+server.ID && !slices.Contains(buckets, s.activeGroup) {
+			if len(buckets) > 0 {
+				s.activeGroup = buckets[0]
+			} else {
+				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+			}
+			s.selection = ""
+			s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = s.activeSource, s.activeGroup, s.selection
+			changed = true
+		}
+	}
+	if changed {
+		s.savePrefs()
+	}
+	return errors.Join(errs...)
+}
+
 func (s *Store) activateSource(sourceID, groupID string) error {
 	if sourceID == localSourceID {
 		if groupID == "" {

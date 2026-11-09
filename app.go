@@ -74,6 +74,7 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	}
 	a.startWatcher(folder)
 	go a.remoteRefreshLoop()
+	go a.refreshBucketsOnStartup()
 	return nil
 }
 
@@ -592,6 +593,23 @@ func (a *App) ActivateSource(sourceID, groupID string) error {
 	a.emitSnapshotLocked()
 	return nil
 }
+// RefreshBuckets re-lists the buckets on every configured NATS server and
+// rescans the active source so the sidebar reflects the current state. Any
+// server that could not be reached is reported in the returned error.
+func (a *App) RefreshBuckets() error {
+	a.savePending()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store == nil {
+		return errors.New("store is not ready")
+	}
+	err := a.store.refreshBuckets()
+	if scanErr := a.store.scan(); scanErr != nil {
+		err = errors.Join(err, scanErr)
+	}
+	a.emitSnapshotLocked()
+	return err
+}
 func (a *App) CopyBoardToSource(boardID, targetSource, targetGroup string) error {
 	a.savePending()
 	a.mu.Lock()
@@ -848,5 +866,26 @@ func (a *App) remoteRefreshLoop() {
 		case <-a.stop:
 			return
 		}
+	}
+}
+
+// refreshBucketsOnStartup re-lists the buckets on every configured NATS server
+// shortly after launch so the sidebar shows buckets that appeared while the app
+// was closed. It runs in the background so startup is never blocked by a slow or
+// unreachable server; failures are logged rather than surfaced as alerts.
+func (a *App) refreshBucketsOnStartup() {
+	a.mu.Lock()
+	if a.store == nil {
+		a.mu.Unlock()
+		return
+	}
+	err := a.store.refreshBuckets()
+	if scanErr := a.store.scan(); scanErr != nil {
+		err = errors.Join(err, scanErr)
+	}
+	a.emitSnapshotLocked()
+	a.mu.Unlock()
+	if err != nil {
+		log.Printf("bucket refresh on startup: %v", err)
 	}
 }

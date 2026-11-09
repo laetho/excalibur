@@ -134,6 +134,8 @@ export const updateNatsServer = (config: NatsServerConfig, keepPassword: boolean
 export const chooseNatsCredentialsFile = () => app().ChooseNatsCredentialsFile() as Promise<string>
 /** Removes a NATS server by id. */
 export const removeNatsServer = (id: string) => app().RemoveNatsServer(id)
+/** Re-lists the buckets on every configured NATS server and rescans the active source. */
+export const refreshBuckets = () => app().RefreshBuckets()
 /** Adds a bucket to a NATS source (creates it on the server if needed). */
 export const addBucket = (sourceId: string, bucket: string) => app().AddBucket(sourceId, bucket)
 /** Switches the sidebar's active source/group (a local folder or a NATS bucket). */

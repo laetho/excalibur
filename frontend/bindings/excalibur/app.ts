@@ -125,6 +125,15 @@ export function PickFile(extensions: string[] | null): $CancellablePromise<$mode
     return $Call.ByID(1801910934, extensions);
 }
 
+/**
+ * RefreshBuckets re-lists the buckets on every configured NATS server and
+ * rescans the active source so the sidebar reflects the current state. Any
+ * server that could not be reached is reported in the returned error.
+ */
+export function RefreshBuckets(): $CancellablePromise<void> {
+    return $Call.ByID(112819539);
+}
+
 export function RemoveNatsServer(id: string): $CancellablePromise<void> {
     return $Call.ByID(1840923514, id);
 }
