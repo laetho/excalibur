@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -145,6 +146,114 @@ func (c *natsClient) writeObject(bucket, name string, data []byte) error {
 	}
 	_, err = store.PutBytes(name, data)
 	return err
+}
+
+// writeObjectMerged writes a scene to the object store, first merging it with
+// the current contents by element id so concurrent edits to different elements
+// are not lost to a last-writer-wins overwrite. If the object does not exist
+// yet (or cannot be read), the data is written as-is.
+func (c *natsClient) writeObjectMerged(bucket, name string, data []byte) error {
+	store, err := c.objectStore(bucket)
+	if err != nil {
+		return err
+	}
+	current, err := store.GetBytes(name)
+	if err == nats.ErrObjectNotFound || len(current) == 0 {
+		_, err = store.PutBytes(name, data)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	merged, err := mergeScenes(current, data)
+	if err != nil {
+		return err
+	}
+	_, err = store.PutBytes(name, merged)
+	return err
+}
+
+// elementID extracts the "id" field from a serialized Excalidraw element.
+func elementID(raw json.RawMessage) string {
+	var element struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &element); err != nil {
+		return ""
+	}
+	return element.ID
+}
+
+// mergeScenes unions two serialized Excalidraw scenes. The newer scene wins for
+// overlapping element ids and for all other top-level fields; elements that only
+// exist in the current scene are kept in their original relative order, and
+// files are unioned by key. If either scene cannot be parsed, the newer scene is
+// returned unchanged (a plain write).
+func mergeScenes(current, newer []byte) ([]byte, error) {
+	var currentScene, newerScene map[string]json.RawMessage
+	if err := json.Unmarshal(current, &currentScene); err != nil {
+		return newer, nil
+	}
+	if err := json.Unmarshal(newer, &newerScene); err != nil {
+		return newer, nil
+	}
+	merged := make(map[string]json.RawMessage, len(newerScene))
+	for key, value := range newerScene {
+		merged[key] = value
+	}
+	var currentElements, newerElements []json.RawMessage
+	if err := json.Unmarshal(currentScene["elements"], &currentElements); err == nil &&
+		json.Unmarshal(newerScene["elements"], &newerElements) == nil {
+		merged["elements"] = unionElements(currentElements, newerElements)
+	}
+	var currentFiles, newerFiles map[string]json.RawMessage
+	if err := json.Unmarshal(currentScene["files"], &currentFiles); err == nil &&
+		json.Unmarshal(newerScene["files"], &newerFiles) == nil {
+		for key, value := range currentFiles {
+			if _, present := newerFiles[key]; !present {
+				newerFiles[key] = value
+			}
+		}
+		if files, err := json.Marshal(newerFiles); err == nil {
+			merged["files"] = files
+		}
+	}
+	return json.Marshal(merged)
+}
+
+// unionElements merges two element lists by id: newer wins collisions,
+// current-only elements are kept in their original relative order, and
+// newer-only elements are appended.
+func unionElements(current, newer []json.RawMessage) []byte {
+	newerByID := make(map[string]json.RawMessage, len(newer))
+	for _, element := range newer {
+		newerByID[elementID(element)] = element
+	}
+	seen := make(map[string]bool, len(current)+len(newer))
+	merged := make([]json.RawMessage, 0, len(current)+len(newer))
+	for _, element := range current {
+		id := elementID(element)
+		seen[id] = true
+		if replacement, present := newerByID[id]; present {
+			merged = append(merged, replacement)
+		} else {
+			merged = append(merged, element)
+		}
+	}
+	for _, element := range newer {
+		id := elementID(element)
+		if !seen[id] {
+			seen[id] = true
+			merged = append(merged, element)
+		}
+	}
+	// Marshaling a []json.RawMessage of valid JSON cannot fail; fall back to the
+	// newer list on the off chance it does.
+	if result, err := json.Marshal(merged); err == nil {
+		return result
+	}
+	result, _ := json.Marshal(newer)
+	return result
 }
 
 func (c *natsClient) deleteObject(bucket, name string) error {

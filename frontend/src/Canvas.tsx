@@ -40,6 +40,8 @@ import {
 import { FILE_CHOSEN_EVENT } from './shims/browser-fs-access'
 
 const SAVE_DEBOUNCE_MS = 300
+/** While collaborating, scenes are shared more eagerly so remote edits land quickly. */
+const COLLAB_DEBOUNCE_MS = 80
 /** Scrolling and zooming are reported less often than edits; only the last position matters. */
 const VIEW_DEBOUNCE_MS = 500
 const LIBRARY_FILE = /\.excalidrawlib$/i
@@ -93,6 +95,27 @@ function serialize(scene: PendingScene) {
 function parseBoard(json: string): ImportedDataState {
   if (!json.trim()) return {}
   return JSON.parse(json) as ImportedDataState
+}
+
+/**
+ * Union of two element lists by id, for merging a remote scene into the local
+ * scene without clobbering disjoint concurrent edits. Local order is preserved;
+ * the remote element wins for overlapping ids; remote-only elements are appended.
+ */
+function mergeElements(local: readonly ExcalidrawElement[], remote: readonly ExcalidrawElement[]): ExcalidrawElement[] {
+  const remoteById = new Map(remote.map((element) => [element.id, element]))
+  const seen = new Set<string>()
+  const merged = local.map((element) => {
+    seen.add(element.id)
+    return remoteById.get(element.id) ?? element
+  })
+  for (const element of remote) {
+    if (!seen.has(element.id)) {
+      seen.add(element.id)
+      merged.push(element)
+    }
+  }
+  return merged
 }
 
 function loadLegacyLibrary(): LibraryItems {
@@ -198,8 +221,8 @@ export default function Canvas({
   /** The collaboration target for the current board, kept in a ref so memoized callbacks can read it. */
   const collabRef = useRef(collab)
   const boardIdRef = useRef(boardId)
-  /** True right after a remote scene was applied, so the resulting onChange isn't broadcast back. */
-  const applyingRemote = useRef(false)
+  /** Hash of the scene right after the last remote scene was applied, so the resulting onChange (which fires after render) is recognized as an echo and not broadcast back. */
+  const remoteVersion = useRef<number | null>(null)
   const pending = useRef<PendingScene | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const lastVersion = useRef<number | null>(null)
@@ -394,12 +417,19 @@ export default function Canvas({
           const scene = JSON.parse(message.json)
           const elements = scene.elements as ExcalidrawElement[]
           if (!Array.isArray(elements)) return
+          // Persist and broadcast any unsaved local edits before the remote
+          // scene lands, so the merge below can't clobber them.
+          if (pending.current) flush()
+          const instance = api.current
+          if (!instance) return
+          // Merge by element id instead of replacing, so disjoint concurrent
+          // edits on both sides survive.
+          const merged = mergeElements(instance.getSceneElementsIncludingDeleted(), elements)
           // Don't capture the remote scene into undo history, and don't broadcast it back.
-          applyingRemote.current = true
-          api.current?.updateScene({ elements, captureUpdate: CaptureUpdateAction.NEVER })
-          setTimeout(() => {
-            applyingRemote.current = false
-          }, 1000)
+          instance.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER })
+          // Remember the exact post-apply hash: the onChange this triggers fires
+          // asynchronously (after render), so match on the hash, not a time window.
+          remoteVersion.current = hashElementsVersion(instance.getSceneElementsIncludingDeleted())
         } catch (err) {
           log('error', `Could not apply a remote scene: ${String(err)}`)
         }
@@ -421,7 +451,7 @@ export default function Canvas({
     return () => {
       unlisten?.()
     }
-  }, [])
+  }, [flush])
 
   const onChange = (elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     if (!board) return
@@ -460,14 +490,17 @@ export default function Canvas({
     if (version === lastVersion.current && fileCount === lastFileCount.current) return
     lastVersion.current = version
     lastFileCount.current = fileCount
-    // This change is the remote scene we just applied; don't save it or broadcast it back.
-    if (applyingRemote.current) {
-      applyingRemote.current = false
+    // This change is the echo of the remote scene we just applied; don't save it or broadcast it back.
+    if (version === remoteVersion.current) {
+      remoteVersion.current = null
       return
     }
+    remoteVersion.current = null
     pending.current = { name: board.name, elements, appState, files }
     clearTimeout(timer.current)
-    timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
+    // While collaborating, share edits sooner so remote clients see them quickly.
+    const delay = collabRef.current ? COLLAB_DEBOUNCE_MS : SAVE_DEBOUNCE_MS
+    timer.current = setTimeout(flush, delay)
   }
 
   if (!board) {
