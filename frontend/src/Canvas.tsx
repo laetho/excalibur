@@ -1581,7 +1581,7 @@ export default function Canvas({
   )
 
   return (
-    <div className="canvas">
+    <div className="canvas" data-canvas-theme={theme}>
       <Excalidraw
         key={board.key}
         name={board.name}

@@ -1633,48 +1633,78 @@ button.link-button:hover {
 }
 
 /* Small, non-blocking durability indicator. It distinguishes edits that still
- * live only in the renderer from locally journaled and remotely synced state. */
-.canvas-persistence-status {
+ * live only in the renderer from locally journaled and remotely synced state.
+ *
+ * Rendered as a sibling of the .excalidraw root, so it cannot inherit
+ * Excalidraw's theme tokens. Instead it mirrors Excalidraw's main-menu trigger
+ * look with the canvas theme supplied via [data-canvas-theme], and it is
+ * centered in the gutter to the right of the burger (which sits at
+ * editor-container-padding 1rem, lg-button-size 2.25rem). */
+.canvas[data-canvas-theme] .canvas-persistence-status {
   position: absolute;
-  /* Excalidraw's main-menu trigger is a 40px button at 12px/12px. Keep the
-   * status centered beside it instead of covering the canvas controls below. */
-  top: 32px;
-  left: 64px;
+  top: 34px; /* (1rem padding + 2.25rem button) / 2 -> centered on the burger */
+  left: 64px; /* 1rem padding + 2.25rem button + 0.75rem gutter */
   transform: translateY(-50%);
   z-index: 9999;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 10px;
-  border: 1px solid var(--sidebar-border);
-  border-radius: 999px;
-  background: var(--modal-bg);
-  color: var(--text-secondary);
-  box-shadow: var(--modal-shadow);
-  font-size: 12px;
+  height: 36px;
+  padding: 0 0.625rem;
+  border-radius: 8px; /* --border-radius-lg */
+  background: #ececf4; /* --color-surface-low (light) */
+  box-shadow: 0 0 0 1px #ffffff; /* --color-surface-lowest ring (light) */
+  color: #5c5c5c; /* --color-gray-70 (light); gray-50 was only 2.4:1 here */
+  font-family: Assistant, system-ui, sans-serif; /* --ui-font */
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   pointer-events: none;
 }
 
-.canvas-persistence-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-secondary);
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status {
+  background: hsl(240, 8%, 15%); /* --color-surface-low (dark) */
+  box-shadow: 0 0 0 1px hsl(0, 0%, 7%); /* --color-surface-lowest (dark) */
+  color: #b8b8b8; /* --color-gray-50 (dark) */
 }
 
+.canvas-persistence-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Status dots are >= 3:1 against the badge in both canvas themes. */
 .canvas-persistence-status.unwritten .canvas-persistence-dot,
 .canvas-persistence-status.retrying .canvas-persistence-dot {
-  background: #e8590c;
+  background: #c92a2a;
+}
+
+.canvas-persistence-status.synced .canvas-persistence-dot {
+  background: #2b8a3e;
 }
 
 .canvas-persistence-status.writing .canvas-persistence-dot,
 .canvas-persistence-status.queued .canvas-persistence-dot {
-  background: #f59f00;
+  background: #b45309;
   animation: canvas-persistence-pulse 1s ease-in-out infinite alternate;
 }
 
-.canvas-persistence-status.synced .canvas-persistence-dot {
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.unwritten .canvas-persistence-dot,
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.retrying .canvas-persistence-dot {
+  background: #e03131;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.synced .canvas-persistence-dot {
   background: #2f9e44;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.writing .canvas-persistence-dot,
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.queued .canvas-persistence-dot {
+  background: #f59f00;
 }
 
 @keyframes canvas-persistence-pulse {
