@@ -12,6 +12,7 @@ export type {
     AISettings,
     AISettingsUpdate,
     BoardInfo,
+    CollabJoinResult,
     GroupInfo,
     NatsServerConfig,
     NatsServerSettings,

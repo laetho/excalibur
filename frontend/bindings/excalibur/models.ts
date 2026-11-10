@@ -39,11 +39,22 @@ export interface AISettingsUpdate {
 export interface BoardInfo {
     "id": string;
     "name": string;
+    "documentId"?: string;
     "modified": number;
     "isLink": boolean;
     "target": string | null;
     "texts": string[] | null;
     "thumbnail": string | null;
+}
+
+export interface CollabJoinResult {
+    "snapshot": string | null;
+
+    /**
+     * JetStream sequences are decimal strings because JavaScript numbers lose
+     * integer precision above 2^53-1.
+     */
+    "snapshotSequence": string;
 }
 
 export interface GroupInfo {

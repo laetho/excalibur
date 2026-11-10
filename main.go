@@ -82,13 +82,12 @@ func nativeMenu(app *App) *application.Menu {
 		// macOS routes the native Delete role to the focused text control.
 		root.AddRole(application.EditMenu)
 	} else {
-		// Wails' non-macOS EditMenu registers Backspace as a native Delete
-		// accelerator. That consumes the key before GTK/WebView can deliver it to
-		// focused inputs. Keep the useful edit roles but let Backspace stay in the
-		// webview (Excalidraw also handles canvas deletion itself).
+		// Native Undo/Redo/Delete roles consume their accelerators before GTK/WebView
+		// can deliver them to Excalidraw. Route undo/redo back into the webview and
+		// omit native Delete so canvas shortcuts remain owned by Excalidraw.
 		edit := root.AddSubmenu("Edit")
-		edit.AddRole(application.Undo)
-		edit.AddRole(application.Redo)
+		add(edit, "Undo", "CmdOrCtrl+Z", "undo")
+		add(edit, "Redo", "CmdOrCtrl+Shift+Z", "redo")
 		edit.AddSeparator()
 		edit.AddRole(application.Cut)
 		edit.AddRole(application.Copy)

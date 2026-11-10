@@ -1228,6 +1228,44 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
+/* A collaboration snapshot is only a replay baseline. Keep it mounted so
+ * Excalidraw can reconcile retained updates, but do not expose stale content or
+ * accept edits until the renderer has processed the complete join buffer. */
+.canvas-syncing {
+  position: absolute;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.canvas-syncing-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 10px;
+  background: var(--modal-bg);
+  box-shadow: var(--modal-shadow);
+}
+
+.canvas-syncing-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--divider);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: canvas-sync-spin 0.8s linear infinite;
+}
+
+@keyframes canvas-sync-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Let the native window background show through until Excalidraw has rendered. */
 html,
 body {

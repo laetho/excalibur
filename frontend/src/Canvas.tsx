@@ -5,7 +5,9 @@ import {
   getCommonBounds,
   hashElementsVersion,
   MainMenu,
+  reconcileElements,
   restore,
+  restoreElements,
   restoreLibraryItems,
   serializeAsJSON,
   serializeLibraryAsJSON,
@@ -13,21 +15,26 @@ import {
 } from '@excalidraw/excalidraw'
 import '@excalidraw/excalidraw/index.css'
 import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
-import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
-import type { AppState, BinaryFileData, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
+import type { ExcalidrawElement, OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
+import type { RemoteExcalidrawElement } from '@excalidraw/excalidraw/data/reconcile'
+import type { AppState, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
-import * as Y from 'yjs'
 import {
   canvasChange,
   canvasLibrary,
   canvasReady,
   canvasView,
+  collabAck,
   collabAcquireLock,
+  collabGetFiles,
   collabJoin,
+  collabLeave,
+  collabPublish,
+  collabPutFiles,
   collabReleaseLock,
   collabRenewLock,
   collabSend,
+  collabSnapshot,
   log,
 	  onAICanvasOperations,
   onCanvasOpen,
@@ -45,8 +52,20 @@ import {
 import { FILE_CHOSEN_EVENT } from './shims/browser-fs-access'
 
 const SAVE_DEBOUNCE_MS = 300
-/** While collaborating, scenes are shared more eagerly so remote edits land quickly. */
-const COLLAB_DEBOUNCE_MS = 80
+/**
+ * Bound durable drawing updates. Remote reconciliation replaces the complete
+ * Excalidraw scene, so pointer-frame rates steal input time on large boards.
+ * The latest trailing state is always retained behind an in-flight publish.
+ */
+const COLLAB_UPDATE_INTERVAL_MS = 150
+/** Rare integrity repair. JetStream replay is the normal recovery path. */
+const COLLAB_FULL_SYNC_INTERVAL_MS = 5 * 60_000
+/** Compaction is less frequent than live repair; JetStream retains updates between snapshots. */
+const COLLAB_SNAPSHOT_INTERVAL_MS = 60_000
+const COLLAB_INITIAL_SNAPSHOT_DELAY_MS = 2_000
+/** Cursor presence is best-effort; 10fps is enough while keeping constrained links usable. */
+const POINTER_UPDATE_INTERVAL_MS = 100
+const PRESENCE_TTL_MS = 30_000
 /** Leader lease TTL and how often it is renewed/contested while collaborating. */
 const LOCK_TTL_SECONDS = 30
 const LOCK_RENEW_MS = 10_000
@@ -59,7 +78,8 @@ const IMPORT_TIMEOUT_MS = 60_000
 const LEGACY_LIBRARY_KEY = 'whiteboards.library'
 
 /** A NATS board with collaboration active: which source/bucket it lives in and its board id. */
-export type CollabInfo = { sourceId: string; bucket: string; boardId: string }
+export type CollabInfo = { sourceId: string; bucket: string; boardId: string; documentId: string }
+type CollabSession = CollabInfo & { generation: number; subscriberId: string }
 
 /** One anonymous peer per browser session, so several collaborators get distinct cursors. */
 const peerId = Math.random().toString(36).slice(2)
@@ -73,51 +93,21 @@ const PEER_COLORS = [
 ]
 
 type CollabMessage =
-  | { type: 'yjs'; from: string; update: string }
-  | { type: 'sync'; from: string; sv: string }
-  | { type: 'sync-reply'; from: string; update: string }
+  | {
+      type: 'scene'
+      from: string
+      elements: readonly ExcalidrawElement[]
+      appState?: Partial<AppState>
+      fileVersions?: Record<string, number>
+      /** Immutable ObjectStore blob key for each advertised file version. */
+      fileRefs?: Record<string, string>
+      /** Compatibility with early v2 messages. */
+      fileIds?: string[]
+    }
+  | { type: 'scene-ref'; from: string; ref: string }
   | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser' }
 
-/**
- * AppState keys shared with collaborators through the Yjs document. Selection,
- * cursor and editing state stay local; only the visual defaults (background and
- * current tool style) are shared.
- */
-const APP_STATE_KEYS = [
-  'viewBackgroundColor',
-  'currentItemStrokeColor',
-  'currentItemBackgroundColor',
-  'currentItemFillStyle',
-  'currentItemStrokeWidth',
-  'currentItemStrokeStyle',
-  'currentItemRoughness',
-  'currentItemOpacity',
-  'currentItemFontFamily',
-  'currentItemFontSize',
-  'currentItemTextAlign',
-  'currentItemStartArrowhead',
-  'currentItemEndArrowhead',
-  'currentItemRoundness',
-] as const
-
-/** One element inside the Yjs `elements` array: the whole element plus its z-order key. */
-type YElementItem = { map: Y.Map<unknown>; el: ExcalidrawElement; pos: string }
-
-/** Yjs binary updates ride over NATS as base64 strings. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-  return btoa(binary)
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
-}
-
-type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems }
+type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems; snapshotSequence: string }
 
 /**
  * How to place the view once a board has loaded: at its remembered viewport, or zoomed to fit
@@ -136,6 +126,43 @@ function collaborationDisplayName(remotePeerId: string, nickname?: string): stri
 
 /** The latest unsaved scene. Serialized only when it's actually sent, not on every change (which can be every mouse move). */
 type PendingScene = { name: string; elements: readonly ExcalidrawElement[]; appState: AppState; files: BinaryFiles }
+type PendingCollabScene = Pick<PendingScene, 'elements' | 'appState' | 'files'> & { session: CollabSession }
+type BufferedCollabEvent = { data: string; sequence: string; delivery: string }
+
+const MAX_COLLAB_MESSAGE_BYTES = 700_000
+
+function sequenceMax(a: bigint, value: string): bigint {
+  try {
+    const b = BigInt(value)
+    return b > a ? b : a
+  } catch {
+    return a
+  }
+}
+
+function fileVersionSignature(files: BinaryFiles): string {
+  return Object.entries(files)
+    .map(([id, file]) => `${id}:${file.version ?? 0}`)
+    .sort()
+    .join('|')
+}
+
+/** Fast content fingerprint for immutable ObjectStore blob routing. */
+function contentFingerprint(value: string): string {
+  let a = 0x811c9dc5
+  let b = 0x9e3779b9
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    a = Math.imul(a ^ code, 0x01000193)
+    b = Math.imul(b ^ code, 0x85ebca6b)
+  }
+  return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/** File blobs are immutable by id, Excalidraw version, and content. */
+function collabFileRef(id: string, version: number, dataURL: string): string {
+  return `file:${id}:${version}:${contentFingerprint(dataURL)}`
+}
 
 function serialize(scene: PendingScene) {
   return { name: scene.name, json: serializeAsJSON(scene.elements, scene.appState, scene.files, 'local') }
@@ -144,213 +171,6 @@ function serialize(scene: PendingScene) {
 function parseBoard(json: string): ImportedDataState {
   if (!json.trim()) return {}
   return JSON.parse(json) as ImportedDataState
-}
-
-/**
- * Union of two element lists by id, for merging a remote scene into the local
- * scene without clobbering disjoint concurrent edits. Local order is preserved;
- * the remote element wins for overlapping ids; remote-only elements are appended.
- */
-
-function comparePos(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0
-}
-
-/** The elements stored in the Yjs document, in array order (not yet z-sorted). */
-function ydocElements(doc: Y.Doc): YElementItem[] {
-  return (doc.getArray('elements').toArray() as Y.Map<unknown>[]).map((map) => ({
-    map,
-    el: map.get('el') as ExcalidrawElement,
-    pos: map.get('pos') as string,
-  }))
-}
-
-/** The elements in z-order (frontmost last), as Excalidraw expects them. */
-function ydocElementsSorted(doc: Y.Doc): ExcalidrawElement[] {
-  return ydocElements(doc)
-    .sort((a, b) => comparePos(a.pos, b.pos))
-    .map((item) => item.el)
-}
-
-/** The whitelisted AppState keys currently stored in the Yjs document. */
-function ydocAppState(doc: Y.Doc): Partial<AppState> {
-  const map = doc.getMap('appState')
-  const result: Partial<AppState> = {}
-  for (const key of APP_STATE_KEYS) {
-    if (map.has(key)) (result as Record<string, unknown>)[key] = map.get(key)
-  }
-  return result
-}
-
-function ydocFiles(doc: Y.Doc): BinaryFiles {
-  const map = doc.getMap('files')
-  const result: BinaryFiles = {}
-  for (const [id, file] of map) result[id] = file as BinaryFiles[string]
-  return result
-}
-
-/**
- * Whether an element changed in a way worth writing back to the Yjs document.
- * Excalidraw bumps `versionNonce` on every mutation, so equal bookkeeping means
- * unchanged. When it differs, compare the content (excluding the version fields)
- * so a re-normalization-only bump on an applied remote scene is not echoed back
- * out as a new edit (which would loop).
- */
-function elementChanged(a: ExcalidrawElement, b: ExcalidrawElement): boolean {
-  if (a.version === b.version && a.versionNonce === b.versionNonce) return false
-  const strip = ({ version, versionNonce, updated, ...rest }: ExcalidrawElement) => rest
-  return JSON.stringify(strip(a)) !== JSON.stringify(strip(b))
-}
-
-/** Build a Yjs document from a loaded scene (elements, whitelisted appState, files). */
-function buildYdoc(data: ImportedDataState): Y.Doc {
-  const doc = new Y.Doc()
-  doc.transact(() => {
-    const elements = doc.getArray('elements')
-    const items = data.elements ?? []
-    const keys = generateNKeysBetween(null, null, Math.max(items.length, 1))
-    for (let i = 0; i < items.length; i++) {
-      const map = new Y.Map<unknown>()
-      map.set('el', items[i])
-      map.set('pos', keys[i])
-      elements.push([map])
-    }
-    const appState = doc.getMap('appState')
-    for (const key of APP_STATE_KEYS) {
-      const value = (data.appState as Partial<AppState> | undefined)?.[key]
-      if (value !== undefined) appState.set(key, value)
-    }
-    const files = doc.getMap('files')
-    for (const [id, file] of Object.entries(data.files ?? {})) {
-      files.set(id, file)
-    }
-    // Origin 'init' (not 'local'): the loaded state is the baseline, not an edit
-    // to broadcast. Broadcasting it would resend the whole bucket (including all
-    // files) to every peer on every board open.
-  }, 'init')
-  return doc
-}
-
-/**
- * Write the current Excalidraw scene into the Yjs document (origin 'local').
- * Elements are matched by id: changed ones are updated, new ones inserted with a
- * fractional index between their neighbours, and ones that are actually deleted
- * are removed. Returns whether anything was written.
- *
- * Removal is keyed on `isDeleted`, NOT on absence from the scene: the scene can
- * lag the Yjs document while Excalidraw is mounting or applying a remote update,
- * and removing those elements would delete them everywhere.
- */
-function syncElementsToYdoc(doc: Y.Doc, elements: readonly ExcalidrawElement[]): boolean {
-  const yArray = doc.getArray('elements')
-  const current = new Map<string, YElementItem>()
-  for (const item of ydocElements(doc)) current.set(item.el.id, item)
-
-  let prevPos: string | null = null
-  const inserts: { el: ExcalidrawElement; pos: string }[] = []
-  const updates: { map: Y.Map<unknown>; el: ExcalidrawElement }[] = []
-  const reorders: { map: Y.Map<unknown>; pos: string }[] = []
-  const removals: Y.Map<unknown>[] = []
-
-  for (let i = 0; i < elements.length; i++) {
-    const el = elements[i]
-    const existing = current.get(el.id)
-    if (existing) {
-      if (prevPos !== null && existing.pos <= prevPos) {
-        // The element moved before its previous neighbour: give it a fresh index.
-        let next = nextPosInNewArray(elements, current, i)
-        if (next !== null && next <= prevPos) next = null
-        const pos = generateKeyBetween(prevPos, next)
-        reorders.push({ map: existing.map, pos })
-        prevPos = pos
-      } else {
-        prevPos = existing.pos
-      }
-      if (elementChanged(existing.el, el)) updates.push({ map: existing.map, el })
-    } else if (!el.isDeleted) {
-      // A new element. Deleted elements absent from the document are not
-      // resurrected (they were already removed).
-      let next = nextPosInNewArray(elements, current, i)
-      if (prevPos !== null && next !== null && next <= prevPos) next = null
-      const pos = generateKeyBetween(prevPos, next)
-      inserts.push({ el, pos })
-      prevPos = pos
-    }
-  }
-  // Remove only elements that are actually deleted. Absence from the scene is
-  // not a removal signal (see above); this also drops deleted elements once
-  // their `isDeleted` flag has been written into the document.
-  for (const item of current.values()) {
-    if (item.el.isDeleted) removals.push(item.map)
-  }
-
-  if (inserts.length + updates.length + reorders.length + removals.length === 0) return false
-
-  doc.transact(() => {
-    for (const { el, pos } of inserts) {
-      const map = new Y.Map<unknown>()
-      map.set('el', el)
-      map.set('pos', pos)
-      yArray.push([map])
-    }
-    for (const { map, el } of updates) map.set('el', el)
-    for (const { map, pos } of reorders) map.set('pos', pos)
-    for (const map of removals) {
-      const index = yArray.toArray().indexOf(map)
-      if (index >= 0) yArray.delete(index)
-    }
-  }, 'local')
-  return true
-}
-
-/** The z-order key of the next element in `elements` (from index i) that is already in the document. */
-function nextPosInNewArray(
-  elements: readonly ExcalidrawElement[],
-  current: Map<string, YElementItem>,
-  i: number,
-): string | null {
-  for (let j = i + 1; j < elements.length; j++) {
-    const existing = current.get(elements[j].id)
-    if (existing) return existing.pos
-  }
-  return null
-}
-
-/** Copy the whitelisted AppState keys into the Yjs document (origin 'local'). Returns whether anything was written. */
-function syncAppStateToYdoc(doc: Y.Doc, appState: AppState): boolean {
-  const map = doc.getMap('appState')
-  let wrote = false
-  doc.transact(() => {
-    for (const key of APP_STATE_KEYS) {
-      const value = appState[key]
-      if (value === undefined) continue
-      if (map.get(key) !== value) {
-        map.set(key, value)
-        wrote = true
-      }
-    }
-  }, 'local')
-  return wrote
-}
-
-/** Copy files that are new or changed into the Yjs document (origin 'local'). */
-function syncFilesToYdoc(doc: Y.Doc, files: BinaryFiles): void {
-  const map = doc.getMap('files')
-  doc.transact(() => {
-    for (const [id, file] of Object.entries(files)) {
-      if (map.get(id) !== file) map.set(id, file)
-    }
-  }, 'local')
-}
-
-/** Serialize the Yjs document back into a plain scene for persistence. */
-function ydocToScene(doc: Y.Doc): PendingScene {
-  return {
-    name: '',
-    elements: ydocElementsSorted(doc),
-    appState: ydocAppState(doc) as AppState,
-    files: ydocFiles(doc),
-  }
 }
 
 function loadLegacyLibrary(): LibraryItems {
@@ -449,21 +269,65 @@ export default function Canvas({
   collaborationNickname?: string
 }) {
   const [board, setBoard] = useState<OpenBoard | null>(null)
+  const [collabRestart, setCollabRestart] = useState(0)
+  /** Keep a stale snapshot covered until its retained updates are reconciled. */
+  const [collabSynchronizing, setCollabSynchronizing] = useState(false)
+  const boardRef = useRef<OpenBoard | null>(null)
+  boardRef.current = board
+  const boardKey = board?.key ?? null
   const systemTheme = useSystemTheme()
   const theme: 'light' | 'dark' = canvasAppearance === 'system' ? systemTheme : canvasAppearance === 'dark' ? 'dark' : 'light'
+  const collabSourceId = collab?.sourceId ?? null
+  const collabBucket = collab?.bucket ?? null
+  const collabBoardId = collab?.boardId ?? null
+  const collabDocumentId = collab?.documentId ?? null
 
   const api = useRef<ExcalidrawImperativeAPI | null>(null)
-  /** The collaboration target for the current board, kept in a ref so memoized callbacks can read it. */
-  const collabRef = useRef(collab)
+  /** Immutable routing identity for the mounted collaboration session. */
+  const collabSession = useRef<CollabSession | null>(null)
+  const collabGeneration = useRef(0)
+  const collabJoinReady = useRef(false)
+  const bufferedCollabEvents = useRef<BufferedCollabEvent[]>([])
   const boardIdRef = useRef(boardId)
-  /** Name of the open board, for serializing the Yjs document on flush. */
+  /** Name of the open board, for serializing the reconciled scene on flush. */
   const boardNameRef = useRef('')
-  /** The Yjs document backing collaboration for the current NATS board, or null when not collaborating. */
-  const ydoc = useRef<Y.Doc | null>(null)
-  /** File ids already handed to Excalidraw (via addFiles), so remote file updates are not re-added. */
-  const appliedFileIds = useRef<Set<string>>(new Set())
-  /** The Yjs document changed since the last flush, so it must be persisted. */
-  const ydocDirty = useRef(false)
+  /** Latest reconciled collaboration scene; the lease holder materializes it to JSON. */
+  const collabScene = useRef<PendingScene | null>(null)
+  const collabDirty = useRef(false)
+  /** Monotonic local materialization revision, used to avoid clearing dirtiness after a racing snapshot. */
+  const collabRevision = useRef(0)
+  /** Snapshots wait until every local durable publish has an acknowledged stream sequence. */
+  const collabPublishesPending = useRef(0)
+  /** Latest local scene waiting for a bounded-rate collaboration publication. */
+  const pendingCollab = useRef<PendingCollabScene | null>(null)
+  const collabSyncTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const fullSyncTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const snapshotTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const initialSnapshotTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const snapshotInFlight = useRef<number | null>(null)
+  const joinRetryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  /** Highest durable update sequence incorporated into the local scene. */
+  const collabSequence = useRef(0n)
+  /** Contiguous per-consumer delivery watermark; unlike stream sequence it has no cross-board gaps. */
+  const collabDelivery = useRef(0n)
+  /** Stream sequence of the latest applied remote background value. */
+  const remoteAppStateSequence = useRef(0n)
+  const collabMessageCounter = useRef(0)
+  /** File versions already stored in ObjectStore for this document. */
+  const uploadedFileRefs = useRef<Map<string, string>>(new Map())
+  /** Avoid hashing large image data URLs again on every 80ms drawing update. */
+  const fileRefCache = useRef<WeakMap<object, { version: number; dataURL: string; ref: string }>>(new WeakMap())
+  /** Last element versions acknowledged by JetStream, for lightweight deltas. */
+  const publishedElementVersions = useRef<Map<string, string>>(new Map())
+  /** At most one normal scene publication runs per session; newer input coalesces behind it. */
+  const sessionPublishes = useRef<Map<string, number>>(new Map())
+  /** Set after scheduleCollabSync is declared, so a completed publish can drain coalesced input. */
+  const resumeCollabSync = useRef<() => void>(() => undefined)
+  /** Failed publications remain bound to their document and retry independently. */
+  const retryTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  /** Visible collaboration health. Repeated failures reuse one persistent toast. */
+  const collabRepairing = useRef(false)
+  const collabRetryingPublishes = useRef<Set<string>>(new Set())
   /** Whether this client currently holds the leader lease (the single bucket writer). */
   const isLeader = useRef(false)
   /** Bumped on every lease acquisition/loss; guards a stale flush across a takeover. */
@@ -472,8 +336,14 @@ export default function Canvas({
   const lockTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const pending = useRef<PendingScene | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  /** Latest cursor position waiting for the bandwidth-limited presence update. */
+  const pendingPointer = useRef<Extract<CollabMessage, { type: 'pointer' }> | null>(null)
+  const pointerTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const presenceTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const peerLastSeen = useRef<Map<string, number>>(new Map())
   const lastVersion = useRef<number | null>(null)
-  const lastFileCount = useRef(0)
+  const lastFileSignature = useRef('')
+  const lastBackground = useRef<AppState['viewBackgroundColor'] | undefined>(undefined)
   /** Set when a board is opened, until its initial view (remembered or fitted) has been applied. */
   const initialView = useRef<InitialView | null>(null)
   /** Viewport changes are only reported once the initial view is in place. */
@@ -488,13 +358,52 @@ export default function Canvas({
   /** A library file is being imported (dropped or opened): number of items before, for the "Added N" message. */
   const importing = useRef<{ before: number; timer: ReturnType<typeof setTimeout> } | null>(null)
 
-  // Keep the collaboration target in sync with the prop.
-  useEffect(() => {
-    collabRef.current = collab
-  }, [collab])
   useEffect(() => {
     boardIdRef.current = boardId
   }, [boardId])
+
+  const showCollabRepairing = useCallback((message = 'Reconnecting collaboration…') => {
+    collabRepairing.current = true
+    api.current?.setToast({ message, duration: Infinity, closable: false })
+  }, [])
+
+  const finishCollabRepair = useCallback(() => {
+    if (!collabRepairing.current) return
+    collabRepairing.current = false
+    if (collabRetryingPublishes.current.size > 0) {
+      api.current?.setToast({ message: 'Changes pending — retrying…', duration: Infinity, closable: false })
+      return
+    }
+    api.current?.setToast({ message: 'Collaboration restored', duration: 3000, closable: true })
+  }, [])
+
+  const requestCollabReplay = useCallback((message: string) => {
+    showCollabRepairing(message)
+    setCollabSynchronizing(true)
+    collabJoinReady.current = false
+    // Back off persistent corruption/missing-blob failures instead of spinning
+    // a tight join/replay loop. Repeated failures coalesce onto this timer.
+    if (joinRetryTimer.current) return
+    joinRetryTimer.current = setTimeout(() => {
+      joinRetryTimer.current = undefined
+      setCollabRestart((value) => value + 1)
+    }, 1_000)
+  }, [showCollabRepairing])
+
+  // Do not leave a reconnecting toast behind after the user switches to a
+  // local board. A durable publication from the previous board may still be
+  // retrying, in which case that status remains globally relevant.
+  useEffect(() => {
+    if (collabDocumentId) return
+    setCollabSynchronizing(false)
+    if (!collabRepairing.current) return
+    collabRepairing.current = false
+    if (collabRetryingPublishes.current.size > 0) {
+      api.current?.setToast({ message: 'Changes pending — retrying…', duration: Infinity, closable: false })
+    } else {
+      api.current?.setToast(null)
+    }
+  }, [collabDocumentId])
 
   // Show progress while a library file is imported; Excalidraw itself gives no feedback until it's done.
   useEffect(() => {
@@ -530,22 +439,181 @@ export default function Canvas({
     }
   }, [])
 
+  /** Store large files first, then append bounded changed-element batches to JetStream. */
+  const publishCollabScene = useCallback(
+    (session: CollabSession, elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles, errorContext: string, full = false) => {
+      const sessionPublishKey = `${session.documentId}:${session.generation}`
+      sessionPublishes.current.set(sessionPublishKey, (sessionPublishes.current.get(sessionPublishKey) ?? 0) + 1)
+      const changedFiles: BinaryFiles = {}
+      const fileRefs: Record<string, string> = {}
+      for (const [id, file] of Object.entries(files)) {
+        const version = file.version ?? 0
+        const cached = fileRefCache.current.get(file)
+        const ref = cached?.version === version && cached.dataURL === file.dataURL
+          ? cached.ref
+          : collabFileRef(id, version, file.dataURL)
+        if (cached?.ref !== ref) fileRefCache.current.set(file, { version, dataURL: file.dataURL, ref })
+        fileRefs[id] = ref
+        if (uploadedFileRefs.current.get(id) !== ref) changedFiles[ref] = file
+      }
+      const changedElements = full
+        ? [...elements]
+        : elements.filter((element) => publishedElementVersions.current.get(element.id) !== `${element.version}:${element.versionNonce}`)
+      const batches: ExcalidrawElement[][] = []
+      let batch: ExcalidrawElement[] = []
+      const encoder = new TextEncoder()
+      const emptyMessageBytes = encoder.encode(JSON.stringify({ type: 'scene', from: peerId, elements: [] })).byteLength
+      let batchBytes = emptyMessageBytes
+      for (const element of changedElements) {
+        // Encode each element once. Re-stringifying the growing candidate array
+        // made full-scene sync O(n²) and froze large drawings on the UI thread.
+        const elementBytes = encoder.encode(JSON.stringify(element)).byteLength + (batch.length > 0 ? 1 : 0)
+        if (batch.length > 0 && batchBytes + elementBytes > MAX_COLLAB_MESSAGE_BYTES) {
+          batches.push(batch)
+          batch = [element]
+          batchBytes = emptyMessageBytes + elementBytes
+        } else {
+          batch.push(element)
+          batchBytes += elementBytes
+        }
+      }
+      if (batch.length > 0) batches.push(batch)
+      if (batches.length === 0) batches.push([])
+      // Reuse the same IDs across retries so JetStream deduplicates a batch
+      // whose publish acknowledgement was lost after the server stored it.
+      const messageIds = batches.map(() => `${peerId}:${++collabMessageCounter.current}`)
+
+      // Each logical publication retries independently. A session-wide key lets
+      // a later successful update cancel an earlier failed update and strands
+      // its Promise (which also blocks snapshots forever).
+      const retryKey = `${session.documentId}:${session.generation}:${messageIds[0]}`
+      if (collabSession.current?.generation === session.generation) collabPublishesPending.current++
+      const run = async () => {
+        if (Object.keys(changedFiles).length > 0) {
+          await collabPutFiles(session.sourceId, session.bucket, session.documentId, JSON.stringify(changedFiles))
+          if (collabSession.current?.generation === session.generation) {
+            for (const [id, ref] of Object.entries(fileRefs)) uploadedFileRefs.current.set(id, ref)
+          }
+        }
+        for (let i = 0; i < batches.length; i++) {
+          const message: CollabMessage = {
+            type: 'scene',
+            from: peerId,
+            elements: batches[i],
+            appState: i === 0 ? { viewBackgroundColor: appState.viewBackgroundColor } : undefined,
+            fileVersions: i === 0
+              ? Object.fromEntries(Object.entries(files).map(([id, file]) => [id, file.version ?? 0]))
+              : undefined,
+            fileRefs: i === 0 ? fileRefs : undefined,
+          }
+          let encoded = JSON.stringify(message)
+          if (new TextEncoder().encode(encoded).byteLength > MAX_COLLAB_MESSAGE_BYTES) {
+            // A single large freehand/metadata element cannot be split without
+            // changing Excalidraw semantics. Store the complete wire message as
+            // an immutable blob and publish a small durable reference instead.
+            const ref = `scene:${messageIds[i]}`
+            await collabPutFiles(session.sourceId, session.bucket, session.documentId, JSON.stringify({ [ref]: message }))
+            encoded = JSON.stringify({ type: 'scene-ref', from: peerId, ref } satisfies CollabMessage)
+          }
+          // A publish acknowledgement does not mean this client has consumed
+          // every earlier stream entry. Snapshot progress advances only in the
+          // ordered subscription callback below, after each scene is applied.
+          await collabPublish(session.sourceId, session.bucket, session.documentId, messageIds[i], encoded)
+        }
+        if (collabSession.current?.generation === session.generation) {
+          for (const element of changedElements) {
+            publishedElementVersions.current.set(element.id, `${element.version}:${element.versionNonce}`)
+          }
+        }
+        const existing = retryTimers.current.get(retryKey)
+        if (existing) clearTimeout(existing)
+        retryTimers.current.delete(retryKey)
+        const wasRetrying = collabRetryingPublishes.current.delete(retryKey)
+        if (wasRetrying && collabRetryingPublishes.current.size === 0 && !collabRepairing.current) {
+          api.current?.setToast({ message: 'Collaboration changes saved', duration: 3000, closable: true })
+        }
+      }
+      const attempt = (): Promise<void> => run().catch((err: unknown) => {
+        log('error', `${errorContext}: ${String(err)}; retrying`)
+        collabRetryingPublishes.current.add(retryKey)
+        if (!collabRepairing.current) {
+          api.current?.setToast({ message: 'Changes pending — retrying…', duration: Infinity, closable: false })
+        }
+        return new Promise<void>((resolve) => {
+          const existing = retryTimers.current.get(retryKey)
+          if (existing) clearTimeout(existing)
+          retryTimers.current.set(retryKey, setTimeout(() => {
+            retryTimers.current.delete(retryKey)
+            attempt().then(resolve)
+          }, 1_000))
+        })
+      })
+      attempt()
+        .finally(() => {
+          const remaining = Math.max(0, (sessionPublishes.current.get(sessionPublishKey) ?? 1) - 1)
+          if (remaining === 0) {
+            sessionPublishes.current.delete(sessionPublishKey)
+            // Changes that arrived while this publish was in flight were kept
+            // as one latest scene. Drain them now instead of spawning parallel
+            // retries for every 80ms input sample.
+            resumeCollabSync.current()
+          } else {
+            sessionPublishes.current.set(sessionPublishKey, remaining)
+          }
+          if (collabSession.current?.generation === session.generation) {
+            collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
+          }
+        })
+    },
+    [],
+  )
+
+  /** Publish the latest local scene at a bounded rate. Excalidraw elements carry
+   * their own version/versionNonce conflict metadata and are reconciled by peers. */
+  const flushPendingCollab = useCallback(() => {
+    clearTimeout(collabSyncTimer.current)
+    collabSyncTimer.current = undefined
+    const scene = pendingCollab.current
+    const instance = api.current
+    if (!scene || !instance) return false
+    const sessionPublishKey = `${scene.session.documentId}:${scene.session.generation}`
+    if ((sessionPublishes.current.get(sessionPublishKey) ?? 0) > 0) {
+      // Keep replacing this with the newest onChange scene while one update is
+      // in flight. Its completion will call resumeCollabSync and publish once.
+      return false
+    }
+    pendingCollab.current = null
+    collabScene.current = {
+      name: boardNameRef.current,
+      elements: scene.elements,
+      appState: scene.appState,
+      files: scene.files,
+    }
+    collabDirty.current = true
+    collabRevision.current++
+    publishCollabScene(scene.session, scene.elements, scene.appState, scene.files, 'Could not publish a collaboration update')
+    return true
+  }, [publishCollabScene])
+
+  /** Send only the newest cursor position in each bandwidth window. */
+  const flushPointer = useCallback(() => {
+    clearTimeout(pointerTimer.current)
+    pointerTimer.current = undefined
+    clearInterval(presenceTimer.current)
+    presenceTimer.current = undefined
+    peerLastSeen.current.clear()
+    const message = pendingPointer.current
+    pendingPointer.current = null
+    const target = collabSession.current
+    if (message && target) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
+  }, [])
+
   const flush = useCallback(() => {
     clearTimeout(timer.current)
-    // While collaborating the Yjs document is the source of truth: persist it as a
-    // plain scene snapshot (live sharing happens through Yjs updates, not here).
-    // Only the leader writes the bucket — followers keep the Yjs document dirty
-    // and let the leader persist it (single-writer persistence).
-    const doc = ydoc.current
-    if (doc && ydocDirty.current) {
-      if (isLeader.current) {
-        ydocDirty.current = false
-        const scene = ydocToScene(doc)
-        scene.name = boardNameRef.current
-        const { name, json } = serialize(scene)
-        canvasChange(name, json)
-      }
-    } else {
+    flushPendingCollab()
+    // Collaboration is persisted by durable updates plus immutable snapshots.
+    // Local boards retain the ordinary debounced JSON write path.
+    if (!collabSession.current) {
       const scene = pending.current
       pending.current = null
       if (scene) {
@@ -555,90 +623,198 @@ export default function Canvas({
     }
     flushView()
     return true
-  }, [flushView])
+  }, [flushPendingCollab, flushView])
 
   /**
-   * Push a remote Yjs change into Excalidraw (never captured into undo history),
-   * hand new files to the API, and persist the change. Called from the Yjs
-   * observers for anything that did not originate locally.
+   * Batch rapid Excalidraw changes into one latest-scene publication per
+   * interval. Local rendering remains immediate.
    */
-  const observeYdoc = useCallback(() => {
-    const doc = ydoc.current
+  const scheduleCollabSync = useCallback(() => {
+    if (collabSyncTimer.current) return
+    collabSyncTimer.current = setTimeout(() => {
+      collabSyncTimer.current = undefined
+      if (!flushPendingCollab()) return
+      clearTimeout(timer.current)
+      timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
+    }, COLLAB_UPDATE_INTERVAL_MS)
+  }, [flush, flushPendingCollab])
+  resumeCollabSync.current = scheduleCollabSync
+
+  /**
+   * Reconcile a remote scene using Excalidraw's own collaboration semantics.
+   * Remote updates never enter the local undo stack.
+   */
+  const applyRemoteScene = useCallback((message: Extract<CollabMessage, { type: 'scene' }>, sequence = '0') => {
     const instance = api.current
-    if (!doc || !instance) return
-    const elements = ydocElementsSorted(doc)
-    const appState = ydocAppState(doc)
-    const files = ydocFiles(doc)
-    if (hashElementsVersion(elements) !== hashElementsVersion(instance.getSceneElementsIncludingDeleted())) {
-      instance.updateScene({ elements, captureUpdate: CaptureUpdateAction.NEVER })
+    if (!instance) throw new Error('canvas is not ready')
+    if (!Array.isArray(message.elements)) throw new Error('invalid collaboration scene')
+    // Publish a local drag waiting in the coalescing window before merging, so
+    // peers can independently reconcile both versioned states.
+    flushPendingCollab()
+    const local = instance.getSceneElementsIncludingDeleted()
+    // restoreElements returns ordered elements; reconciliation's remote brand is
+    // compile-time-only in Excalidraw, so mark the restored wire scene as remote.
+    const restored = restoreElements(message.elements, local) as unknown as readonly RemoteExcalidrawElement[]
+    const reconciled = reconcileElements(
+      local as readonly OrderedExcalidrawElement[],
+      restored,
+      instance.getAppState(),
+    )
+    const files = instance.getFiles()
+    const currentAppState = instance.getAppState()
+    const messageSequence = sequenceMax(0n, sequence)
+    const advertisedBackground = message.appState?.viewBackgroundColor
+    const remoteBackground = advertisedBackground !== undefined && messageSequence >= remoteAppStateSequence.current
+      ? advertisedBackground
+      : undefined
+    if (remoteBackground !== undefined) remoteAppStateSequence.current = messageSequence
+    const reconciledAppState = remoteBackground
+      ? ({ ...currentAppState, viewBackgroundColor: remoteBackground } as AppState)
+      : currentAppState
+    // Set before updateScene: its onChange is synchronous in parts of Excalidraw.
+    lastVersion.current = hashElementsVersion(reconciled)
+    lastFileSignature.current = fileVersionSignature(files)
+    lastBackground.current = reconciledAppState.viewBackgroundColor
+    collabScene.current = {
+      name: boardNameRef.current,
+      elements: reconciled,
+      appState: reconciledAppState,
+      files,
     }
-    const current = instance.getAppState()
-    const merged: Partial<AppState> = {}
-    let appChanged = false
-    for (const key of APP_STATE_KEYS) {
-      const value = appState[key]
-      if (value !== undefined && value !== current[key]) {
-        ;(merged as Record<string, unknown>)[key] = value
-        appChanged = true
-      }
+    collabDirty.current = true
+    collabRevision.current++
+    instance.updateScene({
+      elements: reconciled,
+      appState: remoteBackground ? ({ viewBackgroundColor: remoteBackground } as AppState) : undefined,
+      captureUpdate: CaptureUpdateAction.NEVER,
+    })
+    const target = collabSession.current
+    const remoteFileVersions = message.fileVersions ?? Object.fromEntries((message.fileIds ?? []).map((id) => [id, 0]))
+    const missingFiles = Object.entries(remoteFileVersions)
+      .filter(([id, version]) => !files[id] || (files[id].version ?? 0) < version)
+      .map(([id]) => ({ id, ref: message.fileRefs?.[id] ?? id }))
+    if (target && missingFiles.length > 0) {
+      collabPublishesPending.current++
+      collabGetFiles(target.sourceId, target.bucket, target.documentId, missingFiles.map(({ ref }) => ref))
+        .then((json) => {
+          if (collabSession.current?.generation !== target.generation) return
+          const blobs = JSON.parse(json) as BinaryFiles
+          const received = Object.fromEntries(
+            missingFiles.flatMap(({ id, ref }) => blobs[ref] ? [[id, blobs[ref]]] : []),
+          ) as BinaryFiles
+          if (Object.keys(received).length !== missingFiles.length) {
+            throw new Error('one or more collaboration file blobs are unavailable')
+          }
+          api.current?.addFiles(Object.values(received))
+          for (const [id, file] of Object.entries(received)) {
+            uploadedFileRefs.current.set(id, collabFileRef(id, file.version ?? 0, file.dataURL))
+          }
+          if (collabScene.current) {
+            collabScene.current = { ...collabScene.current, files: { ...collabScene.current.files, ...received } }
+            collabDirty.current = true
+            collabRevision.current++
+          }
+        })
+        .catch((err: unknown) => {
+          if (collabSession.current?.generation !== target.generation) return
+          log('error', `Could not load collaboration files: ${String(err)}; replaying the document`)
+          requestCollabReplay('Reconnecting collaboration — retrieving shared files…')
+        })
+        .finally(() => {
+          if (collabSession.current?.generation === target.generation) {
+            collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
+          }
+        })
     }
-    if (appChanged) instance.updateScene({ appState: merged as AppState })
-    const newFiles: BinaryFileData[] = []
-    for (const [id, file] of Object.entries(files)) {
-      if (!appliedFileIds.current.has(id)) {
-        appliedFileIds.current.add(id)
-        newFiles.push(file)
-      }
-    }
-    if (newFiles.length > 0) instance.addFiles(newFiles)
-    // Remote changes must be persisted too; the Yjs document is the source of truth.
-    ydocDirty.current = true
     clearTimeout(timer.current)
-    timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
-  }, [flush])
+    timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
+  }, [flush, flushPendingCollab, requestCollabReplay])
 
-  /** Yjs observers: ignore local writes (already applied) and the initial build. */
-  const onYdocChange = useCallback((event: Y.YEvent<any>) => {
-    if (event.transaction.origin === 'local' || event.transaction.origin === 'init') return
-    observeYdoc()
-  }, [observeYdoc])
+  const sendFullScene = useCallback(() => {
+    const session = collabSession.current
+    const instance = api.current
+    if (!session || !instance) return
+    const appState = instance.getAppState()
+    const elements = instance.getSceneElementsIncludingDeleted()
+    const files = instance.getFiles()
+    collabScene.current = { name: boardNameRef.current, elements, appState, files }
+    collabDirty.current = true
+    collabRevision.current++
+    publishCollabScene(session, elements, appState, files, 'Could not publish a full collaboration scene', true)
+  }, [publishCollabScene])
 
-  /** Broadcast our own edits (origin 'local') to collaborators as Yjs binary updates. */
-  const onYdocUpdate = useCallback((_update: Uint8Array, origin: unknown) => {
-    if (origin !== 'local') return
-    const target = collabRef.current
-    if (!target) return
-    const message: CollabMessage = { type: 'yjs', from: peerId, update: bytesToBase64(_update) }
-    collabSend(target.boardId, JSON.stringify(message))
+  /** Compact the reconciled scene into an immutable sequence-addressed snapshot. */
+  const writeSnapshot = useCallback(() => {
+    const target = collabSession.current
+    const scene = collabScene.current
+    const sequence = collabSequence.current
+    if (
+      !target ||
+      !scene ||
+      !isLeader.current ||
+      !collabDirty.current ||
+      sequence === 0n ||
+      collabPublishesPending.current > 0 ||
+      snapshotInFlight.current === target.generation
+    ) return
+    const revision = collabRevision.current
+    snapshotInFlight.current = target.generation
+    const { json } = serialize(scene)
+    collabSnapshot(target.sourceId, target.bucket, target.boardId, target.documentId, sequence.toString(), json, target.subscriberId)
+      .then(() => {
+        if (collabRevision.current === revision) collabDirty.current = false
+      })
+      .catch((err: unknown) => log('error', `Could not write a collaboration snapshot: ${String(err)}`))
+      .finally(() => {
+        if (snapshotInFlight.current === target.generation) snapshotInFlight.current = null
+      })
   }, [])
 
-  const wireYdoc = useCallback(
-    (doc: Y.Doc) => {
-      doc.getArray('elements').observe(onYdocChange)
-      doc.getMap('appState').observe(onYdocChange)
-      doc.getMap('files').observe(onYdocChange)
-      doc.on('update', onYdocUpdate)
-    },
-    [onYdocChange, onYdocUpdate],
-  )
-
-  const teardownYdoc = useCallback(() => {
-    const doc = ydoc.current
-    ydoc.current = null
-    ydocDirty.current = false
-    if (doc) doc.destroy()
+  const teardownCollab = useCallback(() => {
+    const session = collabSession.current
+    collabSession.current = null
+    collabJoinReady.current = false
+    bufferedCollabEvents.current = []
+    clearTimeout(collabSyncTimer.current)
+    collabSyncTimer.current = undefined
+    pendingCollab.current = null
+    clearInterval(fullSyncTimer.current)
+    fullSyncTimer.current = undefined
+    clearInterval(snapshotTimer.current)
+    snapshotTimer.current = undefined
+    clearTimeout(initialSnapshotTimer.current)
+    initialSnapshotTimer.current = undefined
+    snapshotInFlight.current = null
+    clearTimeout(joinRetryTimer.current)
+    joinRetryTimer.current = undefined
+    clearTimeout(pointerTimer.current)
+    pointerTimer.current = undefined
+    pendingPointer.current = null
+    collabScene.current = null
+    collabDirty.current = false
+    collabRevision.current = 0
+    collabPublishesPending.current = 0
+    uploadedFileRefs.current.clear()
+    publishedElementVersions.current.clear()
+    collabSequence.current = 0n
+    collabDelivery.current = 0n
+    remoteAppStateSequence.current = 0n
     // Stop the election loop and drop the leader lease (only if we still own it).
     clearInterval(lockTimer.current)
     lockTimer.current = undefined
     if (isLeader.current) {
       isLeader.current = false
       leaderEpoch.current++
-      const target = collabRef.current
-      if (target) {
-        collabReleaseLock(target.boardId, peerId).catch((err: unknown) =>
+      if (session) {
+        collabReleaseLock(session.sourceId, session.bucket, session.documentId, session.subscriberId).catch((err: unknown) =>
           log('error', `Could not release the collaboration lock: ${String(err)}`),
         )
       }
+    }
+    if (session) {
+      collabLeave(session.sourceId, session.bucket, session.documentId, session.subscriberId).catch((err: unknown) =>
+        log('error', `Could not leave collaboration: ${String(err)}`),
+      )
     }
   }, [])
 
@@ -651,32 +827,31 @@ export default function Canvas({
     clearTimeout(timer.current)
   }, [])
 
-  /** Become the leader; the lease is already held. Persist anything that changed while a follower. */
+  /** Become the compaction leader; live publishing never depends on the lease. */
   const becomeLeader = useCallback(() => {
     if (isLeader.current) return
     isLeader.current = true
     leaderEpoch.current++
-    if (ydocDirty.current) {
-      clearTimeout(timer.current)
-      timer.current = setTimeout(flush, 0)
+    if (collabDirty.current) {
+      setTimeout(writeSnapshot, 0)
     }
-  }, [flush])
+  }, [writeSnapshot])
 
   /**
    * One tick of the leader election loop: the leader renews its lease (stepping
    * down if it lost it), followers try to take over an expired lease.
    */
   const lockLoop = useCallback(() => {
-    const board = boardIdRef.current
-    if (!board) return
+    const target = collabSession.current
+    if (!target) return
     if (isLeader.current) {
-      collabRenewLock(board, peerId, LOCK_TTL_SECONDS)
+      collabRenewLock(target.sourceId, target.bucket, target.documentId, target.subscriberId, LOCK_TTL_SECONDS)
         .then((ok) => {
           if (!ok) loseLeadership()
         })
         .catch(() => loseLeadership())
     } else {
-      collabAcquireLock(board, peerId, LOCK_TTL_SECONDS)
+      collabAcquireLock(target.sourceId, target.bucket, target.documentId, target.subscriberId, LOCK_TTL_SECONDS)
         .then((won) => {
           if (won) becomeLeader()
         })
@@ -684,32 +859,159 @@ export default function Canvas({
     }
   }, [becomeLeader, loseLeadership])
 
+  /** Resolve a wire scene that was too large for one NATS message. */
+  const applySceneReference = useCallback((session: CollabSession, ref: string, sequence: string) => {
+    collabPublishesPending.current++
+    collabGetFiles(session.sourceId, session.bucket, session.documentId, [ref])
+      .then((json) => {
+        if (collabSession.current?.generation !== session.generation) return
+        const blobs = JSON.parse(json) as Record<string, unknown>
+        const message = blobs[ref]
+        if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'scene') {
+          throw new Error('invalid referenced collaboration scene')
+        }
+        applyRemoteScene(message as Extract<CollabMessage, { type: 'scene' }>, sequence)
+      })
+      .catch((err: unknown) => {
+        if (collabSession.current?.generation !== session.generation) return
+        log('error', `Could not load a referenced collaboration scene: ${String(err)}; replaying the document`)
+        requestCollabReplay('Reconnecting collaboration — retrieving a large update…')
+      })
+      .finally(() => {
+        if (collabSession.current?.generation === session.generation) {
+          collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
+        }
+      })
+  }, [applyRemoteScene, requestCollabReplay])
+
+  const acknowledgeCollabEvent = useCallback((session: CollabSession, event: BufferedCollabEvent) => {
+    if (event.sequence === '0') return
+    collabAck(session.sourceId, session.bucket, session.documentId, session.subscriberId, event.sequence)
+      .catch((err: unknown) => log('error', `Could not acknowledge collaboration update: ${String(err)}`))
+  }, [])
+
+  /** Apply one event after the join snapshot has established the replay baseline. */
+  const handleCollabEvent = useCallback(
+    (session: CollabSession, event: BufferedCollabEvent) => {
+      if (collabSession.current?.generation !== session.generation) return
+      let delivery = 0n
+      if (event.sequence !== '0') {
+        try {
+          delivery = BigInt(event.delivery)
+        } catch {
+          delivery = 0n
+        }
+        if (delivery <= collabDelivery.current) return // duplicate renderer event
+        if (delivery !== collabDelivery.current + 1n) {
+          // Durable messages are ACKed only below, after this renderer validates
+          // them. A delivery gap still forces a fresh snapshot-based replay;
+          // never advance a compaction watermark across it.
+          log('error', 'Collaboration delivery gap detected; replaying the document')
+          requestCollabReplay('Reconnecting collaboration — repairing a missed update…')
+          return
+        }
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(event.data)
+      } catch {
+        if (event.sequence !== '0') {
+          log('error', 'Invalid durable collaboration event; replaying the document')
+          requestCollabReplay('Reconnecting collaboration — repairing an invalid update…')
+        }
+        return
+      }
+      if (!parsed || typeof parsed !== 'object' || !(('type' in parsed))) {
+        if (event.sequence !== '0') {
+          log('error', 'Unknown durable collaboration event; replaying the document')
+          requestCollabReplay('Reconnecting collaboration — repairing an unknown update…')
+        }
+        return
+      }
+      const message = parsed as CollabMessage
+      // Never advance the compaction watermark across an event we did not
+      // understand and apply. Presence is Core NATS (`sequence === "0"`), while
+      // every durable event must be a valid scene or scene reference.
+      const validDurable =
+        (message.type === 'scene' && Array.isArray(message.elements) && typeof message.from === 'string') ||
+        (message.type === 'scene-ref' && typeof message.from === 'string' && typeof message.ref === 'string')
+      if (event.sequence !== '0' && !validDurable) {
+        log('error', 'Unsupported durable collaboration event; replaying the document')
+        requestCollabReplay('Reconnecting collaboration — repairing an unsupported update…')
+        return
+      }
+      if (event.sequence !== '0') {
+        collabDelivery.current = delivery
+        collabSequence.current = sequenceMax(collabSequence.current, event.sequence)
+      }
+      // Durable publishes and Core presence both echo to their sender. The
+      // sequence is recorded above, but the local scene/cursor is already shown.
+      if ('from' in message && message.from === peerId) {
+        acknowledgeCollabEvent(session, event)
+        return
+      }
+      if (message.type === 'scene') {
+        if (!Array.isArray(message.elements) || typeof message.from !== 'string') return
+        try {
+          applyRemoteScene(message, event.sequence)
+          acknowledgeCollabEvent(session, event)
+        } catch (err) {
+          log('error', `Could not reconcile a remote scene: ${String(err)}; replaying the document`)
+          requestCollabReplay('Reconnecting collaboration — reconciling shared changes…')
+        }
+        return
+      }
+      if (message.type === 'scene-ref') {
+        if (typeof message.from !== 'string' || typeof message.ref !== 'string') return
+        applySceneReference(session, message.ref, event.sequence)
+        // The renderer has durably received the reference. If resolving it
+        // fails, applySceneReference forces a fresh retained-log replay.
+        acknowledgeCollabEvent(session, event)
+        return
+      }
+      if (
+        message.type !== 'pointer' ||
+        typeof message.peerId !== 'string' ||
+        typeof message.x !== 'number' ||
+        typeof message.y !== 'number' ||
+        (message.tool !== 'pointer' && message.tool !== 'laser')
+      ) return
+      if (message.peerId === peerId) return
+      peerLastSeen.current.set(message.peerId, Date.now())
+      const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
+      collaborators.set(message.peerId as SocketId, {
+        pointer: { x: message.x, y: message.y, tool: message.tool },
+        username: collaborationDisplayName(message.peerId, message.nickname),
+        color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
+      })
+      api.current?.updateScene({ collaborators })
+    },
+    [acknowledgeCollabEvent, applyRemoteScene, applySceneReference, requestCollabReplay],
+  )
+
   useEffect(() => {
     let key = 0
     const unlistens: Promise<() => void>[] = [
-      onCanvasOpen(({ name, json, view }) => {
-        clearTimeout(timer.current)
+      onCanvasOpen(({ name, json, view, snapshotSequence }) => {
+        // Commit the final coalesced state for the board being left.
+        if (collabScene.current || pending.current) flush()
         pending.current = null
-        // Remember where the user was on the board being left.
-        flushView()
         try {
           const data = parseBoard(json)
-          setBoard({ name, data, key: ++key, library: library.current })
+          setBoard({ name, data, key: ++key, library: library.current, snapshotSequence: snapshotSequence ?? '0' })
           boardNameRef.current = name
           lastVersion.current = null
+          lastBackground.current = data.appState?.viewBackgroundColor
           trackingView.current = false
           lastView.current = null
           initialView.current = {
             saved: isViewport(view) ? view : null,
             hasContent: (data.elements ?? []).some((e) => !e.isDeleted),
           }
-          // A NATS board gets a fresh Yjs document; local boards stay on the plain JSON path.
-          teardownYdoc()
-          if (collabRef.current) {
-            ydoc.current = buildYdoc(data)
-            appliedFileIds.current = new Set(Object.keys(data.files ?? {}))
-            wireYdoc(ydoc.current)
-          }
+          teardownCollab()
+          // The route-driven join effect owns collaboration session creation.
+          // Creating one here from a ref can briefly attach the previous remote
+          // route to a newly opened local board and send local input remotely.
         } catch (err) {
           log('error', `Could not read ${name}: ${String(err)}`)
         }
@@ -717,6 +1019,7 @@ export default function Canvas({
       onCanvasRename((name) => {
         setBoard((current) => (current ? { ...current, name } : current))
         boardNameRef.current = name
+        if (collabScene.current) collabScene.current = { ...collabScene.current, name }
         if (pending.current) pending.current = { ...pending.current, name }
         if (pendingView.current) pendingView.current = { ...pendingView.current, name }
       }),
@@ -750,9 +1053,11 @@ export default function Canvas({
       }),
       onTakePending((requestId) => {
         clearTimeout(timer.current)
+        flushPendingCollab()
         flushView()
-        const doc = ydoc.current
-        const scene = doc ? { ...ydocToScene(doc), name: boardNameRef.current } : pending.current
+        // Durable collaboration updates/snapshots own remote-board persistence;
+        // returning a full JSON scene here would restore the old multi-writer race.
+        const scene = collabSession.current ? null : pending.current
         pending.current = null
         if (scene) {
           const { name, json } = serialize(scene)
@@ -782,92 +1087,184 @@ export default function Canvas({
     window.addEventListener('pagehide', flush)
     return () => {
       window.removeEventListener('pagehide', flush)
-      teardownYdoc()
+      flush()
+      flushPointer()
+      teardownCollab()
       unlistens.forEach((p) => p.then((unlisten) => unlisten()))
     }
-  }, [flush, flushView, teardownYdoc, wireYdoc])
+  }, [flush, flushPendingCollab, flushPointer, flushView, teardownCollab])
 
-  // Join collaboration when a NATS board is open (the backend relays messages as `canvas:collab`),
-  // ask peers for anything our (bucket-loaded) Yjs document is missing, and start leader election:
-  // one client wins the lease and becomes the single bucket writer; followers take over when it expires.
+  // Join the durable per-document log, apply its snapshot, publish a repair scene,
+  // and elect one client to compact updates into immutable snapshots.
   useEffect(() => {
-    if (!board || !collab) return
-    const { sourceId, bucket, boardId } = collab
-    collabJoin(sourceId, bucket, boardId)
-      .then(() => {
-        const doc = ydoc.current
-        if (doc) {
-          const message: CollabMessage = { type: 'sync', from: peerId, sv: bytesToBase64(Y.encodeStateVector(doc)) }
-          collabSend(boardId, JSON.stringify(message))
+    const currentBoard = boardRef.current
+    if (!currentBoard || !collabSourceId || !collabBucket || !collabBoardId || !collabDocumentId) return
+    setCollabSynchronizing(true)
+    let session = collabSession.current
+    if (
+      !session ||
+      session.sourceId !== collabSourceId ||
+      session.bucket !== collabBucket ||
+      session.boardId !== collabBoardId ||
+      session.documentId !== collabDocumentId
+    ) {
+      // The effect owns its session. This is required for rename and protects
+      // against a parent rerender/route transition after onCanvasOpen fired.
+      teardownCollab()
+      const generation = ++collabGeneration.current
+      session = {
+        sourceId: collabSourceId,
+        bucket: collabBucket,
+        boardId: collabBoardId,
+        documentId: collabDocumentId,
+        generation,
+        subscriberId: `${peerId}:${generation}`,
+      }
+      collabSession.current = session
+      const instance = api.current
+      collabScene.current = instance
+        ? {
+            name: boardNameRef.current,
+            elements: instance.getSceneElementsIncludingDeleted(),
+            appState: instance.getAppState(),
+            files: instance.getFiles(),
+          }
+        : {
+            name: currentBoard.name,
+            elements: currentBoard.data.elements ?? [],
+            appState: (currentBoard.data.appState ?? {}) as AppState,
+            files: currentBoard.data.files ?? {},
+          }
+    }
+    let cancelled = false
+    collabJoinReady.current = false
+    bufferedCollabEvents.current = []
+    collabJoin(session.sourceId, session.bucket, session.documentId, session.subscriberId, currentBoard.snapshotSequence)
+      .then((result) => {
+        if (cancelled || collabSession.current?.generation !== session.generation) {
+          // Cleanup may have run before the asynchronous backend join created
+          // its subscriptions. Leave again after completion to avoid a leak.
+          collabLeave(session.sourceId, session.bucket, session.documentId, session.subscriberId).catch(() => undefined)
+          return
         }
+        collabSequence.current = sequenceMax(collabSequence.current, result.snapshotSequence)
+        if (result.snapshot) {
+          try {
+            const data = parseBoard(result.snapshot)
+            const snapshotFiles = data.files ?? {}
+            if (Object.keys(snapshotFiles).length > 0) {
+              api.current?.addFiles(Object.values(snapshotFiles))
+              for (const [id, file] of Object.entries(snapshotFiles)) {
+                uploadedFileRefs.current.set(id, collabFileRef(id, file.version ?? 0, file.dataURL))
+              }
+            }
+            const message: CollabMessage = {
+              type: 'scene',
+              from: 'snapshot',
+              elements: data.elements ?? [],
+              appState: data.appState ?? undefined,
+              fileVersions: Object.fromEntries(Object.entries(snapshotFiles).map(([id, file]) => [id, file.version ?? 0])),
+            }
+            applyRemoteScene(message, result.snapshotSequence)
+          } catch (err) {
+            log('error', `Could not apply the collaboration snapshot: ${String(err)}`)
+            requestCollabReplay('Reconnecting collaboration — repairing the saved scene…')
+            return
+          }
+        }
+        // Events can arrive as soon as the backend subscribes, before the join
+        // result reaches us. Apply the snapshot first, then replay those events
+        // in exact stream order. Presence (sequence 0) is harmless in this list.
+        const buffered = bufferedCollabEvents.current
+        bufferedCollabEvents.current = []
+        buffered.sort((a, b) => {
+          const aa = sequenceMax(0n, a.delivery)
+          const bb = sequenceMax(0n, b.delivery)
+          return aa < bb ? -1 : aa > bb ? 1 : 0
+        })
+        collabJoinReady.current = true
+        for (const event of buffered) handleCollabEvent(session, event)
+        // A buffered event may have exposed a delivery gap or invalid payload
+        // and already requested a fresh replay. Do not start a second set of
+        // timers or report recovery for the abandoned session.
+        if (!collabJoinReady.current) return
+        finishCollabRepair()
+        setCollabSynchronizing(false)
+        sendFullScene()
+        fullSyncTimer.current = setInterval(sendFullScene, COLLAB_FULL_SYNC_INTERVAL_MS)
+        snapshotTimer.current = setInterval(writeSnapshot, COLLAB_SNAPSHOT_INTERVAL_MS)
+        presenceTimer.current = setInterval(() => {
+          const instance = api.current
+          if (!instance) return
+          const cutoff = Date.now() - PRESENCE_TTL_MS
+          const collaborators = new Map(instance.getAppState().collaborators)
+          let changed = false
+          for (const [remotePeerId, lastSeen] of peerLastSeen.current) {
+            if (lastSeen >= cutoff) continue
+            peerLastSeen.current.delete(remotePeerId)
+            changed = collaborators.delete(remotePeerId as SocketId) || changed
+          }
+          if (changed) instance.updateScene({ collaborators })
+        }, PRESENCE_TTL_MS / 3)
         lockLoop()
         lockTimer.current = setInterval(lockLoop, LOCK_RENEW_MS)
+        initialSnapshotTimer.current = setTimeout(writeSnapshot, COLLAB_INITIAL_SNAPSHOT_DELAY_MS)
       })
-      .catch((err: unknown) => log('error', `Could not join collaboration: ${String(err)}`))
+      .catch((err: unknown) => {
+        if (cancelled || collabSession.current?.generation !== session.generation) return
+        setCollabSynchronizing(true)
+        log('error', `Could not join collaboration: ${String(err)}; retrying`)
+        showCollabRepairing('Collaboration unavailable — retrying…')
+        joinRetryTimer.current = setTimeout(() => setCollabRestart((value) => value + 1), 2_000)
+      })
     return () => {
-      clearInterval(lockTimer.current)
-      lockTimer.current = undefined
-      loseLeadership()
+      cancelled = true
+      if (collabSession.current?.generation === session.generation) {
+        flushPendingCollab()
+        teardownCollab()
+      }
     }
-  }, [board?.name, collab, lockLoop, loseLeadership])
+  }, [
+    applyRemoteScene,
+    boardKey,
+    collabSourceId,
+    collabBucket,
+    collabBoardId,
+    collabDocumentId,
+    collabRestart,
+    flushPendingCollab,
+    finishCollabRepair,
+    handleCollabEvent,
+    lockLoop,
+    sendFullScene,
+    showCollabRepairing,
+    teardownCollab,
+    writeSnapshot,
+    requestCollabReplay,
+  ])
 
-  // Apply remote Yjs updates, answer sync requests, and show remote cursors.
+  // Reconcile durable Excalidraw scenes and show ephemeral cursors.
   useEffect(() => {
     let unlisten: (() => void) | undefined
-    onCollab((boardId, data) => {
-      const target = collabRef.current
-      if (!target || boardId !== target.boardId) return
-      let message: CollabMessage
-      try {
-        message = JSON.parse(data)
-      } catch {
+    let cancelled = false
+    onCollab((documentId, subscriberId, data, sequence, delivery) => {
+      const session = collabSession.current
+      if (!session || documentId !== session.documentId || subscriberId !== session.subscriberId) return
+      const event = { data, sequence, delivery }
+      if (!collabJoinReady.current) {
+        bufferedCollabEvents.current.push(event)
         return
       }
-      // NATS echoes our own published messages back; ignore them.
-      if ('from' in message && message.from === peerId) return
-      const doc = ydoc.current
-      if (message.type === 'yjs') {
-        if (!doc) return
-        try {
-          Y.applyUpdate(doc, base64ToBytes(message.update), 'remote')
-        } catch (err) {
-          log('error', `Could not apply a remote Yjs update: ${String(err)}`)
-        }
-      } else if (message.type === 'sync') {
-        if (!doc) return
-        try {
-          // The state vector arrives base64-encoded; encodeStateAsUpdate takes it raw.
-          const update = Y.encodeStateAsUpdate(doc, base64ToBytes(message.sv))
-          if (update.byteLength > 0) {
-            const reply: CollabMessage = { type: 'sync-reply', from: peerId, update: bytesToBase64(update) }
-            collabSend(target.boardId, JSON.stringify(reply))
-          }
-        } catch (err) {
-          log('error', `Could not answer a collaboration sync request: ${String(err)}`)
-        }
-      } else if (message.type === 'sync-reply') {
-        if (!doc) return
-        try {
-          Y.applyUpdate(doc, base64ToBytes(message.update), 'remote')
-        } catch (err) {
-          log('error', `Could not apply a collaboration sync reply: ${String(err)}`)
-        }
-      } else if (message.type === 'pointer') {
-        const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
-        collaborators.set(message.peerId as SocketId, {
-          pointer: { x: message.x, y: message.y, tool: message.tool },
-          username: collaborationDisplayName(message.peerId, message.nickname),
-          color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
-        })
-        api.current?.updateScene({ collaborators })
-      }
+      handleCollabEvent(session, event)
     }).then((u) => {
-      unlisten = u
+      if (cancelled) u()
+      else unlisten = u
     })
     return () => {
+      cancelled = true
       unlisten?.()
     }
-  }, [])
+  }, [handleCollabEvent])
 
   const onChange = (elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     if (!board) return
@@ -895,36 +1292,31 @@ export default function Canvas({
         viewTimer.current = setTimeout(flushView, VIEW_DEBOUNCE_MS)
       }
     }
-    // onChange also fires for scrolling, selection etc. Only save when the drawing itself changed.
+    // onChange also fires for scrolling and selection. Persist only drawing,
+    // file, or board-background changes.
     const version = hashElementsVersion(elements)
-    const fileCount = Object.keys(files).length
-    // Share the whitelisted AppState (background, current style) even when no element changed,
-    // and persist it (the background must survive a reload).
-    const doc = ydoc.current
-    if (doc && syncAppStateToYdoc(doc, appState)) {
-      ydocDirty.current = true
-      clearTimeout(timer.current)
-      timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
-    }
+    const fileSignature = fileVersionSignature(files)
+    const background = appState.viewBackgroundColor
     if (lastVersion.current === null) {
       lastVersion.current = version
-      lastFileCount.current = fileCount
+      lastFileSignature.current = fileSignature
+      lastBackground.current = background
       return
     }
-    if (version === lastVersion.current && fileCount === lastFileCount.current) return
+    if (
+      version === lastVersion.current &&
+      fileSignature === lastFileSignature.current &&
+      background === lastBackground.current
+    ) return
     lastVersion.current = version
-    lastFileCount.current = fileCount
-    if (doc) {
-      // Write the diff into the Yjs document (origin 'local'). The observer skips
-      // these, and the diff-based sync means applying a remote scene produces no
-      // writes here, so remote state is never echoed back out.
-      const wrote = syncElementsToYdoc(doc, elements)
-      syncFilesToYdoc(doc, files)
-      if (wrote) {
-        ydocDirty.current = true
-        clearTimeout(timer.current)
-        timer.current = setTimeout(flush, COLLAB_DEBOUNCE_MS)
-      }
+    lastFileSignature.current = fileSignature
+    lastBackground.current = background
+    const session = collabSession.current
+    if (session) {
+      // Keep only the newest drag/resize snapshot and publish it at a bounded
+      // rate. Peers reconcile Excalidraw's element versions and tombstones.
+      pendingCollab.current = { session, elements, appState, files }
+      scheduleCollabSync()
     } else {
       pending.current = { name: board.name, elements, appState, files }
       clearTimeout(timer.current)
@@ -941,6 +1333,11 @@ export default function Canvas({
     )
   }
 
+  const showCollabSync = Boolean(
+    collabDocumentId &&
+    (collabSynchronizing || collabSession.current?.documentId !== collabDocumentId || !collabJoinReady.current),
+  )
+
   return (
     <div className="canvas">
       <Excalidraw
@@ -950,17 +1347,16 @@ export default function Canvas({
         initialData={{ ...board.data, libraryItems: board.library }}
         excalidrawAPI={(instance) => {
           api.current = instance
-          // Apply any remote Yjs state that arrived before Excalidraw finished
-          // mounting (observeYdoc returns early while api.current is null).
-          if (instance && ydoc.current) setTimeout(() => observeYdoc(), 0)
         }}
         onChange={onChange}
         onPointerUpdate={(payload) => {
-          const target = collabRef.current
+          const target = collabSession.current
           if (!target) return
           const nickname = collaborationNickname.trim() || undefined
-          const message: CollabMessage = { type: 'pointer', peerId, nickname, x: payload.pointer.x, y: payload.pointer.y, tool: 'pointer' }
-          collabSend(target.boardId, JSON.stringify(message))
+          pendingPointer.current = { type: 'pointer', peerId, nickname, x: payload.pointer.x, y: payload.pointer.y, tool: 'pointer' }
+          if (!pointerTimer.current) {
+            pointerTimer.current = setTimeout(flushPointer, POINTER_UPDATE_INTERVAL_MS)
+          }
         }}
         onLibraryChange={(items) => {
           // Never overwrite the library file before it has been loaded (e.g. with an empty library on startup).
@@ -1003,6 +1399,14 @@ export default function Canvas({
           <WelcomeScreen.Hints.HelpHint />
         </WelcomeScreen>
       </Excalidraw>
+      {showCollabSync && (
+        <div className="canvas-syncing" role="status" aria-live="polite" aria-busy="true">
+          <div className="canvas-syncing-card">
+            <span className="canvas-syncing-spinner" aria-hidden="true" />
+            <span>Syncing latest changes…</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

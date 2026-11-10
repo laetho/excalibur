@@ -49,37 +49,68 @@ export const log = (level: 'error' | 'info', message: string) => {
 
 // MARK: - Collaboration (NATS, Wails only)
 
-/** Publishes a collaboration message for the open board. No-op in the SwiftUI app. */
-export const collabSend = (boardId: string, data: string) => {
-  if (isWails) return ipc.collabSend(boardId, data)
+/** Publishes ephemeral pointer presence. No-op in the SwiftUI app. */
+export const collabSend = (sourceId: string, bucket: string, documentId: string, data: string) => {
+  if (isWails) return ipc.collabSend(sourceId, bucket, documentId, data)
 }
 
-/** Subscribes the backend to collaboration messages for a board. No-op in the SwiftUI app. */
-export const collabJoin = (sourceId: string, bucket: string, boardId: string) => {
-  if (isWails) return ipc.collabJoin(sourceId, bucket, boardId)
+/** Subscribes to durable updates and returns the newest snapshot. */
+export const collabJoin = (sourceId: string, bucket: string, documentId: string, subscriberId: string, baselineSequence: string) => {
+  if (isWails) return ipc.collabJoin(sourceId, bucket, documentId, subscriberId, baselineSequence)
+  return Promise.resolve({ snapshot: null, snapshotSequence: baselineSequence })
+}
+
+export const collabLeave = (sourceId: string, bucket: string, documentId: string, subscriberId: string) => {
+  if (isWails) return ipc.collabLeave(sourceId, bucket, documentId, subscriberId)
   return Promise.resolve()
 }
 
-/** Tries to become the single writer for a board (lease in a JetStream KV bucket). No-op in the SwiftUI app. */
-export const collabAcquireLock = (boardId: string, owner: string, ttlSeconds: number) => {
-  if (isWails) return ipc.collabAcquireLock(boardId, owner, ttlSeconds)
+/** Acknowledges a durable update only after it reached the renderer. */
+export const collabAck = (sourceId: string, bucket: string, documentId: string, subscriberId: string, sequence: string) => {
+  if (isWails) return ipc.collabAck(sourceId, bucket, documentId, subscriberId, sequence)
+  return Promise.resolve()
+}
+
+export const collabPublish = (sourceId: string, bucket: string, documentId: string, messageId: string, data: string) => {
+  if (isWails) return ipc.collabPublish(sourceId, bucket, documentId, messageId, data)
+  return Promise.resolve('0')
+}
+
+export const collabPutFiles = (sourceId: string, bucket: string, documentId: string, filesJson: string) => {
+  if (isWails) return ipc.collabPutFiles(sourceId, bucket, documentId, filesJson)
+  return Promise.resolve()
+}
+
+export const collabGetFiles = (sourceId: string, bucket: string, documentId: string, fileIds: string[]) => {
+  if (isWails) return ipc.collabGetFiles(sourceId, bucket, documentId, fileIds)
+  return Promise.resolve('{}')
+}
+
+export const collabSnapshot = (sourceId: string, bucket: string, boardId: string, documentId: string, sequence: string, json: string, owner: string) => {
+  if (isWails) return ipc.collabSnapshot(sourceId, bucket, boardId, documentId, sequence, json, owner)
+  return Promise.resolve()
+}
+
+/** Tries to become the snapshot compactor (lease in a JetStream KV bucket). */
+export const collabAcquireLock = (sourceId: string, bucket: string, documentId: string, owner: string, ttlSeconds: number) => {
+  if (isWails) return ipc.collabAcquireLock(sourceId, bucket, documentId, owner, ttlSeconds)
   return Promise.resolve(true)
 }
 
 /** Extends the leader lease; false when this client no longer owns it. No-op in the SwiftUI app. */
-export const collabRenewLock = (boardId: string, owner: string, ttlSeconds: number) => {
-  if (isWails) return ipc.collabRenewLock(boardId, owner, ttlSeconds)
+export const collabRenewLock = (sourceId: string, bucket: string, documentId: string, owner: string, ttlSeconds: number) => {
+  if (isWails) return ipc.collabRenewLock(sourceId, bucket, documentId, owner, ttlSeconds)
   return Promise.resolve(true)
 }
 
 /** Drops the leader lease (only if this client still owns it). No-op in the SwiftUI app. */
-export const collabReleaseLock = (boardId: string, owner: string) => {
-  if (isWails) return ipc.collabReleaseLock(boardId, owner)
+export const collabReleaseLock = (sourceId: string, bucket: string, documentId: string, owner: string) => {
+  if (isWails) return ipc.collabReleaseLock(sourceId, bucket, documentId, owner)
   return Promise.resolve()
 }
 
 /** A collaboration message arrived for the open board. No-op in the SwiftUI app. */
-export function onCollab(cb: (boardId: string, data: string) => void): Promise<Unlisten> {
+export function onCollab(cb: (documentId: string, subscriberId: string, data: string, sequence: string, delivery: string) => void): Promise<Unlisten> {
   if (isWails) return ipc.onCollab(cb)
   return Promise.resolve(() => {})
 }
@@ -90,7 +121,9 @@ type Unlisten = () => void
 
 export function onCanvasOpen(cb: (request: ipc.OpenRequest) => void): Promise<Unlisten> {
   if (isWails) return ipc.onCanvasOpen(cb)
-  setWhiteboards('open', (request: BridgeOpenRequest) => cb({ name: request.name, json: request.json, view: request.view ?? null }))
+  setWhiteboards('open', (request: BridgeOpenRequest) =>
+    cb({ name: request.name, json: request.json, view: request.view ?? null, snapshotSequence: '0' }),
+  )
   return Promise.resolve(() => {})
 }
 

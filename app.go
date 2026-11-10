@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +27,14 @@ import (
 )
 
 type pendingEdit struct{ Name, JSON string }
+
+type collabOutboxEntry struct {
+	SourceID   string `json:"sourceId"`
+	Bucket     string `json:"bucket"`
+	DocumentID string `json:"documentId"`
+	MessageID  string `json:"messageId"`
+	Data       string `json:"data"`
+}
 
 const (
 	minApplicationZoom     = 0.5
@@ -42,6 +53,13 @@ type App struct {
 	thumbnails    sync.Map
 	subMu         sync.Mutex
 	subscriptions map[string]*nats.Subscription
+	// Durable collaboration messages are acknowledged only after the renderer
+	// confirms it received and validated the Wails event. This closes the final
+	// event-loss window between Go and the browser.
+	collabPending map[string]*nats.Msg
+	outboxMu      sync.Mutex
+	outboxPath    string
+	collabOutbox  map[string]collabOutboxEntry
 	requestID     atomic.Uint64
 	watcherMu     sync.Mutex
 	watcher       *fsnotify.Watcher
@@ -50,7 +68,12 @@ type App struct {
 }
 
 func newApp() *App {
-	return &App{subscriptions: map[string]*nats.Subscription{}, stop: make(chan struct{})}
+	return &App{
+		subscriptions: map[string]*nats.Subscription{},
+		collabPending: map[string]*nats.Msg{},
+		collabOutbox:  map[string]collabOutboxEntry{},
+		stop:          make(chan struct{}),
+	}
 }
 
 func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
@@ -69,12 +92,17 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	a.store = store
 	applicationZoom := store.prefs.ApplicationZoom
 	a.mu.Unlock()
+	a.outboxPath = filepath.Join(filepath.Dir(store.prefsPath), "collab-outbox.json")
+	if err := a.loadCollabOutbox(); err != nil {
+		return fmt.Errorf("load pending collaboration updates: %w", err)
+	}
 	if a.window != nil {
 		a.window.SetZoom(applicationZoom)
 	}
 	a.startWatcher(folder)
 	go a.remoteRefreshLoop()
 	go a.refreshBucketsOnStartup()
+	go a.collabOutboxLoop()
 	return nil
 }
 
@@ -92,6 +120,7 @@ func (a *App) ServiceShutdown() error {
 		_ = subscription.Unsubscribe()
 	}
 	a.subscriptions = map[string]*nats.Subscription{}
+	a.collabPending = map[string]*nats.Msg{}
 	a.subMu.Unlock()
 	a.mu.Lock()
 	if a.store != nil {
@@ -209,6 +238,18 @@ func (a *App) takePending() *pendingEdit {
 }
 
 func (a *App) savePending() {
+	// Collaborative boards are persisted by the JetStream update log and its
+	// snapshot compactor. Asking the renderer for a full JSON scene here is both
+	// unnecessary and expensive: source/board switches used to wait for the
+	// renderer round-trip (up to two seconds), and the handler could synchronously
+	// encode a pending collaboration update before replying. Local boards still
+	// use the ordinary pending-scene save path below.
+	a.mu.Lock()
+	needsPendingScene := a.store != nil && a.store.isLocal()
+	a.mu.Unlock()
+	if !needsPendingScene {
+		return
+	}
 	pending := a.takePending()
 	if pending == nil {
 		return
@@ -225,7 +266,7 @@ func (a *App) openSelectedLocked() error {
 	if board == nil {
 		return nil
 	}
-	data, err := a.store.readBoard(*board)
+	data, snapshotSequence, err := a.store.readBoardState(*board)
 	if err != nil {
 		return err
 	}
@@ -235,7 +276,12 @@ func (a *App) openSelectedLocked() error {
 		copy := saved
 		view = &copy
 	}
-	a.emit("canvas:open", map[string]any{"name": board.Name, "json": string(data), "view": view})
+	a.emit("canvas:open", map[string]any{
+		"name":             board.Name,
+		"json":             string(data),
+		"view":             view,
+		"snapshotSequence": strconv.FormatUint(snapshotSequence, 10),
+	})
 	library, err := a.store.library()
 	if err == nil {
 		a.emit("canvas:set-library", map[string]any{"json": library})
@@ -597,6 +643,41 @@ func (a *App) AddBucket(sourceID, bucket string) error {
 	a.emitSnapshotLocked()
 	return nil
 }
+
+// DeleteBucket permanently removes an empty NATS bucket. The backend verifies
+// emptiness immediately before deletion; the menu's state is only advisory.
+func (a *App) DeleteBucket(sourceID, bucket string) error {
+	a.savePending()
+	if err := a.ensureNoCollabOutboxBucket(sourceID, bucket); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if err := a.store.deleteBucket(sourceID, bucket); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.emitSnapshotLocked()
+	a.mu.Unlock()
+	a.clearNatsBucketSubscriptions(sourceID, bucket)
+	return nil
+}
+
+func (a *App) clearNatsBucketSubscriptions(sourceID, bucket string) {
+	prefix := sourceID + "\x00" + bucket + "\x00"
+	a.subMu.Lock()
+	defer a.subMu.Unlock()
+	for key, subscription := range a.subscriptions {
+		if strings.HasPrefix(key, prefix) {
+			_ = subscription.Unsubscribe()
+			delete(a.subscriptions, key)
+		}
+	}
+	for key := range a.collabPending {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.collabPending, key)
+		}
+	}
+}
 func (a *App) ActivateSource(sourceID, groupID string) error {
 	a.savePending()
 	a.mu.Lock()
@@ -607,6 +688,7 @@ func (a *App) ActivateSource(sourceID, groupID string) error {
 	a.emitSnapshotLocked()
 	return nil
 }
+
 // RefreshBuckets re-lists the buckets on every configured NATS server and
 // rescans the active source so the sidebar reflects the current state. Any
 // server that could not be reached is reported in the returned error.
@@ -635,92 +717,541 @@ func (a *App) CopyBoardToSource(boardID, targetSource, targetGroup string) error
 	return nil
 }
 
-func (a *App) CollabSend(boardID, data string) error {
+// CollabSend sends ephemeral presence over Core NATS. Durable drawing updates
+// use CollabPublish, so cursor traffic never enters the replay log.
+func (a *App) CollabSend(sourceID, bucket, documentID, data string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.store.isLocal() {
-		return nil
-	}
-	client, err := a.store.clientFor(a.store.activeSource)
-	if err != nil {
-		return err
-	}
-	return client.conn.Publish(collabSubject(a.store.activeGroup, boardID), []byte(data))
-}
-
-func (a *App) CollabJoin(sourceID, bucket, boardID string) error {
 	if sourceID == localSourceID {
+		a.mu.Unlock()
 		return nil
 	}
-	key := sourceID + "\x00" + bucket + "\x00" + boardID
-	a.subMu.Lock()
-	if a.subscriptions[key] != nil {
-		a.subMu.Unlock()
-		return nil
-	}
-	a.subMu.Unlock()
-	a.mu.Lock()
 	client, err := a.store.clientFor(sourceID)
 	a.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	sub, err := client.conn.Subscribe(collabSubject(bucket, boardID), func(msg *nats.Msg) {
-		a.emit("canvas:collab", map[string]any{"boardId": boardID, "data": string(msg.Data)})
-	})
+	if !validDocumentID(documentID) {
+		return errors.New("invalid collaboration document id")
+	}
+	return client.conn.Publish(collabPresenceSubject(bucket, documentID), []byte(data))
+}
+
+// CollabPublish appends a versioned Excalidraw scene to the board's durable
+// JetStream log. The publish acknowledgement sequence is used for snapshots.
+func collabOutboxKey(entry collabOutboxEntry) string {
+	return entry.SourceID + "\x00" + entry.Bucket + "\x00" + entry.DocumentID + "\x00" + entry.MessageID
+}
+
+func (a *App) loadCollabOutbox() error {
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+	a.collabOutbox = map[string]collabOutboxEntry{}
+	data, err := os.ReadFile(a.outboxPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	a.subMu.Lock()
-	a.subscriptions[key] = sub
-	a.subMu.Unlock()
+	var entries []collabOutboxEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.SourceID != "" && validDocumentID(entry.DocumentID) && entry.MessageID != "" {
+			a.collabOutbox[collabOutboxKey(entry)] = entry
+		}
+	}
 	return nil
 }
 
-// CollabAcquireLock tries to become the single writer for a board. The lease
-// lives in a JetStream KV bucket and is acquired atomically (CAS), so only one
-// client can hold it at a time.
-func (a *App) CollabAcquireLock(boardID, owner string, ttlSeconds int) (bool, error) {
+// persistCollabOutboxLocked durably records an update before any NATS publish.
+// A crash after the server stores an update is harmless because Message-Id makes
+// replay idempotent inside the dedup window, and Excalidraw reconciliation is
+// itself idempotent after that window.
+func (a *App) persistCollabOutboxLocked() error {
+	entries := make([]collabOutboxEntry, 0, len(a.collabOutbox))
+	for _, entry := range a.collabOutbox {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return collabOutboxKey(entries[i]) < collabOutboxKey(entries[j]) })
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.outboxPath), 0o755); err != nil {
+		return err
+	}
+	return atomicWrite(a.outboxPath, data)
+}
+
+func (a *App) enqueueCollabOutbox(entry collabOutboxEntry) error {
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+	key := collabOutboxKey(entry)
+	previous, existed := a.collabOutbox[key]
+	if existed {
+		if previous != entry {
+			return errors.New("collaboration message id reused with different data")
+		}
+		return nil
+	}
+	a.collabOutbox[key] = entry
+	if err := a.persistCollabOutboxLocked(); err != nil {
+		if existed {
+			a.collabOutbox[key] = previous
+		} else {
+			delete(a.collabOutbox, key)
+		}
+		return err
+	}
+	return nil
+}
+
+// ensureNoCollabOutboxBucket prevents deleting a bucket while this process has
+// durable updates that have not reached JetStream yet.
+func (a *App) ensureNoCollabOutboxBucket(sourceID, bucket string) error {
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+	for _, entry := range a.collabOutbox {
+		if entry.SourceID == sourceID && entry.Bucket == bucket {
+			return errors.New("bucket has collaboration changes waiting to be saved")
+		}
+	}
+	return nil
+}
+
+func (a *App) removeCollabOutbox(entry collabOutboxEntry) {
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+	key := collabOutboxKey(entry)
+	if _, exists := a.collabOutbox[key]; !exists {
+		return
+	}
+	delete(a.collabOutbox, key)
+	if err := a.persistCollabOutboxLocked(); err != nil {
+		// Keep the in-memory removal: a stale disk entry can only cause an
+		// idempotent replay after restart, whereas re-adding it loops immediately.
+		log.Printf("could not compact collaboration outbox: %v", err)
+	}
+}
+
+func (a *App) flushCollabOutbox() {
+	a.outboxMu.Lock()
+	entries := make([]collabOutboxEntry, 0, len(a.collabOutbox))
+	for _, entry := range a.collabOutbox {
+		entries = append(entries, entry)
+	}
+	a.outboxMu.Unlock()
+	for _, entry := range entries {
+		a.mu.Lock()
+		store := a.store
+		var client *natsClient
+		var err error
+		if store != nil {
+			client, err = store.clientFor(entry.SourceID)
+		}
+		a.mu.Unlock()
+		if store == nil || err != nil {
+			continue
+		}
+		if _, err = client.publishCollabUpdate(entry.Bucket, entry.DocumentID, entry.MessageID, []byte(entry.Data)); err == nil {
+			a.removeCollabOutbox(entry)
+		}
+	}
+}
+
+func (a *App) collabOutboxLoop() {
+	a.flushCollabOutbox()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			a.flushCollabOutbox()
+		case <-a.stop:
+			return
+		}
+	}
+}
+
+func (a *App) CollabPublish(sourceID, bucket, documentID, messageID, data string) (string, error) {
+	if sourceID == localSourceID {
+		return "0", nil
+	}
+	entry := collabOutboxEntry{SourceID: sourceID, Bucket: bucket, DocumentID: documentID, MessageID: messageID, Data: data}
+	if !validDocumentID(documentID) || messageID == "" {
+		return "", errors.New("invalid collaboration update")
+	}
+	if err := a.enqueueCollabOutbox(entry); err != nil {
+		return "", fmt.Errorf("could not persist collaboration update: %w", err)
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.store.isLocal() {
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	sequence, err := client.publishCollabUpdate(bucket, documentID, messageID, []byte(data))
+	if err != nil {
+		return "", err
+	}
+	a.removeCollabOutbox(entry)
+	return strconv.FormatUint(sequence, 10), nil
+}
+
+// CollabPutFiles stores immutable JSON blobs outside the JetStream update log,
+// avoiding the server's per-message payload limit. Values are normally
+// Excalidraw files; an oversized scene batch uses the same blob channel.
+func (a *App) CollabPutFiles(sourceID, bucket, documentID, filesJSON string) error {
+	a.mu.Lock()
+	if sourceID == localSourceID {
+		a.mu.Unlock()
+		return nil
+	}
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	var files map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		return fmt.Errorf("invalid collaboration files: %w", err)
+	}
+	for fileID, data := range files {
+		if err := client.writeCollabFile(bucket, documentID, fileID, data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CollabGetFiles returns requested collaboration blobs as a JSON object.
+func (a *App) CollabGetFiles(sourceID, bucket, documentID string, fileIDs []string) (string, error) {
+	a.mu.Lock()
+	if sourceID == localSourceID {
+		a.mu.Unlock()
+		return "{}", nil
+	}
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	files := make(map[string]json.RawMessage, len(fileIDs))
+	for _, fileID := range fileIDs {
+		data, err := client.readCollabFile(bucket, documentID, fileID)
+		if err != nil {
+			return "", err
+		}
+		if data != nil {
+			files[fileID] = data
+		}
+	}
+	data, err := json.Marshal(files)
+	return string(data), err
+}
+
+// CollabJoin subscribes after the immutable snapshot already loaded by the
+// canvas. It returns snapshot data only when a newer compaction raced the board
+// switch, avoiding duplicate large snapshot transfers on high-latency links.
+func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSequenceText string) (CollabJoinResult, error) {
+	if sourceID == localSourceID {
+		return CollabJoinResult{}, nil
+	}
+	if !validDocumentID(documentID) {
+		return CollabJoinResult{}, errors.New("invalid collaboration document id")
+	}
+	if subscriberID == "" {
+		return CollabJoinResult{}, errors.New("invalid collaboration subscriber id")
+	}
+	baselineSequence, err := strconv.ParseUint(baselineSequenceText, 10, 64)
+	if err != nil {
+		return CollabJoinResult{}, errors.New("invalid collaboration baseline sequence")
+	}
+	key := sourceID + "\x00" + bucket + "\x00" + documentID + "\x00" + subscriberID
+	a.mu.Lock()
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
+	if err != nil {
+		return CollabJoinResult{}, err
+	}
+	var snapshotData []byte
+	snapshotSequence := baselineSequence
+	if snapshotSequence == 0 {
+		snapshotData, snapshotSequence, err = client.latestCollabSnapshot(bucket, documentID)
+		if err != nil {
+			return CollabJoinResult{}, err
+		}
+	}
+	result := CollabJoinResult{SnapshotSequence: strconv.FormatUint(snapshotSequence, 10)}
+	if snapshotData != nil {
+		text := string(snapshotData)
+		result.Snapshot = &text
+	}
+	a.subMu.Lock()
+	// Serialize subscription creation for this process. Holding subMu here is
+	// intentional: otherwise two overlapping joins can both pass the check,
+	// create consumers, and emit every replayed update twice.
+	defer a.subMu.Unlock()
+	if a.subscriptions[key] != nil {
+		return result, nil
+	}
+	stream, err := client.ensureCollabStream(bucket)
+	if err != nil {
+		return CollabJoinResult{}, err
+	}
+	opts := []nats.SubOpt{nats.BindStream(stream), nats.ManualAck(), nats.AckExplicit()}
+	if snapshotSequence > 0 {
+		opts = append(opts, nats.StartSequence(snapshotSequence+1))
+	} else {
+		opts = append(opts, nats.DeliverAll())
+	}
+	updates, err := client.js.Subscribe(collabUpdateSubject(bucket, documentID), func(msg *nats.Msg) {
+		metadata, metadataErr := msg.Metadata()
+		if metadataErr != nil {
+			_ = msg.Nak()
+			return
+		}
+		sequence := strconv.FormatUint(metadata.Sequence.Stream, 10)
+		// Register before emitting: a fast renderer may acknowledge immediately.
+		a.subMu.Lock()
+		if a.subscriptions[key] == nil {
+			a.subMu.Unlock()
+			_ = msg.Nak()
+			return
+		}
+		a.collabPending[key+"\x00"+sequence] = msg
+		a.subMu.Unlock()
+		a.emit("canvas:collab", map[string]any{
+			"documentId":   documentID,
+			"subscriberId": subscriberID,
+			"data":         string(msg.Data),
+			"sequence":     sequence,
+			"delivery":     strconv.FormatUint(metadata.Sequence.Consumer, 10),
+		})
+	}, opts...)
+	if err != nil {
+		return CollabJoinResult{}, err
+	}
+	presence, err := client.conn.Subscribe(collabPresenceSubject(bucket, documentID), func(msg *nats.Msg) {
+		a.emit("canvas:collab", map[string]any{"documentId": documentID, "subscriberId": subscriberID, "data": string(msg.Data), "sequence": "0", "delivery": "0"})
+	})
+	if err != nil {
+		_ = updates.Unsubscribe()
+		return CollabJoinResult{}, err
+	}
+	// Close the snapshot-discovery/stream-compaction race. If a compactor wrote a
+	// newer snapshot after our first lookup (and possibly purged older covered
+	// updates), return that snapshot. Already emitted replay events are buffered by
+	// the renderer and reconciled after this baseline, so duplicates are harmless.
+	latestData, latestSequence, err := client.collabSnapshotAfter(bucket, documentID, snapshotSequence)
+	if err != nil {
+		_ = updates.Unsubscribe()
+		_ = presence.Unsubscribe()
+		return CollabJoinResult{}, err
+	}
+	if latestSequence > snapshotSequence {
+		result.SnapshotSequence = strconv.FormatUint(latestSequence, 10)
+		if latestData != nil {
+			text := string(latestData)
+			result.Snapshot = &text
+		}
+	}
+	a.subscriptions[key] = updates
+	a.subscriptions[key+"\x00presence"] = presence
+	return result, nil
+}
+
+// CollabAck confirms that the renderer received and validated one durable
+// update. JetStream redelivers it if the Wails event was lost or the renderer
+// disappeared before reaching this call.
+func (a *App) CollabAck(sourceID, bucket, documentID, subscriberID, sequence string) error {
+	if sourceID == localSourceID {
+		return nil
+	}
+	if !validDocumentID(documentID) || subscriberID == "" {
+		return errors.New("invalid collaboration acknowledgement")
+	}
+	if value, err := strconv.ParseUint(sequence, 10, 64); err != nil || value == 0 {
+		return errors.New("invalid collaboration sequence")
+	}
+	key := sourceID + "\x00" + bucket + "\x00" + documentID + "\x00" + subscriberID + "\x00" + sequence
+	a.subMu.Lock()
+	msg := a.collabPending[key]
+	delete(a.collabPending, key)
+	a.subMu.Unlock()
+	if msg == nil {
+		// Duplicate renderer acknowledgements are idempotent.
+		return nil
+	}
+	return msg.AckSync(nats.AckWait(5 * time.Second))
+}
+
+// CollabLeave stops consuming a document while its canvas is closed. Without
+// this, the old ephemeral consumer would keep acknowledging updates that no
+// active frontend applies, and reopening the board could not replay them.
+func (a *App) CollabLeave(sourceID, bucket, documentID, subscriberID string) error {
+	if sourceID == localSourceID {
+		return nil
+	}
+	key := sourceID + "\x00" + bucket + "\x00" + documentID + "\x00" + subscriberID
+	a.subMu.Lock()
+	updates := a.subscriptions[key]
+	presence := a.subscriptions[key+"\x00presence"]
+	delete(a.subscriptions, key)
+	delete(a.subscriptions, key+"\x00presence")
+	for pendingKey := range a.collabPending {
+		if strings.HasPrefix(pendingKey, key+"\x00") {
+			delete(a.collabPending, pendingKey)
+		}
+	}
+	a.subMu.Unlock()
+	var errs []error
+	if updates != nil {
+		errs = append(errs, updates.Unsubscribe())
+	}
+	if presence != nil {
+		errs = append(errs, presence.Unsubscribe())
+	}
+	return errors.Join(errs...)
+}
+
+// CollabSnapshot writes an immutable, sequence-addressed JSON materialization.
+// The lease is verified with CAS in this same backend call so a stale frontend
+// cannot write after another compactor has taken over.
+func (a *App) CollabSnapshot(sourceID, bucket, boardID, documentID, sequenceText, jsonText, owner string) error {
+	sequence, err := strconv.ParseUint(sequenceText, 10, 64)
+	if err != nil || sequence == 0 {
+		return errors.New("invalid collaboration snapshot sequence")
+	}
+	a.mu.Lock()
+	if sourceID == localSourceID {
+		a.mu.Unlock()
+		return nil
+	}
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	owned, err := client.renewLock(bucket, documentID, owner, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return errors.New("collaboration snapshot lease lost")
+	}
+	if sidecar, err := client.readObject(bucket, documentMetaName(boardID)); err != nil {
+		return err
+	} else if strings.TrimSpace(string(sidecar)) != documentID {
+		return errors.New("collaboration board was renamed or deleted")
+	}
+	if deleted, err := client.readObject(bucket, collabDeletedName(documentID)); err != nil {
+		return err
+	} else if deleted != nil {
+		return errors.New("collaboration board was deleted")
+	}
+	data := []byte(jsonText)
+	snapshotName := collabSnapshotName(documentID, sequence, data)
+	if err := client.writeCollabSnapshot(bucket, documentID, sequence, data); err != nil {
+		return err
+	}
+	// Snapshot objects can be large. Re-fence immediately before touching the
+	// mutable compatibility materialization rather than relying on the lease
+	// check that happened before the ObjectStore upload.
+	owned, err = client.renewLock(bucket, documentID, owner, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		_ = client.deleteObject(bucket, snapshotName)
+		return errors.New("collaboration snapshot lease lost during upload")
+	}
+	// Keep the ordinary board object as a durable materialization for export,
+	// thumbnails, and disaster recovery. Only the CAS-elected compactor writes it.
+	if strings.HasPrefix(boardID, ".") || !strings.HasSuffix(boardID, fileExtension) {
+		return errors.New("invalid collaboration board id")
+	}
+	if err := client.writeObject(bucket, boardID, data); err != nil {
+		return err
+	}
+	// Close the check/write race with TrashBoard: if deletion won while this
+	// materialization was in flight, remove the object we just recreated.
+	if deleted, err := client.readObject(bucket, collabDeletedName(documentID)); err != nil {
+		return err
+	} else if deleted != nil {
+		_ = client.deleteObject(bucket, snapshotName)
+		_ = client.deleteObject(bucket, boardID)
+		return errors.New("collaboration board was deleted")
+	}
+	if sidecar, err := client.readObject(bucket, documentMetaName(boardID)); err != nil {
+		return err
+	} else if strings.TrimSpace(string(sidecar)) != documentID {
+		_ = client.deleteObject(bucket, snapshotName)
+		_ = client.deleteObject(bucket, boardID)
+		return errors.New("collaboration board was renamed or deleted")
+	}
+	// Compact only through the previous snapshot, not the one just written. A
+	// joining client may have discovered that previous snapshot immediately
+	// before this write; retaining one interval guarantees its replay baseline.
+	previous, err := client.previousCollabSnapshotSequence(bucket, documentID)
+	if err != nil {
+		log.Printf("could not inspect collaboration snapshots for compaction: %v", err)
+	} else if previous > 0 {
+		if err := client.purgeCollabUpdates(bucket, documentID, previous); err != nil {
+			log.Printf("could not compact collaboration update log: %v", err)
+		}
+	}
+	return nil
+}
+
+// CollabAcquireLock tries to become the snapshot compactor for a document. Live
+// update publishing does not depend on this lease.
+func (a *App) CollabAcquireLock(sourceID, bucket, documentID, owner string, ttlSeconds int) (bool, error) {
+	a.mu.Lock()
+	if sourceID == localSourceID {
+		a.mu.Unlock()
 		return true, nil
 	}
-	client, err := a.store.clientFor(a.store.activeSource)
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
 	if err != nil {
 		return false, err
 	}
-	return client.acquireLock(a.store.activeGroup, boardID, owner, time.Duration(ttlSeconds)*time.Second)
+	return client.acquireLock(bucket, documentID, owner, time.Duration(ttlSeconds)*time.Second)
 }
 
 // CollabRenewLock extends the leader lease. Returns false when this client no
 // longer owns it (it should immediately stop writing the bucket).
-func (a *App) CollabRenewLock(boardID, owner string, ttlSeconds int) (bool, error) {
+func (a *App) CollabRenewLock(sourceID, bucket, documentID, owner string, ttlSeconds int) (bool, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.store.isLocal() {
+	if sourceID == localSourceID {
+		a.mu.Unlock()
 		return true, nil
 	}
-	client, err := a.store.clientFor(a.store.activeSource)
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
 	if err != nil {
 		return false, err
 	}
-	return client.renewLock(a.store.activeGroup, boardID, owner, time.Duration(ttlSeconds)*time.Second)
+	return client.renewLock(bucket, documentID, owner, time.Duration(ttlSeconds)*time.Second)
 }
 
 // CollabReleaseLock drops the leader lease, but only if this client still owns
 // it. Safe to call when not the owner.
-func (a *App) CollabReleaseLock(boardID, owner string) error {
+func (a *App) CollabReleaseLock(sourceID, bucket, documentID, owner string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.store.isLocal() {
+	if sourceID == localSourceID {
+		a.mu.Unlock()
 		return nil
 	}
-	client, err := a.store.clientFor(a.store.activeSource)
+	client, err := a.store.clientFor(sourceID)
+	a.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return client.releaseLock(a.store.activeGroup, boardID, owner)
+	return client.releaseLock(bucket, documentID, owner)
 }
 
 func (a *App) SetWindowTitle(title string) {

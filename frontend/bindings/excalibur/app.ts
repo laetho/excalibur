@@ -70,36 +70,91 @@ export function ChooseNatsCredentialsFile(): $CancellablePromise<string> {
 }
 
 /**
- * CollabAcquireLock tries to become the single writer for a board. The lease
- * lives in a JetStream KV bucket and is acquired atomically (CAS), so only one
- * client can hold it at a time.
+ * CollabAck confirms that the renderer received and validated one durable
+ * update. JetStream redelivers it if the Wails event was lost or the renderer
+ * disappeared before reaching this call.
  */
-export function CollabAcquireLock(boardID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
-    return $Call.ByID(1857448547, boardID, owner, ttlSeconds);
+export function CollabAck(sourceID: string, bucket: string, documentID: string, subscriberID: string, sequence: string): $CancellablePromise<void> {
+    return $Call.ByID(3162522153, sourceID, bucket, documentID, subscriberID, sequence);
 }
 
-export function CollabJoin(sourceID: string, bucket: string, boardID: string): $CancellablePromise<void> {
-    return $Call.ByID(2020783928, sourceID, bucket, boardID);
+/**
+ * CollabAcquireLock tries to become the snapshot compactor for a document. Live
+ * update publishing does not depend on this lease.
+ */
+export function CollabAcquireLock(sourceID: string, bucket: string, documentID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
+    return $Call.ByID(1857448547, sourceID, bucket, documentID, owner, ttlSeconds);
+}
+
+/**
+ * CollabGetFiles returns requested collaboration blobs as a JSON object.
+ */
+export function CollabGetFiles(sourceID: string, bucket: string, documentID: string, fileIDs: string[] | null): $CancellablePromise<string> {
+    return $Call.ByID(3259526339, sourceID, bucket, documentID, fileIDs);
+}
+
+/**
+ * CollabJoin subscribes after the immutable snapshot already loaded by the
+ * canvas. It returns snapshot data only when a newer compaction raced the board
+ * switch, avoiding duplicate large snapshot transfers on high-latency links.
+ */
+export function CollabJoin(sourceID: string, bucket: string, documentID: string, subscriberID: string, baselineSequenceText: string): $CancellablePromise<$models.CollabJoinResult> {
+    return $Call.ByID(2020783928, sourceID, bucket, documentID, subscriberID, baselineSequenceText);
+}
+
+/**
+ * CollabLeave stops consuming a document while its canvas is closed. Without
+ * this, the old ephemeral consumer would keep acknowledging updates that no
+ * active frontend applies, and reopening the board could not replay them.
+ */
+export function CollabLeave(sourceID: string, bucket: string, documentID: string, subscriberID: string): $CancellablePromise<void> {
+    return $Call.ByID(2272937735, sourceID, bucket, documentID, subscriberID);
+}
+
+export function CollabPublish(sourceID: string, bucket: string, documentID: string, messageID: string, data: string): $CancellablePromise<string> {
+    return $Call.ByID(3060736531, sourceID, bucket, documentID, messageID, data);
+}
+
+/**
+ * CollabPutFiles stores immutable JSON blobs outside the JetStream update log,
+ * avoiding the server's per-message payload limit. Values are normally
+ * Excalidraw files; an oversized scene batch uses the same blob channel.
+ */
+export function CollabPutFiles(sourceID: string, bucket: string, documentID: string, filesJSON: string): $CancellablePromise<void> {
+    return $Call.ByID(1725831796, sourceID, bucket, documentID, filesJSON);
 }
 
 /**
  * CollabReleaseLock drops the leader lease, but only if this client still owns
  * it. Safe to call when not the owner.
  */
-export function CollabReleaseLock(boardID: string, owner: string): $CancellablePromise<void> {
-    return $Call.ByID(3755115010, boardID, owner);
+export function CollabReleaseLock(sourceID: string, bucket: string, documentID: string, owner: string): $CancellablePromise<void> {
+    return $Call.ByID(3755115010, sourceID, bucket, documentID, owner);
 }
 
 /**
  * CollabRenewLock extends the leader lease. Returns false when this client no
  * longer owns it (it should immediately stop writing the bucket).
  */
-export function CollabRenewLock(boardID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
-    return $Call.ByID(3323947914, boardID, owner, ttlSeconds);
+export function CollabRenewLock(sourceID: string, bucket: string, documentID: string, owner: string, ttlSeconds: number): $CancellablePromise<boolean> {
+    return $Call.ByID(3323947914, sourceID, bucket, documentID, owner, ttlSeconds);
 }
 
-export function CollabSend(boardID: string, data: string): $CancellablePromise<void> {
-    return $Call.ByID(4089177030, boardID, data);
+/**
+ * CollabSend sends ephemeral presence over Core NATS. Durable drawing updates
+ * use CollabPublish, so cursor traffic never enters the replay log.
+ */
+export function CollabSend(sourceID: string, bucket: string, documentID: string, data: string): $CancellablePromise<void> {
+    return $Call.ByID(4089177030, sourceID, bucket, documentID, data);
+}
+
+/**
+ * CollabSnapshot writes an immutable, sequence-addressed JSON materialization.
+ * The lease is verified with CAS in this same backend call so a stale frontend
+ * cannot write after another compactor has taken over.
+ */
+export function CollabSnapshot(sourceID: string, bucket: string, boardID: string, documentID: string, sequenceText: string, jsonText: string, owner: string): $CancellablePromise<void> {
+    return $Call.ByID(2454112364, sourceID, bucket, boardID, documentID, sequenceText, jsonText, owner);
 }
 
 export function CopyBoardToSource(boardID: string, targetSource: string, targetGroup: string): $CancellablePromise<void> {
@@ -108,6 +163,14 @@ export function CopyBoardToSource(boardID: string, targetSource: string, targetG
 
 export function CreateBoard(name: string): $CancellablePromise<void> {
     return $Call.ByID(1889109515, name);
+}
+
+/**
+ * DeleteBucket permanently removes an empty NATS bucket. The backend verifies
+ * emptiness immediately before deletion; the menu's state is only advisory.
+ */
+export function DeleteBucket(sourceID: string, bucket: string): $CancellablePromise<void> {
+    return $Call.ByID(3728638004, sourceID, bucket);
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   chooseNatsCredentialsFile,
   copyBoardToSource,
   createBoard,
+  deleteBucket,
   discoverAIModels,
   dismissAlert,
   duplicateBoard,
@@ -39,6 +40,7 @@ import {
   type BoardInfo,
   type BoardSortOrder,
   type CanvasAppearance,
+  type GroupInfo,
   type AIChatMessage,
   type AIModel,
   type NatsServerConfig,
@@ -145,10 +147,17 @@ export default function Shell() {
   const [addServerOpen, setAddServerOpen] = useState(false)
   /** True while the sources refresh button is re-listing NATS buckets. */
   const [refreshingSources, setRefreshingSources] = useState(false)
+  /** Source currently being activated; backend scans stay asynchronous and visible. */
+  const [switchingSource, setSwitchingSource] = useState<string | null>(null)
   const [dropTargeted, setDropTargeted] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; board: BoardInfo } | null>(null)
   /** Right-click menu on a NATS server heading in the sources list. */
   const [sourceMenu, setSourceMenu] = useState<{ x: number; y: number; source: SourceInfo } | null>(null)
+  /** Right-click menu on one NATS Object Store bucket. */
+  const [bucketMenu, setBucketMenu] = useState<{ x: number; y: number; source: SourceInfo; group: GroupInfo } | null>(null)
+  const [deletingBucket, setDeletingBucket] = useState<{ source: SourceInfo; group: GroupInfo } | null>(null)
+  const [bucketDeleteBusy, setBucketDeleteBusy] = useState(false)
+  const [bucketDeleteError, setBucketDeleteError] = useState<string | null>(null)
   /** The NATS server a new bucket is being created on. */
   const [newBucketFor, setNewBucketFor] = useState<SourceInfo | null>(null)
   const [aiOpen, setAIOpen] = useState(false)
@@ -160,10 +169,37 @@ export default function Shell() {
     snapshotRef.current = snapshot
   }, [snapshot])
 
+  const handleActivateSource = useCallback((sourceId: string, groupId: string) => {
+    const current = snapshotRef.current
+    if (!current || (current.activeSource === sourceId && current.activeGroup === groupId)) return
+    const key = `${sourceId}\u0000${groupId}`
+    setSwitchingSource(key)
+    activateSource(sourceId, groupId)
+      .catch((err: unknown) => log('error', `Could not switch source: ${String(err)}`))
+      .finally(() => setSwitchingSource((active) => (active === key ? null : active)))
+  }, [])
+
   const handleMenu = useCallback((id: string) => {
     const current = snapshotRef.current
     if (!current) return
     switch (id) {
+      case 'undo':
+      case 'redo': {
+        // Native GTK menu roles swallow these accelerators before the webview
+        // receives them. Re-emit the action where Excalidraw's history handler
+        // owns the scene and can preserve collaboration semantics.
+        const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'z',
+          code: 'KeyZ',
+          ctrlKey: !isMac,
+          metaKey: isMac,
+          shiftKey: id === 'redo',
+          bubbles: true,
+          cancelable: true,
+        }))
+        break
+      }
       case 'new-board':
         setCreating(true)
         break
@@ -238,16 +274,18 @@ export default function Shell() {
   // popover, so a `click` listener on window would receive that same click and close it again right away.
   // Not `mousedown`: Excalidraw prevents the default of `pointerdown` on the canvas, which suppresses it.
   useEffect(() => {
-    if (!contextMenu && !sourceMenu && !viewOptionsOpen) return
+    if (!contextMenu && !sourceMenu && !bucketMenu && !viewOptionsOpen) return
     const close = (event: Event) => {
       if (event.target instanceof Element && event.target.closest('.view-options, .context-menu')) return
       setContextMenu(null)
       setSourceMenu(null)
+      setBucketMenu(null)
       setViewOptionsOpen(false)
     }
     const closeOnBlur = () => {
       setContextMenu(null)
       setSourceMenu(null)
+      setBucketMenu(null)
       setViewOptionsOpen(false)
     }
     window.addEventListener('pointerdown', close, true)
@@ -256,10 +294,19 @@ export default function Shell() {
       window.removeEventListener('pointerdown', close, true)
       window.removeEventListener('blur', closeOnBlur)
     }
-  }, [contextMenu, sourceMenu, viewOptionsOpen])
+  }, [contextMenu, sourceMenu, bucketMenu, viewOptionsOpen])
 
   // The window title: the open board and when it was last edited (as the SwiftUI app's title and subtitle).
   const openBoard = snapshot?.boards.find((b) => b.id === snapshot.selection)
+  // Keep the collaboration route referentially stable. Canvas owns a durable
+  // subscription whose effect must not restart for unrelated Shell renders
+  // (notably the 30-second relative-time tick).
+  const collab = useMemo(
+    () => snapshot?.activeSource.startsWith('nats:') && snapshot.selection && openBoard?.documentId
+      ? { sourceId: snapshot.activeSource, bucket: snapshot.activeGroup, boardId: snapshot.selection, documentId: openBoard.documentId }
+      : null,
+    [snapshot?.activeSource, snapshot?.activeGroup, snapshot?.selection, openBoard?.documentId],
+  )
   const title = openBoard ? `${openBoard.name} — ${editedText(openBoard.modified, now)}` : 'Excalibur'
   useEffect(() => {
     // A failure to set the title must never take the UI down.
@@ -394,11 +441,17 @@ export default function Shell() {
             sources={snapshot.sources}
             activeSource={snapshot.activeSource}
             activeGroup={snapshot.activeGroup}
+            switchingSource={switchingSource}
+            onActivateSource={handleActivateSource}
             onDropBoard={handleDropBoard}
             onNewBucket={setNewBucketFor}
             onSourceMenu={(event, source) => {
               event.preventDefault()
               setSourceMenu({ x: event.clientX, y: event.clientY, source })
+            }}
+            onBucketMenu={(event, source, group) => {
+              event.preventDefault()
+              setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
             }}
           />
         </div>
@@ -444,11 +497,7 @@ export default function Shell() {
           canvasAppearance={snapshot.canvasAppearance}
           collaborationNickname={snapshot.collaborationNickname}
           boardId={snapshot.selection}
-          collab={
-            snapshot.activeSource.startsWith('nats:') && snapshot.selection
-              ? { sourceId: snapshot.activeSource, bucket: snapshot.activeGroup, boardId: snapshot.selection }
-              : null
-          }
+          collab={collab}
         />
         {snapshot.selection == null && (
           <div className="no-selection">
@@ -537,6 +586,59 @@ export default function Shell() {
           >
             Remove Server
           </button>
+        </div>
+      )}
+      {bucketMenu && (
+        <div className="context-menu" style={{ left: bucketMenu.x, top: bucketMenu.y }} role="menu">
+          <button
+            role="menuitem"
+            className="destructive"
+            disabled={
+              bucketMenu.source.id === snapshot.activeSource &&
+              bucketMenu.group.id === snapshot.activeGroup &&
+              snapshot.boards.length > 0
+            }
+            title="A bucket can only be deleted when it contains no boards."
+            onClick={() => {
+              setDeletingBucket({ source: bucketMenu.source, group: bucketMenu.group })
+              setBucketDeleteError(null)
+              setBucketMenu(null)
+            }}
+          >
+            Delete Bucket…
+          </button>
+        </div>
+      )}
+      {deletingBucket && (
+        <div className="modal-backdrop">
+          <div className="modal alert" role="alertdialog" aria-modal="true" aria-labelledby="delete-bucket-title">
+            <h2 id="delete-bucket-title">Delete “{deletingBucket.group.name}”?</h2>
+            <p className="alert-message">
+              This permanently deletes the empty bucket and its collaboration history from {deletingBucket.source.name}.
+            </p>
+            {bucketDeleteError && <p className="form-error">{bucketDeleteError}</p>}
+            <div className="modal-actions">
+              <button disabled={bucketDeleteBusy} onClick={() => setDeletingBucket(null)}>Cancel</button>
+              <button
+                className="destructive"
+                disabled={bucketDeleteBusy}
+                onClick={async () => {
+                  setBucketDeleteBusy(true)
+                  setBucketDeleteError(null)
+                  try {
+                    await deleteBucket(deletingBucket.source.id, deletingBucket.group.id)
+                    setDeletingBucket(null)
+                  } catch (err) {
+                    setBucketDeleteError(String(err))
+                  } finally {
+                    setBucketDeleteBusy(false)
+                  }
+                }}
+              >
+                {bucketDeleteBusy ? 'Deleting…' : 'Delete Bucket'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {settingsOpen && <SettingsModal snapshot={snapshot} onClose={() => setSettingsOpen(false)} />}
@@ -638,16 +740,22 @@ function SourcesNav({
   sources,
   activeSource,
   activeGroup,
+  switchingSource,
+  onActivateSource,
   onDropBoard,
   onNewBucket,
   onSourceMenu,
+  onBucketMenu,
 }: {
   sources: SourceInfo[]
   activeSource: string
   activeGroup: string
+  switchingSource: string | null
+  onActivateSource: (sourceId: string, groupId: string) => void
   onDropBoard: (boardId: string, targetSource: string, targetGroup: string) => void
   onNewBucket: (source: SourceInfo) => void
   onSourceMenu: (event: React.MouseEvent, source: SourceInfo) => void
+  onBucketMenu: (event: React.MouseEvent, source: SourceInfo, group: GroupInfo) => void
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
   return (
@@ -677,7 +785,10 @@ function SourcesNav({
               className={`source-group${activeSource === source.id && activeGroup === group.id ? ' active' : ''}${
                 dragOver === group.id ? ' drag-over' : ''
               }`}
-              onClick={() => activateSource(source.id, group.id)}
+              onClick={() => onActivateSource(source.id, group.id)}
+              onContextMenu={source.kind === 'nats' ? (event) => onBucketMenu(event, source, group) : undefined}
+              disabled={switchingSource !== null}
+              aria-busy={switchingSource === `${source.id}\u0000${group.id}`}
               onDragEnter={(event) => {
                 event.preventDefault()
                 setDragOver(group.id)
@@ -696,7 +807,9 @@ function SourcesNav({
               }}
               title={group.id}
             >
-              <span className="source-group-icon">{group.kind === 'bucket' ? '◈' : '▸'}</span>
+              <span className="source-group-icon">
+                {switchingSource === `${source.id}\u0000${group.id}` ? '…' : group.kind === 'bucket' ? '◈' : '▸'}
+              </span>
               {group.name}
             </button>
           ))}

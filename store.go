@@ -183,7 +183,11 @@ func (s *Store) scan() error {
 			if object == nil || object.Deleted || strings.HasPrefix(object.Name, ".") || !strings.HasSuffix(object.Name, fileExtension) {
 				continue
 			}
-			boards = append(boards, Board{ID: object.Name, Name: strings.TrimSuffix(object.Name, fileExtension), Modified: object.ModTime, Size: object.Size})
+			documentID, err := client.documentID(s.activeGroup, object.Name)
+			if err != nil {
+				return err
+			}
+			boards = append(boards, Board{ID: object.Name, Name: strings.TrimSuffix(object.Name, fileExtension), DocumentID: documentID, Modified: object.ModTime, Size: object.Size})
 		}
 	}
 	sort.Slice(boards, func(i, j int) bool { return strings.ToLower(boards[i].Name) < strings.ToLower(boards[j].Name) })
@@ -204,18 +208,35 @@ func (s *Store) board(id string) *Board {
 }
 
 func (s *Store) readBoard(board Board) ([]byte, error) {
+	data, _, err := s.readBoardState(board)
+	return data, err
+}
+
+// readBoardState returns the materialized scene and the immutable collaboration
+// snapshot sequence it came from. The sequence lets the renderer join replay
+// after this exact baseline instead of downloading the same snapshot again.
+func (s *Store) readBoardState(board Board) ([]byte, uint64, error) {
 	if s.isLocal() {
 		path := board.Path
 		if board.Target != "" {
 			path = board.Target
 		}
-		return os.ReadFile(path)
+		data, err := os.ReadFile(path)
+		return data, 0, err
 	}
 	client, err := s.clientFor(s.activeSource)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return client.readObject(s.activeGroup, board.ID)
+	if board.DocumentID != "" {
+		if snapshot, sequence, snapshotErr := client.latestCollabSnapshot(s.activeGroup, board.DocumentID); snapshotErr != nil {
+			return nil, 0, snapshotErr
+		} else if snapshot != nil {
+			return snapshot, sequence, nil
+		}
+	}
+	data, err := client.readObject(s.activeGroup, board.ID)
+	return data, 0, err
 }
 
 func (s *Store) writeBoard(id string, data []byte, createOnly bool) error {
@@ -313,6 +334,21 @@ func (s *Store) createBoard(raw string) error {
 	if err := s.writeBoard(id, []byte(emptyBoardJSON), true); err != nil {
 		return err
 	}
+	if !s.isLocal() {
+		client, err := s.clientFor(s.activeSource)
+		if err != nil {
+			return err
+		}
+		documentID, err := newDocumentID()
+		if err != nil {
+			return err
+		}
+		// Always overwrite a stale sidecar left by a previously deleted board of
+		// the same name. A newly created board must never inherit old history.
+		if err := client.setDocumentID(s.activeGroup, id, documentID); err != nil {
+			return err
+		}
+	}
 	s.known[id] = []byte(emptyBoardJSON)
 	if err := s.scan(); err != nil {
 		return err
@@ -370,9 +406,13 @@ func (s *Store) renameBoard(id, raw string) error {
 		if err = client.writeObject(s.activeGroup, newID, data); err != nil {
 			return err
 		}
+		if err = client.setDocumentID(s.activeGroup, newID, board.DocumentID); err != nil {
+			return err
+		}
 		if err = client.deleteObject(s.activeGroup, id); err != nil {
 			return err
 		}
+		_ = client.deleteObject(s.activeGroup, documentMetaName(id))
 	}
 	if detail, ok := s.details[id]; ok {
 		delete(s.details, id)
@@ -411,6 +451,19 @@ func (s *Store) duplicateBoard(id string) error {
 	if err = s.writeBoard(newID, data, true); err != nil {
 		return err
 	}
+	if !s.isLocal() {
+		client, clientErr := s.clientFor(s.activeSource)
+		if clientErr != nil {
+			return clientErr
+		}
+		documentID, documentErr := newDocumentID()
+		if documentErr != nil {
+			return documentErr
+		}
+		if documentErr = client.setDocumentID(s.activeGroup, newID, documentID); documentErr != nil {
+			return documentErr
+		}
+	}
 	if v, ok := s.prefs.Viewports[s.viewportKey(id)]; ok {
 		s.prefs.Viewports[s.viewportKey(newID)] = v
 	}
@@ -435,9 +488,20 @@ func (s *Store) trashBoard(id string) error {
 		if err != nil {
 			return err
 		}
+		// Write the document tombstone before deleting the visible object. A
+		// compactor racing this operation checks the tombstone before and after its
+		// materialization write, so it cannot resurrect the deleted board.
+		if board.DocumentID != "" {
+			if err = client.writeObject(s.activeGroup, collabDeletedName(board.DocumentID), []byte("deleted")); err != nil {
+				return err
+			}
+		}
 		if err = client.deleteObject(s.activeGroup, id); err != nil {
 			return err
 		}
+		// Snapshots and stream history are immutable audit data, but removing the
+		// sidecar makes them unreachable from any future board with this filename.
+		_ = client.deleteObject(s.activeGroup, documentMetaName(id))
 	}
 	delete(s.known, id)
 	delete(s.details, id)
@@ -584,7 +648,7 @@ func (s *Store) snapshot() StoreSnapshot {
 			value := detail.Thumbnail
 			thumbnail = &value
 		}
-		boards = append(boards, BoardInfo{ID: board.ID, Name: board.Name, Modified: board.Modified.Unix(), IsLink: board.IsLink, Target: target, Texts: texts, Thumbnail: thumbnail})
+		boards = append(boards, BoardInfo{ID: board.ID, Name: board.Name, DocumentID: board.DocumentID, Modified: board.Modified.Unix(), IsLink: board.IsLink, Target: target, Texts: texts, Thumbnail: thumbnail})
 	}
 	var selection *string
 	if s.selection != "" {

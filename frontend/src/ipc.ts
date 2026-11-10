@@ -21,6 +21,8 @@ export type Notice = { id: string; title: string; message: string }
 export type BoardInfo = {
   id: string
   name: string
+  /** Stable collaboration identity; unlike the filename, it survives rename. */
+  documentId?: string
   /** Last modified, unix seconds. */
   modified: number
   isLink: boolean
@@ -79,6 +81,7 @@ export type OpenRequest = {
   name: string
   json: string
   view: Viewport | null
+  snapshotSequence: string
 }
 
 // MARK: - Commands (JS → Rust)
@@ -138,21 +141,36 @@ export const removeNatsServer = (id: string) => app().RemoveNatsServer(id)
 export const refreshBuckets = () => app().RefreshBuckets()
 /** Adds a bucket to a NATS source (creates it on the server if needed). */
 export const addBucket = (sourceId: string, bucket: string) => app().AddBucket(sourceId, bucket)
+/** Permanently deletes a bucket; the backend rejects it if any boards remain. */
+export const deleteBucket = (sourceId: string, bucket: string) => app().DeleteBucket(sourceId, bucket)
 /** Switches the sidebar's active source/group (a local folder or a NATS bucket). */
 export const activateSource = (sourceId: string, groupId: string) => app().ActivateSource(sourceId, groupId)
 /** Copies a board into another source/group (drag & drop between sources). */
 export const copyBoardToSource = (boardId: string, targetSource: string, targetGroup: string) =>
   app().CopyBoardToSource(boardId, targetSource, targetGroup)
-/** Publishes a collaboration message (serialized scene or pointer update) for the open board. */
-export const collabSend = (boardId: string, data: string) => app().CollabSend(boardId, data)
-/** Subscribes the backend to collaboration messages for a board (relayed as `canvas:collab` events). */
-export const collabJoin = (sourceId: string, bucket: string, boardId: string) => app().CollabJoin(sourceId, bucket, boardId)
-/** Tries to become the single writer for a board; the lease is held in a JetStream KV bucket. */
-export const collabAcquireLock = (boardId: string, owner: string, ttlSeconds: number) => app().CollabAcquireLock(boardId, owner, ttlSeconds)
+/** Publishes ephemeral pointer presence for the open document. */
+export const collabSend = (sourceId: string, bucket: string, documentId: string, data: string) => app().CollabSend(sourceId, bucket, documentId, data)
+/** Subscribes to durable updates and returns the newest compacted snapshot. */
+export const collabJoin = (sourceId: string, bucket: string, documentId: string, subscriberId: string, baselineSequence: string) =>
+  app().CollabJoin(sourceId, bucket, documentId, subscriberId, baselineSequence)
+/** Stops the per-document consumers so reopening can replay from its snapshot. */
+export const collabLeave = (sourceId: string, bucket: string, documentId: string, subscriberId: string) => app().CollabLeave(sourceId, bucket, documentId, subscriberId)
+/** Confirms that the renderer received and validated one durable update. */
+export const collabAck = (sourceId: string, bucket: string, documentId: string, subscriberId: string, sequence: string) => app().CollabAck(sourceId, bucket, documentId, subscriberId, sequence)
+/** Appends a drawing update to JetStream and returns its stream sequence. */
+export const collabPublish = (sourceId: string, bucket: string, documentId: string, messageId: string, data: string) => app().CollabPublish(sourceId, bucket, documentId, messageId, data)
+/** Stores large Excalidraw file blobs outside the JetStream update log. */
+export const collabPutFiles = (sourceId: string, bucket: string, documentId: string, filesJson: string) => app().CollabPutFiles(sourceId, bucket, documentId, filesJson)
+/** Loads file blobs referenced by a collaboration scene. */
+export const collabGetFiles = (sourceId: string, bucket: string, documentId: string, fileIds: string[]) => app().CollabGetFiles(sourceId, bucket, documentId, fileIds)
+/** Writes an immutable compacted scene at a caught-up stream sequence. */
+export const collabSnapshot = (sourceId: string, bucket: string, boardId: string, documentId: string, sequence: string, json: string, owner: string) => app().CollabSnapshot(sourceId, bucket, boardId, documentId, sequence, json, owner)
+/** Tries to become the snapshot compactor; the lease is held in a JetStream KV bucket. */
+export const collabAcquireLock = (sourceId: string, bucket: string, documentId: string, owner: string, ttlSeconds: number) => app().CollabAcquireLock(sourceId, bucket, documentId, owner, ttlSeconds)
 /** Extends the leader lease; resolves false when this client no longer owns it. */
-export const collabRenewLock = (boardId: string, owner: string, ttlSeconds: number) => app().CollabRenewLock(boardId, owner, ttlSeconds)
+export const collabRenewLock = (sourceId: string, bucket: string, documentId: string, owner: string, ttlSeconds: number) => app().CollabRenewLock(sourceId, bucket, documentId, owner, ttlSeconds)
 /** Drops the leader lease (only if this client still owns it). */
-export const collabReleaseLock = (boardId: string, owner: string) => app().CollabReleaseLock(boardId, owner)
+export const collabReleaseLock = (sourceId: string, bucket: string, documentId: string, owner: string) => app().CollabReleaseLock(sourceId, bucket, documentId, owner)
 
 // MARK: - Events (Rust → JS)
 
@@ -200,12 +218,16 @@ export function onAIStream(cb: (requestId: string, kind: 'answer' | 'thinking', 
   )
 }
 
-/** A collaboration message (serialized scene or pointer update) arrived for the open board. */
-export function onCollab(cb: (boardId: string, data: string) => void): Promise<Unlisten> {
-  return listen<{ boardId: string; data: string }>('canvas:collab', (payload) => cb(payload.boardId, payload.data))
+/** A durable scene update or ephemeral pointer update arrived. */
+export function onCollab(cb: (documentId: string, subscriberId: string, data: string, sequence: string, delivery: string) => void): Promise<Unlisten> {
+  return listen<{ documentId: string; subscriberId: string; data: string; sequence: string; delivery: string }>('canvas:collab', (payload) =>
+    cb(payload.documentId, payload.subscriberId, payload.data, payload.sequence, payload.delivery),
+  )
 }
 
 const MENU_IDS = [
+  'undo',
+  'redo',
   'new-board',
   'import',
   'choose-folder',

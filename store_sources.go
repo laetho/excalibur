@@ -193,6 +193,46 @@ func (s *Store) addBucket(sourceID, bucket string) error {
 	return fmt.Errorf("unknown NATS source %q", sourceID)
 }
 
+// deleteBucket permanently removes an empty NATS Object Store and its
+// collaboration history, then updates navigation. Emptiness is enforced by the
+// server-side object listing in natsClient.deleteBucket, not by stale UI state.
+func (s *Store) deleteBucket(sourceID, bucket string) error {
+	if !strings.HasPrefix(sourceID, "nats:") {
+		return errors.New("only NATS buckets can be deleted")
+	}
+	client, err := s.clientFor(sourceID)
+	if err != nil {
+		return err
+	}
+	if err = client.deleteBucket(bucket); err != nil {
+		return err
+	}
+
+	id := strings.TrimPrefix(sourceID, "nats:")
+	for i := range s.prefs.NatsServers {
+		server := &s.prefs.NatsServers[i]
+		if server.ID != id {
+			continue
+		}
+		server.Buckets = slices.DeleteFunc(server.Buckets, func(existing string) bool { return existing == bucket })
+		if s.activeSource == sourceID && s.activeGroup == bucket {
+			if len(server.Buckets) > 0 {
+				s.activeGroup = server.Buckets[0]
+			} else {
+				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+			}
+			s.selection = ""
+			s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = s.activeSource, s.activeGroup, ""
+			if err = s.scan(); err != nil {
+				return err
+			}
+		}
+		s.savePrefs()
+		return nil
+	}
+	return fmt.Errorf("unknown NATS source %q", sourceID)
+}
+
 // refreshBuckets re-lists the object stores on every configured NATS server and
 // updates the saved bucket list. When the active source is a server whose
 // active bucket disappeared, it falls back to the first remaining bucket (or to
@@ -309,6 +349,13 @@ func (s *Store) copyBoardToSource(boardID, targetSource, targetGroup string) err
 		}
 		if _, err = store.PutBytes(candidate, data); err != nil {
 			return err
+		}
+		documentID, idErr := newDocumentID()
+		if idErr != nil {
+			return idErr
+		}
+		if idErr = client.setDocumentID(targetGroup, candidate, documentID); idErr != nil {
+			return idErr
 		}
 	}
 	return s.activateSource(targetSource, targetGroup)

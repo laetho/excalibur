@@ -6,16 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 func TestLockKeyIsValidAndDeterministic(t *testing.T) {
@@ -110,13 +115,365 @@ func TestValidationAndSearchText(t *testing.T) {
 	}
 }
 
-func TestDataURLAndCollaborationSubject(t *testing.T) {
+func TestDataURLAndCollaborationSubjects(t *testing.T) {
 	got, err := decodeDataURL("data:text/plain,hello%20world")
 	if err != nil || string(got) != "hello world" {
 		t.Fatalf("decode = %q, %v", got, err)
 	}
-	if got := collabSubject("team.bucket", "A board.excalidraw"); got != "wb.collab.team-bucket.A-board-excalidraw" {
-		t.Fatalf("subject = %q", got)
+	documentID := legacyDocumentID("team.bucket", "A board.excalidraw")
+	if !validDocumentID(documentID) {
+		t.Fatalf("invalid document id %q", documentID)
+	}
+	if got := collabUpdateSubject("team.bucket", documentID); !strings.HasSuffix(got, "."+documentID+".updates") {
+		t.Fatalf("update subject = %q", got)
+	}
+	if collabUpdateSubject("team.bucket", documentID) == collabPresenceSubject("team.bucket", documentID) {
+		t.Fatal("durable updates and ephemeral presence share a subject")
+	}
+}
+
+func TestCollaborationObjectNamesAreHiddenAndStable(t *testing.T) {
+	documentID := legacyDocumentID("bucket", "Board.excalidraw")
+	if same := legacyDocumentID("bucket", "Board.excalidraw"); same != documentID {
+		t.Fatalf("legacy document id changed: %q != %q", same, documentID)
+	}
+	if other := legacyDocumentID("bucket/Board", ".excalidraw"); other == documentID {
+		t.Fatal("document tuple hashing is ambiguous")
+	}
+	snapshot := collabSnapshotName(documentID, 42, []byte("scene"))
+	if !strings.HasPrefix(snapshot, ".crdt."+documentID+".snapshot.00000000000000000042.") {
+		t.Fatalf("snapshot name = %q", snapshot)
+	}
+	if a, b := collabFileName(documentID, "file-a"), collabFileName(documentID, "file-b"); a == b || !strings.HasPrefix(a, ".crdt.") {
+		t.Fatalf("file names are not hidden/distinct: %q %q", a, b)
+	}
+	if deleted := collabDeletedName(documentID); deleted != ".crdt."+documentID+".deleted" {
+		t.Fatalf("deletion tombstone name = %q", deleted)
+	}
+}
+
+func TestCollaborationOutboxSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	entry := collabOutboxEntry{
+		SourceID:   "source",
+		Bucket:     "bucket",
+		DocumentID: legacyDocumentID("bucket", "Board.excalidraw"),
+		MessageID:  "peer:1",
+		Data:       `{"type":"scene"}`,
+	}
+	first := newApp()
+	first.outboxPath = path
+	if err := first.enqueueCollabOutbox(entry); err != nil {
+		t.Fatal(err)
+	}
+	second := newApp()
+	second.outboxPath = path
+	if err := second.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := second.collabOutbox[collabOutboxKey(entry)]; !ok || !reflect.DeepEqual(got, entry) {
+		t.Fatalf("reloaded outbox entry = %#v, present=%v", got, ok)
+	}
+	second.removeCollabOutbox(entry)
+	third := newApp()
+	third.outboxPath = path
+	if err := third.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	if len(third.collabOutbox) != 0 {
+		t.Fatalf("removed outbox was reloaded: %#v", third.collabOutbox)
+	}
+}
+
+func TestCollaborationJetStreamDurability(t *testing.T) {
+	serverURL := os.Getenv("EXCALIBUR_TEST_NATS_URL")
+	if serverURL == "" {
+		t.Skip("set EXCALIBUR_TEST_NATS_URL to a server URL or 'spawn' to run the JetStream integration test")
+	}
+	if serverURL == "spawn" {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		listener.Close()
+		logFile, err := os.Create(filepath.Join(t.TempDir(), "nats-server.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("nats-server", "--jetstream", "--addr", "127.0.0.1", "--port", strconv.Itoa(port), "--store_dir", t.TempDir())
+		command.Stdout, command.Stderr = logFile, logFile
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			_ = logFile.Close()
+		})
+		serverURL = fmt.Sprintf("nats://127.0.0.1:%d", port)
+	}
+	var client *natsClient
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		client, err = connectNATS(NatsServerConfig{ID: "test", Name: "test", URL: serverURL})
+		if err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatalf("connect to integration server: %v", err)
+	}
+	defer client.close()
+	secondClient, err := connectNATS(NatsServerConfig{ID: "test-2", Name: "test-2", URL: serverURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondClient.close()
+	thirdClient, err := connectNATS(NatsServerConfig{ID: "test-3", Name: "test-3", URL: serverURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer thirdClient.close()
+	bucket := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	documentID, err := newDocumentID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDocumentID, err := newDocumentID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot fencing and the periodic heartbeat can renew the same owner at
+	// the same instant. A CAS conflict caused by that same owner must be retried,
+	// not reported as leadership loss.
+	const leaseOwner = "integration-owner"
+	if won, err := client.acquireLock(bucket, documentID, leaseOwner, 30*time.Second); err != nil || !won {
+		t.Fatalf("acquire integration lease: won=%v err=%v", won, err)
+	}
+	for round := 0; round < 20; round++ {
+		start := make(chan struct{})
+		results := make(chan bool, 2)
+		errorsCh := make(chan error, 2)
+		for _, lockClient := range []*natsClient{client, secondClient} {
+			go func(c *natsClient) {
+				<-start
+				ok, err := c.renewLock(bucket, documentID, leaseOwner, 30*time.Second)
+				results <- ok
+				errorsCh <- err
+			}(lockClient)
+		}
+		close(start)
+		for attempt := 0; attempt < 2; attempt++ {
+			if err := <-errorsCh; err != nil {
+				t.Fatalf("concurrent lease renewal round %d: %v", round, err)
+			}
+			if ok := <-results; !ok {
+				t.Fatalf("same-owner lease renewal was reported lost in round %d", round)
+			}
+		}
+	}
+	first, err := client.publishCollabUpdate(bucket, documentID, "peer:1", []byte(`{"type":"scene","elements":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := client.publishCollabUpdate(bucket, documentID, "peer:1", []byte(`{"type":"scene","elements":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate != first {
+		t.Fatalf("deduplicated sequence = %d, want %d", duplicate, first)
+	}
+	secondBoard, err := secondClient.publishCollabUpdate(bucket, secondDocumentID, "peer:2", []byte(`{"type":"scene","elements":[{"id":"other"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := thirdClient.publishCollabUpdate(bucket, documentID, "peer:3", []byte(`{"type":"scene","elements":[{"id":"third"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first >= secondBoard || secondBoard >= third {
+		t.Fatalf("stream sequences are not monotonic: %d, %d, %d", first, secondBoard, third)
+	}
+	// App subscriptions keep messages unacknowledged until the renderer confirms
+	// receipt. This makes a lost Wails event redeliverable instead of silently
+	// advancing the consumer.
+	store := testStore(t)
+	store.natsClients["test"] = client
+	app := newApp()
+	app.store = store
+	const subscriberID = "renderer-test"
+	if _, err := app.CollabJoin("nats:test", bucket, documentID, subscriberID, "0"); err != nil {
+		t.Fatal(err)
+	}
+	pendingKey := "nats:test\x00" + bucket + "\x00" + documentID + "\x00" + subscriberID + "\x00" + strconv.FormatUint(first, 10)
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		app.subMu.Lock()
+		pending := app.collabPending[pendingKey] != nil
+		app.subMu.Unlock()
+		if pending || time.Now().After(deadline) {
+			if !pending {
+				t.Fatal("durable update was not held pending for renderer acknowledgement")
+			}
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := app.CollabAck("nats:test", bucket, documentID, subscriberID, strconv.FormatUint(first, 10)); err != nil {
+		t.Fatal(err)
+	}
+	app.subMu.Lock()
+	_, stillPending := app.collabPending[pendingKey]
+	app.subMu.Unlock()
+	if stillPending {
+		t.Fatal("renderer acknowledgement did not clear the pending update")
+	}
+	if err := app.CollabLeave("nats:test", bucket, documentID, subscriberID); err != nil {
+		t.Fatal(err)
+	}
+	stream := collabStreamName(bucket)
+	firstBoardSub, err := client.js.SubscribeSync(collabUpdateSubject(bucket, documentID), nats.BindStream(stream), nats.DeliverAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstBoardSub.Unsubscribe()
+	for i, wantSequence := range []uint64{first, third} {
+		message, err := firstBoardSub.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("first-board replay message %d: %v", i, err)
+		}
+		metadata, err := message.Metadata()
+		if err != nil || metadata.Sequence.Stream != wantSequence {
+			t.Fatalf("first-board replay sequence = %v, err=%v, want %d", metadata, err, wantSequence)
+		}
+	}
+	if _, err := firstBoardSub.NextMsg(50 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("first-board consumer received a cross-board message: %v", err)
+	}
+	secondBoardSub, err := client.js.SubscribeSync(collabUpdateSubject(bucket, secondDocumentID), nats.BindStream(stream), nats.DeliverAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondBoardSub.Unsubscribe()
+	message, err := secondBoardSub.NextMsg(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := message.Metadata()
+	if err != nil || metadata.Sequence.Stream != secondBoard {
+		t.Fatalf("second-board replay sequence = %v, err=%v, want %d", metadata, err, secondBoard)
+	}
+	const snapshot = `{"type":"excalidraw","elements":[]}`
+	if err := client.writeCollabSnapshot(bucket, documentID, third, []byte(snapshot)); err != nil {
+		t.Fatal(err)
+	}
+	data, sequence, err := client.latestCollabSnapshot(bucket, documentID)
+	if err != nil || sequence != third || string(data) != snapshot {
+		t.Fatalf("snapshot = %q at %d, err=%v", data, sequence, err)
+	}
+	if unchanged, unchangedSequence, err := client.collabSnapshotAfter(bucket, documentID, third); err != nil || unchanged != nil || unchangedSequence != third {
+		t.Fatalf("unchanged snapshot was retransferred: data=%q sequence=%d err=%v", unchanged, unchangedSequence, err)
+	}
+	const baselineSubscriber = "renderer-with-baseline"
+	baselineResult, err := app.CollabJoin("nats:test", bucket, documentID, baselineSubscriber, strconv.FormatUint(third, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineResult.Snapshot != nil || baselineResult.SnapshotSequence != strconv.FormatUint(third, 10) {
+		t.Fatalf("join retransferred loaded baseline: snapshot=%v sequence=%q", baselineResult.Snapshot != nil, baselineResult.SnapshotSequence)
+	}
+	if err := app.CollabLeave("nats:test", bucket, documentID, baselineSubscriber); err != nil {
+		t.Fatal(err)
+	}
+	info, err := client.js.StreamInfo(collabStreamName(bucket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Config.MaxAge != 0 || info.Config.MaxBytes != -1 {
+		t.Fatalf("collaboration stream can discard unsnapshotted edits: age=%s bytes=%d", info.Config.MaxAge, info.Config.MaxBytes)
+	}
+	// Compaction is subject-filtered and deliberately trails the newest snapshot
+	// by one interval, so a join racing snapshot discovery can still replay.
+	fourth, err := secondClient.publishCollabUpdate(bucket, documentID, "peer:4", []byte(`{"type":"scene","elements":[{"id":"fourth"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.writeCollabSnapshot(bucket, documentID, fourth, []byte(snapshot)); err != nil {
+		t.Fatal(err)
+	}
+	if err := thirdClient.writeCollabSnapshot(bucket, documentID, third, []byte(`{"type":"excalidraw","elements":[{"id":"stale"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if data, sequence, err := client.latestCollabSnapshot(bucket, documentID); err != nil || sequence != fourth || string(data) != snapshot {
+		t.Fatalf("stale compactor regressed snapshot: data=%q sequence=%d err=%v", data, sequence, err)
+	}
+	previous, err := client.previousCollabSnapshotSequence(bucket, documentID)
+	if err != nil || previous != third {
+		t.Fatalf("previous snapshot sequence = %d, err=%v, want %d", previous, err, third)
+	}
+	if err := client.purgeCollabUpdates(bucket, documentID, previous); err != nil {
+		t.Fatal(err)
+	}
+	compactedSub, err := client.js.SubscribeSync(collabUpdateSubject(bucket, documentID), nats.BindStream(stream), nats.DeliverAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compactedSub.Unsubscribe()
+	message, err = compactedSub.NextMsg(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err = message.Metadata()
+	if err != nil || metadata.Sequence.Stream != fourth {
+		t.Fatalf("post-compaction sequence = %v, err=%v, want %d", metadata, err, fourth)
+	}
+	secondAfterPurge, err := client.js.SubscribeSync(collabUpdateSubject(bucket, secondDocumentID), nats.BindStream(stream), nats.DeliverAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondAfterPurge.Unsubscribe()
+	message, err = secondAfterPurge.NextMsg(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err = message.Metadata()
+	if err != nil || metadata.Sequence.Stream != secondBoard {
+		t.Fatalf("cross-document compaction removed sequence: metadata=%v err=%v want=%d", metadata, err, secondBoard)
+	}
+
+	// Bucket deletion is destructive and must be enforced by the backend, not
+	// merely by the menu state. Visible boards block deletion; hidden CRDT data
+	// does not, and the per-bucket collaboration stream is removed with it.
+	nonemptyBucket := bucket + "-nonempty"
+	if err := client.writeObject(nonemptyBucket, "Keep.excalidraw", []byte(`{"type":"excalidraw","elements":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.deleteBucket(nonemptyBucket); err == nil {
+		t.Fatal("deleted a bucket that still contained a board")
+	}
+	if _, err := client.js.ObjectStore(nonemptyBucket); err != nil {
+		t.Fatalf("nonempty bucket was removed after rejected delete: %v", err)
+	}
+
+	emptyBucket := bucket + "-empty"
+	if err := client.writeObject(emptyBucket, ".hidden-metadata", []byte("metadata")); err != nil {
+		t.Fatal(err)
+	}
+	emptyStream, err := client.ensureCollabStream(emptyBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.deleteBucket(emptyBucket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.js.ObjectStore(emptyBucket); err == nil {
+		t.Fatal("empty bucket still exists after deletion")
+	}
+	if _, err := client.js.StreamInfo(emptyStream); !errors.Is(err, nats.ErrStreamNotFound) {
+		t.Fatalf("collaboration stream still exists after bucket deletion: %v", err)
 	}
 }
 

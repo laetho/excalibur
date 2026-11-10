@@ -99,13 +99,14 @@ type Preferences struct {
 }
 
 type Board struct {
-	ID       string
-	Name     string
-	Modified time.Time
-	Size     uint64
-	IsLink   bool
-	Target   string
-	Path     string
+	ID         string
+	Name       string
+	DocumentID string
+	Modified   time.Time
+	Size       uint64
+	IsLink     bool
+	Target     string
+	Path       string
 }
 
 type BoardDetails struct {
@@ -114,13 +115,21 @@ type BoardDetails struct {
 }
 
 type BoardInfo struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Modified  int64    `json:"modified"`
-	IsLink    bool     `json:"isLink"`
-	Target    *string  `json:"target"`
-	Texts     []string `json:"texts"`
-	Thumbnail *string  `json:"thumbnail"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	DocumentID string   `json:"documentId,omitempty"`
+	Modified   int64    `json:"modified"`
+	IsLink     bool     `json:"isLink"`
+	Target     *string  `json:"target"`
+	Texts      []string `json:"texts"`
+	Thumbnail  *string  `json:"thumbnail"`
+}
+
+type CollabJoinResult struct {
+	Snapshot *string `json:"snapshot"`
+	// JetStream sequences are decimal strings because JavaScript numbers lose
+	// integer precision above 2^53-1.
+	SnapshotSequence string `json:"snapshotSequence"`
 }
 
 type Notice struct {
