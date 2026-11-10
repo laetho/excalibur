@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"regexp"
+	"strings"
 )
 
 // build/config.yml is the single source of the app version: the release
@@ -16,8 +17,7 @@ var buildConfigVersion = regexp.MustCompile(`(?m)^  version:\s*["']([^"']+)["']\
 // AppVersionInfo describes the running build for the About page.
 type AppVersionInfo struct {
 	Version string `json:"version"`
-	// Development is true for `task dev` and other non-production builds, whose
-	// config.yml version is a placeholder rather than a released version.
+	// Development is true for `task dev` and other non-production builds.
 	Development bool `json:"development"`
 }
 
@@ -29,7 +29,12 @@ func appVersion() string {
 	return match[1]
 }
 
-// AppVersion returns the version of the running build.
+// AppVersion returns the version of the running build. Release builds report
+// the stamped version; development builds report their git description, or
+// an empty version when that is unavailable.
 func (a *App) AppVersion() AppVersionInfo {
-	return AppVersionInfo{Version: appVersion(), Development: !productionBuild}
+	if !productionBuild {
+		return AppVersionInfo{Version: strings.TrimPrefix(developmentVersion(), "v"), Development: true}
+	}
+	return AppVersionInfo{Version: appVersion()}
 }

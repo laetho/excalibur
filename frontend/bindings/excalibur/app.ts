@@ -30,7 +30,9 @@ export function AddNatsServer(config: $models.NatsServerConfig): $CancellablePro
 }
 
 /**
- * AppVersion returns the version of the running build.
+ * AppVersion returns the version of the running build. Release builds report
+ * the stamped version; development builds report their git description, or
+ * an empty version when that is unavailable.
  */
 export function AppVersion(): $CancellablePromise<$models.AppVersionInfo> {
     return $Call.ByID(1970741496);

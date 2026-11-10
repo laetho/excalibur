@@ -2186,7 +2186,9 @@ function AboutSettings() {
       <p className="settings-about-name">Excalibur</p>
       {version && (
         <p className="settings-about-version">
-          {version.development ? 'Development build' : `Version ${version.version}`}
+          {version.version
+            ? `Version ${version.version}${version.development ? ' (development build)' : ''}`
+            : 'Development build'}
         </p>
       )}
       <p className="settings-field-help">The board of legend. A desktop home for your Excalidraw boards.</p>
