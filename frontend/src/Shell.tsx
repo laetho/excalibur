@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
-import { CloseIcon, FilterIcon, MenuIcon, PlusIcon, RefreshIcon, SettingsIcon } from './icons'
+import { CloseIcon, FilterIcon, PlusIcon, RefreshIcon, SearchIcon } from './icons'
 import {
   activateSource,
   addBucket,
@@ -388,13 +388,14 @@ export default function Shell() {
         }}
         onDrop={handleDrop}
       >
-        <div className="sidebar-toolbar">
-          <button className="new-board" onClick={() => setCreating(true)} title="New Board (Ctrl+N)">
-            New Board
-          </button>
+        <div className="search-row">
+          <div className="search">
+            <SearchIcon className="search-icon" />
+            <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
+          </div>
           <div className="view-options">
             <button className="icon-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards and show thumbnails">
-              <MenuIcon />
+              <FilterIcon />
             </button>
             {viewOptionsOpen && (
               <div className="popover">
@@ -414,13 +415,6 @@ export default function Shell() {
               </div>
             )}
           </div>
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings (⌘,)">
-            <SettingsIcon />
-          </button>
-        </div>
-        <div className="search">
-          <FilterIcon className="search-icon" />
-          <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
         </div>
         <div className="sources">
           <div className="sources-header">
@@ -456,6 +450,11 @@ export default function Shell() {
               setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
             }}
           />
+        </div>
+        <div className="board-create">
+          <button className="new-board" onClick={() => setCreating(true)} title="New Board (Ctrl+N)">
+            New Board
+          </button>
         </div>
         <div className="board-list">
           {snapshot.boards.length === 0 ? (

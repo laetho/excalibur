@@ -135,22 +135,30 @@ select,
   color: var(--text-secondary);
 }
 
-/* MARK: - Sidebar toolbar */
+/* MARK: - Search row (search + filter) */
 
-.sidebar-toolbar {
+.search-row {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px;
+  padding: 0 8px 8px;
+}
+
+/* MARK: - New board (sits above the boards list, creating into the active bucket) */
+
+.board-create {
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--row-hover);
+  margin-bottom: 4px;
 }
 
 .new-board {
-  flex: 1;
+  width: 100%;
   text-align: left;
-  padding: 5px 10px;
-  border-radius: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .new-board:hover {
@@ -234,7 +242,8 @@ select,
 
 .search {
   position: relative;
-  padding: 0 8px 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 .search .search-icon {
