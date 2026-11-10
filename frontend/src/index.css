@@ -1655,7 +1655,7 @@ button.link-button:hover {
   border-radius: 8px; /* --border-radius-lg */
   background: #ececf4; /* --color-surface-low (light) */
   box-shadow: 0 0 0 1px #ffffff; /* --color-surface-lowest ring (light) */
-  color: #999999; /* --color-gray-50 (light) */
+  color: #5c5c5c; /* --color-gray-70 (light); gray-50 was only 2.4:1 here */
   font-family: Assistant, system-ui, sans-serif; /* --ui-font */
   font-size: 13px;
   font-weight: 500;
@@ -1677,19 +1677,34 @@ button.link-button:hover {
   background: currentColor;
 }
 
+/* Status dots are >= 3:1 against the badge in both canvas themes. */
 .canvas-persistence-status.unwritten .canvas-persistence-dot,
 .canvas-persistence-status.retrying .canvas-persistence-dot {
-  background: #e03131; /* --color-danger */
+  background: #c92a2a;
 }
 
 .canvas-persistence-status.synced .canvas-persistence-dot {
-  background: #2f9e44;
+  background: #2b8a3e;
 }
 
 .canvas-persistence-status.writing .canvas-persistence-dot,
 .canvas-persistence-status.queued .canvas-persistence-dot {
-  background: #f59f00;
+  background: #b45309;
   animation: canvas-persistence-pulse 1s ease-in-out infinite alternate;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.unwritten .canvas-persistence-dot,
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.retrying .canvas-persistence-dot {
+  background: #e03131;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.synced .canvas-persistence-dot {
+  background: #2f9e44;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.writing .canvas-persistence-dot,
+.canvas[data-canvas-theme='dark'] .canvas-persistence-status.queued .canvas-persistence-dot {
+  background: #f59f00;
 }
 
 @keyframes canvas-persistence-pulse {
