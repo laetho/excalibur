@@ -137,26 +137,27 @@ select,
 
 /* MARK: - Search row (search + filter) */
 
+/* The top of the sidebar uses one 8px horizontal gutter and 32px-tall controls
+   (search input, filter, New Board) so every row lines up on the same baseline. */
 .search-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 8px 8px;
+  gap: 6px;
+  padding: 8px 8px 6px;
 }
 
 /* MARK: - New board (sits above the boards list, creating into the active bucket) */
 
 .board-create {
   padding: 0 8px 8px;
-  border-bottom: 1px solid var(--row-hover);
-  margin-bottom: 4px;
 }
 
 .new-board {
   width: 100%;
+  height: 32px;
   text-align: left;
-  padding: 7px 10px;
-  border-radius: 7px;
+  padding: 0 10px;
+  border-radius: 6px;
   color: var(--accent);
   font-weight: 600;
 }
@@ -191,7 +192,7 @@ select,
 
 .popover {
   position: absolute;
-  top: 34px;
+  top: 36px;
   right: 0;
   z-index: 30;
   min-width: 180px;
@@ -248,10 +249,9 @@ select,
 
 .search .search-icon {
   position: absolute;
-  left: 19px;
-  top: 0;
-  bottom: 8px;
-  margin: auto 0;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 15px;
   height: 15px;
   color: var(--text-secondary);
@@ -260,8 +260,9 @@ select,
 
 .search input {
   width: 100%;
-  padding: 7px 10px 7px 32px;
-  border-radius: 7px;
+  height: 32px;
+  padding: 0 10px 0 30px;
+  border-radius: 6px;
   border: 1px solid transparent;
   background: var(--input-bg);
   outline: none;
@@ -280,7 +281,7 @@ select,
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 0 8px 8px;
+  padding: 0 0 6px;
   border-bottom: 1px solid var(--row-hover);
   margin-bottom: 6px;
 }
@@ -289,7 +290,7 @@ select,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 4px 4px;
+  padding: 0 8px 6px;
 }
 
 .sources-title {
@@ -344,6 +345,7 @@ select,
   gap: 6px;
   min-height: 0;
   overflow-y: auto;
+  padding: 0 8px;
 }
 
 .source {
@@ -371,11 +373,15 @@ select,
 
 .source-name .source-add {
   padding: 0;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   line-height: 1;
-  font-size: 14px;
   opacity: 0.6;
+}
+
+.source-name .source-add svg {
+  width: 16px;
+  height: 16px;
 }
 
 .source-name:hover .source-add {
@@ -436,7 +442,7 @@ select,
   flex: 1 1 0;
   min-height: 80px;
   overflow-y: auto;
-  padding: 0 6px 8px;
+  padding: 0 8px 8px;
 }
 
 .board-row {
