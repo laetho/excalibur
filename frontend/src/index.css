@@ -379,15 +379,18 @@ select,
   color: var(--text);
 }
 
-/* The local folder row is itself the clickable group. It stays flat (same
-   width and icon column as the server rows); hover tints it and the active
-   state reuses the bucket's dot. */
-.source-row.local:hover {
-  color: var(--accent);
+/* The local folder row is itself the clickable group. Give it the same pill
+   treatment as a bucket on hover/active, bleeding into the gutter so its icon
+   stays aligned with the server rows. */
+.source-row.local {
+  margin: 0 -8px;
+  width: calc(100% + 16px);
+  padding: 0 8px;
+  border-radius: 6px;
 }
 
-.source-row.local.active .source-title {
-  color: var(--accent);
+.source-row.local:hover:not(.active) {
+  background: var(--card-bg);
 }
 
 .source-icon {
@@ -457,22 +460,16 @@ select,
   text-decoration: underline;
 }
 
+.source-row.local.active,
 .source-group.active {
   background: var(--row-selected);
   color: var(--row-selected-text);
 }
 
+.source-row.drag-over,
 .source-group.drag-over {
   background: var(--accent);
   color: var(--accent-text);
-}
-
-/* The flat local row has no padding, so highlight a drop with an outline. */
-.source-row.drag-over {
-  color: var(--accent);
-  border-radius: 6px;
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 .source-row[aria-busy='true'],
