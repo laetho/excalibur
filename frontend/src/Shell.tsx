@@ -414,6 +414,7 @@ export default function Shell() {
             )}
           </div>
         </div>
+        <div className="sidebar-divider" role="separator" />
         <SourcesNav
           sources={snapshot.sources}
           activeSource={snapshot.activeSource}
@@ -433,6 +434,7 @@ export default function Shell() {
             setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
           }}
         />
+        <div className="sidebar-divider" role="separator" />
         <div className="boards-header">
           <span className="boards-title">Boards</span>
           <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
