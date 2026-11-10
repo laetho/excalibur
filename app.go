@@ -376,13 +376,27 @@ func (a *App) ChooseFolder() error {
 	return nil
 }
 
-// ChooseNatsCredentialsFile returns only the selected path. The credential
-// contents and private NKey seed never enter the webview.
+// ChooseNatsCredentialsFile lets the user pick a .creds file and imports a
+// private copy into the app's config directory, returning the copy's path.
+// Reading the original again later (for example at boot) can fail on macOS,
+// where access to folders such as Downloads is only granted for the moment the
+// file is chosen. The credential contents and private NKey seed never enter
+// the webview.
 func (a *App) ChooseNatsCredentialsFile() (string, error) {
-	return a.wailsApp.Dialog.OpenFile().
+	path, err := a.wailsApp.Dialog.OpenFile().
 		SetTitle("Choose NATS Credentials File").
 		AddFilter("NATS credentials", "*.creds").
 		PromptForSingleSelection()
+	if err != nil || path == "" {
+		return "", err
+	}
+	a.mu.Lock()
+	store := a.store
+	a.mu.Unlock()
+	if store == nil {
+		return "", errors.New("store is not ready")
+	}
+	return importCredentialsFile(path, store.credentialsDir())
 }
 
 func revealPath(path string) error {

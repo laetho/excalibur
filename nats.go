@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -303,4 +305,32 @@ func bucketNameProblem(name string) string {
 	default:
 		return ""
 	}
+}
+
+const maxCredentialsFileSize = 64 << 10
+
+// importCredentialsFile copies a NATS .creds file into dir (mode 0600) and
+// returns the copy's path. The name includes a content hash, so importing the
+// same file twice reuses one copy and a changed file gets a new one.
+func importCredentialsFile(src, dir string) (string, error) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return "", fmt.Errorf("could not access NATS credentials file %q: %w", src, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxCredentialsFileSize {
+		return "", fmt.Errorf("%q is not a valid NATS credentials file", src)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return "", fmt.Errorf("could not read NATS credentials file %q: %w", src, err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	dst := filepath.Join(dir, hex.EncodeToString(sum[:4])+"-"+filepath.Base(src))
+	if err := atomicWrite(dst, data); err != nil {
+		return "", fmt.Errorf("could not store NATS credentials: %w", err)
+	}
+	return dst, nil
 }

@@ -689,3 +689,38 @@ func TestBoardsFolderFallsBackWhenDocumentsBlocked(t *testing.T) {
 		t.Fatalf("expected fallback %q, got %q", want, got)
 	}
 }
+
+func TestImportCredentialsFileCopiesPrivately(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "user.creds")
+	if err := os.WriteFile(src, []byte("-----BEGIN NATS USER JWT-----\nx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "credentials")
+	dst, err := importCredentialsFile(src, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dst) != dir {
+		t.Fatalf("copy %q is not inside %q", dst, dir)
+	}
+	if err = os.Remove(src); err != nil { // the copy must not depend on the original
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil || !strings.Contains(string(data), "NATS USER JWT") {
+		t.Fatalf("copy unreadable or wrong: %v", err)
+	}
+	if info, _ := os.Stat(dst); info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected mode 0600, got %v", info.Mode().Perm())
+	}
+}
+
+func TestImportCredentialsFileRejectsOversized(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "big.creds")
+	if err := os.WriteFile(src, make([]byte, maxCredentialsFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importCredentialsFile(src, t.TempDir()); err == nil {
+		t.Fatal("expected an error for an oversized file")
+	}
+}
