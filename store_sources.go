@@ -149,7 +149,9 @@ func (s *Store) removeNatsServer(id string) error {
 		client.close()
 		delete(s.natsClients, id)
 	}
+	removed := s.prefs.NatsServers[index]
 	s.prefs.NatsServers = append(s.prefs.NatsServers[:index], s.prefs.NatsServers[index+1:]...)
+	s.removeImportedCredentials(removed.CredentialsFile)
 	if s.activeSource == "nats:"+id {
 		s.activeSource, s.activeGroup, s.selection = localSourceID, s.localFolder, ""
 		s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = localSourceID, s.localFolder, ""
@@ -321,4 +323,18 @@ func (s *Store) changeFolder(folder string) error {
 	s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = localSourceID, folder, ""
 	s.savePrefs()
 	return s.scan()
+}
+
+// removeImportedCredentials deletes an app-owned credentials copy once no
+// server references it. Files the user supplied elsewhere are never touched.
+func (s *Store) removeImportedCredentials(path string) {
+	if path == "" || filepath.Dir(path) != s.credentialsDir() {
+		return
+	}
+	for _, server := range s.prefs.NatsServers {
+		if server.CredentialsFile == path {
+			return
+		}
+	}
+	_ = os.Remove(path)
 }

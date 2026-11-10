@@ -60,7 +60,7 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 		config = "."
 	}
 	home, _ := os.UserHomeDir()
-	folder := filepath.Join(home, "Documents", "Whiteboards")
+	folder := boardsFolder(home)
 	store, err := newStore(preferencesPath(config), folder)
 	if err != nil {
 		return fmt.Errorf("initialise store: %w", err)
@@ -376,13 +376,27 @@ func (a *App) ChooseFolder() error {
 	return nil
 }
 
-// ChooseNatsCredentialsFile returns only the selected path. The credential
-// contents and private NKey seed never enter the webview.
+// ChooseNatsCredentialsFile lets the user pick a .creds file and imports a
+// private copy into the app's config directory, returning the copy's path.
+// Reading the original again later (for example at boot) can fail on macOS,
+// where access to folders such as Downloads is only granted for the moment the
+// file is chosen. The credential contents and private NKey seed never enter
+// the webview.
 func (a *App) ChooseNatsCredentialsFile() (string, error) {
-	return a.wailsApp.Dialog.OpenFile().
+	path, err := a.wailsApp.Dialog.OpenFile().
 		SetTitle("Choose NATS Credentials File").
 		AddFilter("NATS credentials", "*.creds").
 		PromptForSingleSelection()
+	if err != nil || path == "" {
+		return "", err
+	}
+	a.mu.Lock()
+	store := a.store
+	a.mu.Unlock()
+	if store == nil {
+		return "", errors.New("store is not ready")
+	}
+	return importCredentialsFile(path, store.credentialsDir())
 }
 
 func revealPath(path string) error {
@@ -797,6 +811,44 @@ func mimeForPath(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// boardsFolder returns a usable default boards folder. It prefers
+// ~/Documents/Whiteboards but falls back to ~/Whiteboards when the preferred
+// location is blocked. On macOS, Documents/Desktop/Downloads are protected by
+// TCC (filesystem access), and a self-signed dev build is denied silently and
+// without a prompt, which breaks both writing and watching boards.
+func boardsFolder(home string) string {
+	for _, folder := range []string{
+		filepath.Join(home, "Documents", "Whiteboards"),
+		filepath.Join(home, "Whiteboards"),
+	} {
+		if boardsFolderUsable(folder) {
+			return folder
+		}
+	}
+	return filepath.Join(home, "Documents", "Whiteboards")
+}
+
+// boardsFolderUsable reports whether folder can be created, written to, and
+// watched. A folder that passes the write probe but fails to be watched is not
+// usable in practice, so both are checked.
+func boardsFolderUsable(folder string) bool {
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return false
+	}
+	probe, err := os.CreateTemp(folder, ".wprobe-*")
+	if err != nil {
+		return false
+	}
+	_ = probe.Close()
+	_ = os.Remove(probe.Name())
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return true // cannot determine; don't penalize a working folder
+	}
+	defer w.Close()
+	return w.Add(folder) == nil
 }
 
 func (a *App) startWatcher(folder string) {

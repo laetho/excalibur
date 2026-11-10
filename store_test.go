@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -694,5 +695,58 @@ func TestApplicationZoomDefaultsAndValidation(t *testing.T) {
 		if validApplicationZoom(zoom) {
 			t.Errorf("zoom %v should be invalid", zoom)
 		}
+	}
+}
+
+func TestBoardsFolderUsableTempDir(t *testing.T) {
+	if !boardsFolderUsable(t.TempDir()) {
+		t.Fatal("expected a temp dir to be a usable boards folder")
+	}
+}
+
+func TestBoardsFolderFallsBackWhenDocumentsBlocked(t *testing.T) {
+	home := t.TempDir()
+	// Block the preferred ~/Documents/Whiteboards location by making Documents a file.
+	if err := os.WriteFile(filepath.Join(home, "Documents"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := boardsFolder(home), filepath.Join(home, "Whiteboards"); got != want {
+		t.Fatalf("expected fallback %q, got %q", want, got)
+	}
+}
+
+func TestImportCredentialsFileCopiesPrivately(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "user.creds")
+	if err := os.WriteFile(src, []byte("-----BEGIN NATS USER JWT-----\nx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "credentials")
+	dst, err := importCredentialsFile(src, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dst) != dir {
+		t.Fatalf("copy %q is not inside %q", dst, dir)
+	}
+	if err = os.Remove(src); err != nil { // the copy must not depend on the original
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil || !strings.Contains(string(data), "NATS USER JWT") {
+		t.Fatalf("copy unreadable or wrong: %v", err)
+	}
+	// Windows has no Unix permission bits; files are protected by ACLs there.
+	if info, _ := os.Stat(dst); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected mode 0600, got %v", info.Mode().Perm())
+	}
+}
+
+func TestImportCredentialsFileRejectsOversized(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "big.creds")
+	if err := os.WriteFile(src, make([]byte, maxCredentialsFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importCredentialsFile(src, t.TempDir()); err == nil {
+		t.Fatal("expected an error for an oversized file")
 	}
 }

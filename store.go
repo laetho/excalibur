@@ -51,6 +51,11 @@ func preferencesPath(configDir string) string {
 	return path
 }
 
+// credentialsDir holds private copies of imported NATS credentials files.
+func (s *Store) credentialsDir() string {
+	return filepath.Join(filepath.Dir(s.prefsPath), "credentials")
+}
+
 func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	show := true
 	s := &Store{

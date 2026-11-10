@@ -53,6 +53,8 @@ function excalidrawAssets(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [englishOnly(), react(), excalidrawAssets()],
+  // Wails' dev proxy dials IPv4 (127.0.0.1); Node may resolve "localhost" to IPv6 (::1) only.
+  server: { host: '127.0.0.1' },
   resolve: {
     // Excalidraw's file picker helper doesn't open the native panel in WKWebView; see the shim for why.
     alias: { 'browser-fs-access': resolve(import.meta.dirname, 'src/shims/browser-fs-access.ts') },

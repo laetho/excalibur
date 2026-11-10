@@ -58,8 +58,12 @@ export function ChooseImport(): $CancellablePromise<void> {
 }
 
 /**
- * ChooseNatsCredentialsFile returns only the selected path. The credential
- * contents and private NKey seed never enter the webview.
+ * ChooseNatsCredentialsFile lets the user pick a .creds file and imports a
+ * private copy into the app's config directory, returning the copy's path.
+ * Reading the original again later (for example at boot) can fail on macOS,
+ * where access to folders such as Downloads is only granted for the moment the
+ * file is chosen. The credential contents and private NKey seed never enter
+ * the webview.
  */
 export function ChooseNatsCredentialsFile(): $CancellablePromise<string> {
     return $Call.ByID(3631643292);
