@@ -1,18 +1,42 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLockKeyIsValidAndDeterministic(t *testing.T) {
+	bucket := "team bucket/日本語"
+	board := "Roadmap 2026 #1.excalidraw"
+	wantHash := sha256.Sum256([]byte(bucket + "\x00" + board))
+	want := fmt.Sprintf("board.%x", wantHash)
+
+	got := lockKey(bucket, board)
+	if got != want {
+		t.Fatalf("lockKey() = %q, want %q", got, want)
+	}
+	if !regexp.MustCompile(`^[-/_=.a-zA-Z0-9]+$`).MatchString(got) {
+		t.Fatalf("lockKey() produced an invalid NATS KV key: %q", got)
+	}
+}
+
+func TestLockKeySeparatesBucketAndBoard(t *testing.T) {
+	if lockKey("a", "b/c") == lockKey("a/b", "c") {
+		t.Fatal("lockKey() collided for distinct bucket/board tuples")
+	}
+}
 
 func testStore(t *testing.T) *Store {
 	t.Helper()

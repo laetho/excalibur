@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,7 +171,13 @@ type lockValue struct {
 	ExpiresAt int64  `json:"expiresAt"` // unix milliseconds
 }
 
-func lockKey(bucket, boardID string) string { return bucket + "/" + boardID }
+// lockKey hashes the tuple instead of embedding bucket/board names directly.
+// Board names may contain spaces, Unicode, or other characters rejected by the
+// JetStream KV key grammar, while a SHA-256 hex digest is always valid.
+func lockKey(bucket, boardID string) string {
+	sum := sha256.Sum256([]byte(bucket + "\x00" + boardID))
+	return fmt.Sprintf("board.%x", sum)
+}
 
 func (c *natsClient) lockKV() (nats.KeyValue, error) {
 	kv, err := c.js.KeyValue(lockBucket)
