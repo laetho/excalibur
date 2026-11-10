@@ -790,7 +790,7 @@ function SourcesNav({
           const group = source.groups[0]
           if (!group) return null
           return (
-            <button key={source.id} className={`source-card local${groupState(source, group)}`} {...groupProps(source, group)}>
+            <button key={source.id} className={`source-row local${groupState(source, group)}`} {...groupProps(source, group)}>
               <FolderIcon className="source-icon" />
               <span className="source-title">{lastPathComponent(group.name) || group.name}</span>
               <span className="source-badge">Local</span>
@@ -798,9 +798,9 @@ function SourcesNav({
           )
         }
         return (
-          <div key={source.id} className="source-card server">
+          <div key={source.id} className="source-server">
             <div
-              className="source-header"
+              className="source-row"
               title={`${source.name} (right-click for options)`}
               onContextMenu={(event) => onSourceMenu(event, source)}
             >
@@ -831,7 +831,8 @@ function SourcesNav({
                   onContextMenu={(event) => onBucketMenu(event, source, group)}
                   {...groupProps(source, group)}
                 >
-                  {group.name}
+                  <span className="source-group-name">{group.name}</span>
+                  {activeSource === source.id && activeGroup === group.id && <span className="source-active-dot" aria-hidden="true" />}
                 </button>
               ))
             )}
