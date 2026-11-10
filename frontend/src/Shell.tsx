@@ -7,6 +7,7 @@ import {
   FilterIcon,
   FolderIcon,
   InfoIcon,
+  MinusIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
@@ -43,6 +44,8 @@ import {
   selectBoard,
   setCanvasAppearance,
   setApplicationZoom,
+  appVersion,
+  type AppVersionInfo,
   setCollaborationNickname,
   setAISettings,
   setShowThumbnails,
@@ -126,6 +129,11 @@ function validateName(name: string, boards: BoardInfo[], excludingId?: string): 
   const taken = boards.some((b) => b.id !== excludingId && b.name.toLowerCase() === trimmed.toLowerCase())
   if (taken) return 'A board with this name already exists.'
   return null
+}
+
+/** The name shown for the local boards folder, in the sidebar and in Settings. */
+function folderDisplayName(path: string): string {
+  return lastPathComponent(path) || path
 }
 
 function lastPathComponent(path: string): string {
@@ -577,7 +585,7 @@ export default function Shell() {
               setSourceMenu(null)
             }}
           >
-            New Bucket…
+            New Bucket
           </button>
           <div className="context-menu-divider" />
           <button
@@ -588,7 +596,7 @@ export default function Shell() {
               setSourceMenu(null)
             }}
           >
-            Remove Server…
+            Remove Server
           </button>
         </div>
       )}
@@ -609,7 +617,7 @@ export default function Shell() {
               setBucketMenu(null)
             }}
           >
-            Delete Bucket…
+            Delete Bucket
           </button>
         </div>
       )}
@@ -809,7 +817,7 @@ function SourcesNav({
           return (
             <button key={source.id} className={`source-row local${groupState(source, group)}`} {...groupProps(source, group)}>
               <FolderIcon className="source-icon" />
-              <span className="source-title">{lastPathComponent(group.name) || group.name}</span>
+              <span className="source-title">{folderDisplayName(group.name)}</span>
               <span className="source-badge">Local</span>
             </button>
           )
@@ -833,14 +841,14 @@ function SourcesNav({
                 >
                   <RefreshIcon />
                 </button>
-                <button className="icon-button row-action" onClick={() => onNewBucket(source)} title="New Bucket…" aria-label="New Bucket">
+                <button className="icon-button row-action" onClick={() => onNewBucket(source)} title="New Bucket" aria-label="New Bucket">
                   <PlusIcon />
                 </button>
               </span>
             </div>
             {source.groups.length === 0 ? (
               <button className="source-empty" onClick={() => onNewBucket(source)}>
-                No buckets yet. Create one…
+                No buckets yet. Create one
               </button>
             ) : (
               source.groups.map((group) => (
@@ -1187,7 +1195,7 @@ function NatsCredentialsPicker({ value, onChange }: { value: string; onChange: (
     <div className="nats-credentials-picker">
       <input value={value} readOnly placeholder="Credentials file (.creds, optional)" aria-label="NATS credentials file" title={value} />
       <button type="button" className="secondary" onClick={choose}>
-        Choose…
+        Choose
       </button>
       {value && (
         <button type="button" className="secondary" onClick={() => onChange('')}>
@@ -1379,7 +1387,13 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
           value={password}
           type="password"
           autoComplete="new-password"
-          placeholder={server.hasPassword && !removePassword ? 'Saved. Enter a new password to replace it.' : 'Password (optional)'}
+          placeholder={
+            removePassword
+              ? 'The saved password will be removed'
+              : server.hasPassword
+                ? 'Saved. Enter a new password to replace it.'
+                : 'Password (optional)'
+          }
           disabled={Boolean(credentialsFile) || removePassword}
           onChange={(event) => {
             setPassword(event.target.value)
@@ -1391,17 +1405,16 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
           }}
         />
         {server.hasPassword && !credentialsFile && (
-          <label className="clear-key">
-            <input
-              type="checkbox"
-              checked={removePassword}
-              onChange={(event) => {
-                setRemovePassword(event.target.checked)
-                if (event.target.checked) setPassword('')
-              }}
-            />
-            Remove saved password
-          </label>
+          <button
+            type="button"
+            className="link-button dialog-link"
+            onClick={() => {
+              setRemovePassword((remove) => !remove)
+              setPassword('')
+            }}
+          >
+            {removePassword ? 'Keep Saved Password' : 'Remove Saved Password'}
+          </button>
         )}
         <NatsCredentialsPicker
           value={credentialsFile}
@@ -1745,8 +1758,18 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
   )
 }
 
+// Mirrors minApplicationZoom / maxApplicationZoom / applicationZoomStep in app.go.
+const ZOOM_MIN = 50
+const ZOOM_MAX = 200
+const ZOOM_STEP = 10
+const ZOOM_SHORTCUTS = IS_MAC ? '⌘+ and ⌘−' : 'Ctrl++ and Ctrl+−'
+
 function AppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
   const zoomPercent = Math.round(snapshot.applicationZoom * 100)
+  const stepZoom = (delta: number) => {
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoomPercent + delta))
+    setApplicationZoom(next / 100).catch((err) => log('error', `Could not change the interface zoom: ${String(err)}`))
+  }
   return (
     <>
       <div className="settings-group">
@@ -1765,19 +1788,20 @@ function AppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
             ))}
           </div>
         </SettingsField>
-        <SettingsField label="Interface zoom" help="Scales the whole interface. Zoom on the canvas is set separately." htmlFor="settings-zoom">
+        <SettingsField label="Interface zoom" help={`Scales the whole interface. Shortcuts: ${ZOOM_SHORTCUTS}.`}>
+          {/* Steps rather than a slider: rescaling the webview under a dragged
+              slider moves the slider itself, which makes it jump. */}
           <div className="zoom-setting">
-            <input
-              id="settings-zoom"
-              type="range"
-              min="50"
-              max="200"
-              step="10"
-              value={zoomPercent}
-              onChange={(event) => setApplicationZoom(Number(event.target.value) / 100)}
-            />
-            <output htmlFor="settings-zoom">{zoomPercent}%</output>
-            <button className="secondary" disabled={snapshot.applicationZoom === 1} onClick={() => setApplicationZoom(1)}>
+            <div className="stepper" role="group" aria-label="Interface zoom">
+              <button aria-label="Zoom out" disabled={zoomPercent <= ZOOM_MIN} onClick={() => stepZoom(-ZOOM_STEP)}>
+                <MinusIcon />
+              </button>
+              <output aria-live="polite">{zoomPercent}%</output>
+              <button aria-label="Zoom in" disabled={zoomPercent >= ZOOM_MAX} onClick={() => stepZoom(ZOOM_STEP)}>
+                <PlusIcon />
+              </button>
+            </div>
+            <button className="secondary" disabled={zoomPercent === 100} onClick={() => void setApplicationZoom(1)}>
               Reset
             </button>
           </div>
@@ -1800,6 +1824,9 @@ function AppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
 }
 
 function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
+  // The local source's folder (as the sidebar shows it), falling back to the
+  // snapshot folder before the sources have loaded.
+  const localFolder = snapshot.sources.find((source) => source.kind === 'local')?.groups[0]?.name ?? snapshot.folder
   return (
     <>
       <div className="settings-group">
@@ -1809,15 +1836,19 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
           stacked
         >
           <div className="folder-setting">
-            <span className="folder-path" title={snapshot.folder}>
-              {snapshot.folder}
-            </span>
+            <FolderIcon className="folder-icon" />
+            <div className="folder-text">
+              <span className="folder-name">{folderDisplayName(localFolder)}</span>
+              <span className="folder-path" title={localFolder}>
+                {localFolder}
+              </span>
+            </div>
             <div className="settings-actions">
               <button className="secondary" onClick={() => revealFolder()}>
                 Show in {FILE_MANAGER}
               </button>
               <button className="secondary" onClick={() => chooseFolder()}>
-                Change…
+                Change
               </button>
             </div>
           </div>
@@ -1938,10 +1969,10 @@ function ServersSettings({
                 </div>
                 <div className="settings-actions">
                   <button className="secondary" disabled={!server} onClick={() => server && onEdit(server)}>
-                    Edit…
+                    Edit
                   </button>
                   <button className="secondary" onClick={() => onRemove(source)}>
-                    Remove…
+                    Remove
                   </button>
                 </div>
               </div>
@@ -1957,8 +1988,9 @@ function ServersSettings({
                       </span>
                     ))
                   )}
-                  <button className="link-button" onClick={() => onNewBucket(source)}>
-                    New Bucket…
+                  <button className="secondary small" onClick={() => onNewBucket(source)}>
+                    <PlusIcon />
+                    New Bucket
                   </button>
                 </div>
               </div>
@@ -1968,7 +2000,7 @@ function ServersSettings({
       )}
       <div className="settings-pane-actions">
         <button className="primary" onClick={onAdd}>
-          Add Server…
+          Add Server
         </button>
       </div>
       <p className="settings-footnote">Removing a server only disconnects this app. Boards stay on the server.</p>
@@ -1981,7 +2013,7 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
   const [baseUrl, setBaseUrl] = useState(snapshot.ai.baseUrl)
   const [model, setModel] = useState(snapshot.ai.model)
   const [apiKey, setApiKey] = useState('')
-  const [clearKey, setClearKey] = useState(false)
+  const [removingKey, setRemovingKey] = useState(false)
   const [models, setModels] = useState<AIModel[]>([])
   const [modelsLoading, setModelsLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1993,7 +2025,7 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
     setModelsLoading(true)
     setError(null)
     try {
-      const discovered = await discoverAIModels(baseUrl.trim(), apiKey, clearKey)
+      const discovered = await discoverAIModels(baseUrl.trim(), apiKey, false)
       setModels(discovered)
       setModel((current) => {
         const match = discovered.find((item) => item.model === current || item.id === current)
@@ -2005,7 +2037,7 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
     } finally {
       setModelsLoading(false)
     }
-  }, [apiKey, baseUrl, clearKey])
+  }, [apiKey, baseUrl])
 
   useEffect(() => {
     if (loadedInitialModels.current || !enabled || !baseUrl.trim()) return
@@ -2019,13 +2051,32 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
   }
   const modelChosen = models.some((item) => item.model === model)
 
+  // Removes only the saved key, right away, keeping any other unsaved edits.
+  const removeKey = async () => {
+    setRemovingKey(true)
+    setError(null)
+    try {
+      await setAISettings({
+        enabled: snapshot.ai.enabled,
+        baseUrl: snapshot.ai.baseUrl,
+        model: snapshot.ai.model,
+        apiKey: '',
+        clearApiKey: true,
+      })
+      setApiKey('')
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setRemovingKey(false)
+    }
+  }
+
   const save = async () => {
     setSaving(true)
     setError(null)
     try {
-      await setAISettings({ enabled, baseUrl: baseUrl.trim(), model: model.trim(), apiKey, clearApiKey: clearKey })
+      await setAISettings({ enabled, baseUrl: baseUrl.trim(), model: model.trim(), apiKey, clearApiKey: false })
       setApiKey('')
-      setClearKey(false)
       setSaved(true)
     } catch (err) {
       setError(String(err))
@@ -2066,33 +2117,25 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
           />
         </SettingsField>
         <SettingsField label="API key" help="Optional. Stored outside the app’s web view." htmlFor="settings-ai-key" stacked>
-          <input
-            id="settings-ai-key"
-            className="settings-text-input"
-            type="password"
-            value={apiKey}
-            placeholder={snapshot.ai.hasApiKey && !clearKey ? 'Saved. Enter a new key to replace it.' : 'None'}
-            onChange={(event) => {
-              setApiKey(event.target.value)
-              setModels([])
-              if (event.target.value) setClearKey(false)
-              changed()
-            }}
-          />
-          {snapshot.ai.hasApiKey && (
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={clearKey}
-                onChange={(event) => {
-                  setClearKey(event.target.checked)
-                  setModels([])
-                  changed()
-                }}
-              />
-              Remove saved key
-            </label>
-          )}
+          <div className="inline-form">
+            <input
+              id="settings-ai-key"
+              className="settings-text-input"
+              type="password"
+              value={apiKey}
+              placeholder={snapshot.ai.hasApiKey ? 'Saved. Enter a new key to replace it.' : 'None'}
+              onChange={(event) => {
+                setApiKey(event.target.value)
+                setModels([])
+                changed()
+              }}
+            />
+            {snapshot.ai.hasApiKey && (
+              <button className="secondary" disabled={removingKey} onClick={() => void removeKey()}>
+                {removingKey ? 'Removing…' : 'Remove Key'}
+              </button>
+            )}
+          </div>
         </SettingsField>
         <SettingsField label="Model" help="Load the models available at the API URL, then choose one." htmlFor="settings-ai-model" stacked>
           <div className="inline-form">
@@ -2132,9 +2175,20 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
 }
 
 function AboutSettings() {
+  const [version, setVersion] = useState<AppVersionInfo | null>(null)
+  useEffect(() => {
+    appVersion()
+      .then(setVersion)
+      .catch((err) => log('error', `Could not read the app version: ${String(err)}`))
+  }, [])
   return (
     <div className="settings-group settings-about">
       <p className="settings-about-name">Excalibur</p>
+      {version && (
+        <p className="settings-about-version">
+          {version.development ? 'Development build' : `Version ${version.version}`}
+        </p>
+      )}
       <p className="settings-field-help">The board of legend. A desktop home for your Excalidraw boards.</p>
       <p className="settings-field-help">
         Copyright © 2026{' '}
@@ -2212,7 +2266,7 @@ function ContextMenu({
   return (
     <div className="context-menu" style={{ left: x, top: y }} role="menu">
       <button role="menuitem" onClick={onRename}>
-        Rename…
+        Rename
       </button>
       <button role="menuitem" onClick={onDuplicate}>
         Duplicate

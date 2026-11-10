@@ -685,6 +685,15 @@ button.secondary:disabled {
   outline: none;
 }
 
+.modal > input + input {
+  margin-top: 8px;
+}
+
+.modal > .dialog-link {
+  display: block;
+  margin-top: 6px;
+}
+
 .modal input:where(:not([type='checkbox'], [type='radio'], [type='range'])):focus {
   border-color: var(--accent);
 }
@@ -946,31 +955,88 @@ button.secondary:disabled {
   gap: 10px;
 }
 
-.zoom-setting input[type='range'] {
-  width: 160px;
-  accent-color: var(--accent);
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
 }
 
-.zoom-setting output {
-  min-width: 3rem;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+.stepper button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 100%;
   color: var(--text-secondary);
+}
+
+.stepper button:first-child {
+  border-radius: 7px 0 0 7px;
+}
+
+.stepper button:last-child {
+  border-radius: 0 7px 7px 0;
+}
+
+.stepper button:hover:not(:disabled) {
+  background: var(--card-hover);
+  color: var(--text);
+}
+
+.stepper button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.stepper svg {
+  width: 15px;
+  height: 15px;
+}
+
+.stepper output {
+  min-width: 3.25rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .folder-setting {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  padding: 8px 8px 8px 12px;
+  padding: 10px 10px 10px 12px;
   border-radius: 8px;
   background: var(--card-bg);
 }
 
+.folder-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.folder-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.folder-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .folder-path {
   min-width: 0;
-  font-size: 12px;
+  font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -979,21 +1045,6 @@ button.secondary:disabled {
   /* Truncate from the start so the folder name itself stays visible. */
   direction: rtl;
   text-align: left;
-}
-
-.checkbox-label,
-.clear-key {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.checkbox-label input,
-.clear-key input {
-  width: auto;
-  accent-color: var(--accent);
 }
 
 /* A checkbox drawn as a switch, for settings that apply immediately. */
@@ -1038,6 +1089,20 @@ button.secondary:disabled {
   outline-offset: 2px;
 }
 
+button.secondary.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px 3px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+}
+
+button.secondary.small svg {
+  width: 13px;
+  height: 13px;
+}
+
 button.link-button {
   padding: 0;
   font-size: 12px;
@@ -1067,6 +1132,12 @@ button.link-button:hover {
 
 .settings-about p {
   margin: 0;
+}
+
+.settings-about-version {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .settings-about-name {
@@ -1153,7 +1224,7 @@ button.link-button:hover {
 }
 
 .modal > .nats-credentials-picker {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .segmented {
@@ -1171,10 +1242,14 @@ button.link-button:hover {
   color: var(--text-secondary);
 }
 
-.segmented button.active {
-  background: var(--modal-bg);
+.segmented button:hover:not(.active) {
   color: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.segmented button.active {
+  background: var(--row-selected);
+  color: var(--row-selected-text);
+  font-weight: 500;
 }
 
 /* MARK: - Context menu */

@@ -36,6 +36,19 @@ export interface AISettingsUpdate {
     "clearApiKey": boolean;
 }
 
+/**
+ * AppVersionInfo describes the running build for the About page.
+ */
+export interface AppVersionInfo {
+    "version": string;
+
+    /**
+     * Development is true for `task dev` and other non-production builds, whose
+     * config.yml version is a placeholder rather than a released version.
+     */
+    "development": boolean;
+}
+
 export interface BoardInfo {
     "id": string;
     "name": string;

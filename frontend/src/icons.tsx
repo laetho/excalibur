@@ -123,3 +123,11 @@ export function InfoIcon(props: IconProps) {
     </Icon>
   )
 }
+
+export function MinusIcon(props: IconProps) {
+  return (
+    <Icon data-icon="minus" {...props}>
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </Icon>
+  )
+}
