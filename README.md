@@ -9,16 +9,27 @@ A Wails v3 desktop wrapper for Excalidraw with local `.excalidraw` boards, NATS 
 
 ## NATS collaboration
 
-Remote boards deliberately combine two NATS features: JetStream Object Store
-provides the durable shared `.excalidraw` document, while Core NATS subjects
-provide immediate scene and cursor updates to applications that currently have
-the board open. Shared storage does not merge JSON, and NATS does not supply a
-CRDT automatically; the current protocol sends complete scenes and therefore
-has last-update-wins conflict behavior.
+Remote boards use NATS as both their shared storage and collaboration transport,
+without a separate collaboration server:
+
+- a per-bucket JetStream stream retains versioned element updates;
+- JetStream Object Store holds immutable snapshots, images, oversized updates,
+  and an ordinary `.excalidraw` materialization;
+- JetStream KV elects one snapshot compactor and indexes the active snapshot;
+- Core NATS carries only ephemeral pointer presence; and
+- a persistent local outbox makes edits durable before remote replication, so
+  drawing and board navigation remain safe while the server is unavailable.
+
+Clients restore the latest snapshot and replay retained updates in order.
+Excalidraw's element versions and reconciliation rules merge concurrent drawing
+changes; snapshots preserve deletion tombstones, while shared canvas background
+changes use deterministic Lamport-style version metadata. The UI reports
+`Synced` only after local outbox replication and ordered replay/application have
+both completed.
 
 See [docs/nats-collaboration.md](docs/nats-collaboration.md) for the architecture,
-message flow, consistency behavior, and how this could evolve into a genuine
-operation-based CRDT.
+subjects and storage layout, durability model, join/replay flow, compaction, and
+consistency behavior.
 
 ## Development
 
