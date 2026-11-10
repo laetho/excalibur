@@ -39,6 +39,24 @@ export function SearchIcon(props: IconProps) {
   )
 }
 
+export function FolderIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </Icon>
+  )
+}
+
+export function DatabaseIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <ellipse cx="12" cy="5.5" rx="8" ry="3" />
+      <path d="M4 5.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+      <path d="M4 11.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+    </Icon>
+  )
+}
+
 export function RefreshIcon(props: IconProps) {
   return (
     <Icon {...props}>
