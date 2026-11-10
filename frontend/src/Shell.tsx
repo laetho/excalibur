@@ -397,7 +397,7 @@ export default function Shell() {
             <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
           </div>
           <div className="view-options">
-            <button className="icon-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards and show thumbnails">
+            <button className="icon-button filter-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards">
               <FilterIcon />
             </button>
             {viewOptionsOpen && (
@@ -410,11 +410,6 @@ export default function Shell() {
                     Sort by Date Edited
                   </button>
                 </div>
-                <div className="popover-divider" />
-                <label className="popover-toggle">
-                  <input type="checkbox" checked={snapshot.showThumbnails} onChange={(event) => setShowThumbnails(event.target.checked)} />
-                  Show Thumbnails
-                </label>
               </div>
             )}
           </div>
@@ -440,7 +435,7 @@ export default function Shell() {
         />
         <div className="boards-header">
           <span className="boards-title">Boards</span>
-          <button className="icon-button boards-add" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
+          <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
             <PlusIcon />
           </button>
         </div>
@@ -806,18 +801,20 @@ function SourcesNav({
             >
               <DatabaseIcon className="source-icon" />
               <span className="source-title">{source.name}</span>
-              <button
-                className={`icon-button source-action${refreshing ? ' refreshing' : ''}`}
-                onClick={onRefresh}
-                disabled={refreshing}
-                title="Refresh buckets"
-                aria-label="Refresh buckets"
-              >
-                <RefreshIcon />
-              </button>
-              <button className="icon-button source-action" onClick={() => onNewBucket(source)} title="New Bucket…" aria-label="New Bucket">
-                <PlusIcon />
-              </button>
+              <span className="row-actions">
+                <button
+                  className={`icon-button row-action${refreshing ? ' refreshing' : ''}`}
+                  onClick={onRefresh}
+                  disabled={refreshing}
+                  title="Refresh buckets"
+                  aria-label="Refresh buckets"
+                >
+                  <RefreshIcon />
+                </button>
+                <button className="icon-button row-action" onClick={() => onNewBucket(source)} title="New Bucket…" aria-label="New Bucket">
+                  <PlusIcon />
+                </button>
+              </span>
             </div>
             {source.groups.length === 0 ? (
               <button className="source-empty" onClick={() => onNewBucket(source)}>
@@ -1698,6 +1695,13 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
             Boards are plain .excalidraw files. To version them, make the folder a git repository and commit when you like. Avoid folders
             inside Documents, Desktop or Downloads: macOS then won’t let Show in Finder select the file.
           </p>
+          <label className="settings-row settings-toggle-row">
+            <span className="settings-label">Thumbnails</span>
+            <span className="settings-value settings-toggle-value">
+              <input type="checkbox" checked={snapshot.showThumbnails} onChange={(event) => setShowThumbnails(event.target.checked)} />
+              Show board thumbnails in the sidebar
+            </span>
+          </label>
         </section>
         <section>
           <h3>Application</h3>

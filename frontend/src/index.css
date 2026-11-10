@@ -150,7 +150,7 @@ select,
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 16px 10px;
+  padding: 6px 16px 2px;
 }
 
 /* MARK: - Sidebar section headers (Boards) */
@@ -159,29 +159,13 @@ select,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 16px 8px;
+  padding: 12px 16px 0;
 }
 
 .boards-title {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-secondary);
-}
-
-.icon-button.boards-add {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
-  background: var(--card-bg);
-}
-
-.icon-button.boards-add svg {
-  width: 17px;
-  height: 17px;
-}
-
-.icon-button.boards-add:hover {
-  background: var(--card-hover);
 }
 
 .icon-button {
@@ -226,16 +210,14 @@ select,
   flex-direction: column;
 }
 
-.popover-group button,
-.popover-toggle {
+.popover-group button {
   text-align: left;
   padding: 8px 12px;
   border-radius: 5px;
   color: var(--text);
 }
 
-.popover-group button:hover,
-.popover-toggle:hover {
+.popover-group button:hover {
   background: var(--row-hover);
 }
 
@@ -244,17 +226,59 @@ select,
   font-weight: 500;
 }
 
-.popover-divider {
-  height: 1px;
-  background: var(--divider);
-  margin: 5px 6px;
-}
+/* MARK: - Row actions
+ * Small icon buttons at the right end of a row (server refresh / new bucket,
+ * Boards new board). Transparent until hovered; the last one is pulled out
+ * so its glyph lines up with the right edge of the bucket pills. */
 
-.popover-toggle {
+.row-actions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
+  gap: 0;
+}
+
+.icon-button.row-action {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.row-actions .row-action:last-child,
+.boards-header .row-action {
+  margin-right: -7px;
+}
+
+.icon-button.row-action svg {
+  width: 17px;
+  height: 17px;
+}
+
+.icon-button.row-action:hover {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+.icon-button.row-action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.icon-button.row-action.refreshing svg {
+  animation: sources-spin 0.8s linear infinite;
+}
+
+@keyframes sources-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-button.row-action.refreshing svg {
+    animation: none;
+  }
 }
 
 /* MARK: - Search */
@@ -369,46 +393,6 @@ select,
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-secondary);
-}
-
-.icon-button.source-action {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
-}
-
-.icon-button.source-action:last-child {
-  margin-right: -7px; /* optically align the + with the right edge */
-}
-
-.icon-button.source-action svg {
-  width: 17px;
-  height: 17px;
-}
-
-.icon-button.source-action:hover {
-  background: var(--card-bg);
-}
-
-.icon-button.source-action:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.icon-button.source-action.refreshing svg {
-  animation: sources-spin 0.8s linear infinite;
-}
-
-@keyframes sources-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .icon-button.source-action.refreshing svg {
-    animation: none;
-  }
 }
 
 .source-group {
@@ -816,11 +800,13 @@ button.secondary:hover {
   min-width: 0;
 }
 
-.ai-enabled-row {
+.ai-enabled-row,
+.settings-toggle-row {
   align-items: center;
 }
 
-.ai-toggle-value {
+.ai-toggle-value,
+.settings-toggle-value {
   flex-direction: row;
   align-items: center;
   font-size: 13px;
