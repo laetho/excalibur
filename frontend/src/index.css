@@ -263,6 +263,17 @@ select,
   height: 17px;
 }
 
+/* Per-glyph optical sizing: the refresh arrows read heavier than the plus. */
+.icon-button.row-action svg[data-icon='refresh'] {
+  width: 16px;
+  height: 16px;
+}
+
+.icon-button.row-action svg[data-icon='plus'] {
+  width: 18px;
+  height: 18px;
+}
+
 .icon-button.row-action:hover {
   background: var(--card-bg);
   color: var(--text);
@@ -329,8 +340,8 @@ select,
 }
 
 .search-row .view-options .icon-button svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 
 /* MARK: - Sources
