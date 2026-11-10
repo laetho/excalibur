@@ -84,3 +84,50 @@ export function CloseIcon(props: IconProps) {
     </Icon>
   )
 }
+
+export function AppearanceIcon(props: IconProps) {
+  return (
+    <Icon data-icon="appearance" {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none" />
+    </Icon>
+  )
+}
+
+export function UsersIcon(props: IconProps) {
+  return (
+    <Icon data-icon="users" {...props}>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+      <path d="M16 4.6a3.5 3.5 0 0 1 0 6.8" />
+      <path d="M18.5 14.2A6.5 6.5 0 0 1 21.5 20" />
+    </Icon>
+  )
+}
+
+export function SparklesIcon(props: IconProps) {
+  return (
+    <Icon data-icon="sparkles" {...props}>
+      <path d="M10 3.5l1.6 4.4L16 9.5l-4.4 1.6L10 15.5l-1.6-4.4L4 9.5l4.4-1.6z" />
+      <path d="M18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z" />
+    </Icon>
+  )
+}
+
+export function InfoIcon(props: IconProps) {
+  return (
+    <Icon data-icon="info" {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <line x1="12" y1="11" x2="12" y2="16.5" />
+      <line x1="12" y1="7.5" x2="12" y2="7.5" />
+    </Icon>
+  )
+}
+
+export function MinusIcon(props: IconProps) {
+  return (
+    <Icon data-icon="minus" {...props}>
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </Icon>
+  )
+}

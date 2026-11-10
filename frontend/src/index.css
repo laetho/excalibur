@@ -10,18 +10,23 @@ body,
 /* The shell follows the system appearance; the canvas has its own setting (CanvasAppearance).
    Tones are lifted straight from Excalidraw's design tokens so the sidebar reads
    as part of the same app as the canvas (Assistant type, purple primary, the
-   same neutral surface ramp and modal shadow). */
+   same neutral surface ramp and modal shadow).
+
+   Contrast against the page/sidebar/modal background (WCAG ratio), kept as
+   the floor when tuning: raised surfaces (cards, pills, tags) >= 1.24,
+   hovers >= 1.4, borders/dividers >= 1.3, and the selected tint at least
+   1.14 above an unselected card so the two never blend. */
 :root {
   color-scheme: light dark;
   --bg: #ffffff; /* --default-bg-color */
   --sidebar-bg: #ffffff; /* --island-bg-color */
-  --sidebar-border: #f1f0ff; /* --default-border-color = --color-surface-high */
+  --sidebar-border: rgba(0, 0, 0, 0.12);
   --text: #1b1b1f; /* --color-on-surface */
   --text-secondary: #5c5c5c; /* --color-gray-70 */
-  --row-hover: #f1f0ff; /* --color-surface-high */
-  --card-bg: #f2f2f7; /* --color-surface-mid */
-  --card-hover: #e8e8f0;
-  --row-selected: #e3e2fe; /* --color-primary-light */
+  --row-hover: #ececf4; /* --color-surface-low */
+  --card-bg: #e6e6ef; /* 1.24 */
+  --card-hover: #d9d9e5; /* 1.40 */
+  --row-selected: #d7d5ff; /* --color-primary-light-darker, 1.41 */
   --row-selected-text: #030064; /* --color-on-primary-container */
   --accent: #6965db; /* --color-primary */
   --accent-strong: #5b57d1; /* --color-primary-darker */
@@ -29,37 +34,44 @@ body,
   --danger: #c92a2a;
   --danger-bg: #fff0f0; /* --color-danger-background */
   --danger-border: rgba(217, 139, 132, 0.9);
-  --input-bg: rgba(0, 0, 0, 0.05);
-  --input-border: rgba(0, 0, 0, 0.12);
+  --input-bg: rgba(0, 0, 0, 0.04);
+  --input-border: rgba(0, 0, 0, 0.18); /* 1.53 */
+  --control-bg: #f4f4f8; /* buttons, segmented controls, steppers */
   --modal-bg: #ffffff; /* --island-bg-color */
   --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
   --backdrop: rgba(0, 0, 0, 0.35);
   --thumbnail-border: rgba(0, 0, 0, 0.15);
-  --divider: rgba(0, 0, 0, 0.1);
+  --divider: rgba(0, 0, 0, 0.13); /* 1.35 */
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #121212; /* --default-bg-color */
     --sidebar-bg: #232329; /* --island-bg-color */
-    --sidebar-border: hsl(245, 10%, 21%); /* --color-surface-high */
+    --sidebar-border: hsl(245, 9%, 26%);
     --text: #e3e3e8; /* --color-on-surface */
     --text-secondary: #b8b8b8; /* --color-gray-40 */
     --danger: #ffa8a5; /* --color-danger */
     --danger-bg: rgba(255, 168, 165, 0.12);
     --danger-border: rgba(255, 168, 165, 0.4);
-    --row-hover: hsl(245, 10%, 21%); /* --color-surface-high */
-    --card-bg: hsl(245, 9%, 17%); /* just above --color-surface-low */
-    --card-hover: hsl(245, 10%, 21%); /* --color-surface-high */
-    --row-selected: #403e6a; /* --color-surface-primary-container */
+    --row-hover: hsl(245, 9%, 22%);
+    --card-bg: hsl(245, 9%, 22%); /* 1.26 */
+    --card-hover: hsl(245, 10%, 27%); /* 1.49 */
+    --row-selected: #48467a; /* 1.81; 1.44 above a card */
     --row-selected-text: #e0dfff; /* --color-on-primary-container */
-    --input-bg: hsl(240, 8%, 15%); /* --color-surface-low */
-    --input-border: rgba(255, 255, 255, 0.14);
+    /* Excalidraw's dark primary: #6965db is only 3.3:1 as text on the dark
+       background; this is 7:1, with dark text on filled buttons (8.5:1). */
+    --accent: #a8a5ff;
+    --accent-strong: #beb9ff;
+    --accent-text: #121212;
+    --input-bg: hsl(240, 8%, 11%); /* text fields sit slightly recessed, as in Excalidraw */
+    --input-border: rgba(255, 255, 255, 0.18); /* 1.79 */
+    --control-bg: hsl(245, 9%, 22%); /* buttons sit slightly raised */
     --modal-bg: #232329; /* --island-bg-color */
     --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
     --backdrop: rgba(0, 0, 0, 0.5);
     --thumbnail-border: rgba(255, 255, 255, 0.2);
-    --divider: hsl(245, 10%, 21%);
+    --divider: hsl(245, 9%, 26%); /* 1.45 */
   }
 }
 
@@ -628,12 +640,26 @@ button.primary:disabled {
 }
 
 button.secondary {
-  background: var(--input-bg);
+  background: var(--control-bg);
   border: 1px solid var(--input-border);
 }
 
-button.secondary:hover {
-  background: var(--row-hover);
+button.secondary:hover:not(:disabled) {
+  background: var(--card-hover);
+}
+
+.modal-actions button.destructive {
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-weight: 500;
+  background: var(--danger);
+  color: var(--modal-bg);
+}
+
+.modal-actions button.destructive:disabled,
+button.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* MARK: - Modals */
@@ -661,7 +687,8 @@ button.secondary:hover {
   font-size: 15px;
 }
 
-.modal input {
+/* Text-like inputs only; :where keeps the specificity of a plain `.modal input`. */
+.modal input:where(:not([type='checkbox'], [type='radio'], [type='range'])) {
   width: 100%;
   padding: 7px 10px;
   border-radius: 7px;
@@ -670,7 +697,16 @@ button.secondary:hover {
   outline: none;
 }
 
-.modal input:focus {
+.modal > input + input {
+  margin-top: 8px;
+}
+
+.modal > .dialog-link {
+  display: block;
+  margin-top: 6px;
+}
+
+.modal input:where(:not([type='checkbox'], [type='radio'], [type='range'])):focus {
   border-color: var(--accent);
 }
 
@@ -703,74 +739,188 @@ button.secondary:hover {
   white-space: pre-wrap;
 }
 
-/* MARK: - Settings */
+/* MARK: - Settings
+ *
+ * A two-column window: a vertical tab list on the left (styled like the app
+ * sidebar) and the selected page on the right. Each page has a title and a
+ * one-line description, then rounded groups of fields separated by hairlines. */
 
 .modal.settings {
-  width: 520px;
-  max-height: min(90vh, 760px);
-  overflow-y: auto;
+  display: flex;
+  width: min(780px, calc(100vw - 48px));
+  height: min(580px, calc(100vh - 48px));
+  padding: 0;
+  overflow: hidden;
 }
 
-.modal.settings section {
-  margin-bottom: 18px;
+.settings-nav {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 10px;
+  background: var(--card-bg);
+  border-right: 1px solid var(--divider);
+  font-size: 14px;
 }
 
-.modal.settings h3 {
-  margin: 0 0 8px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.modal .settings-nav-title {
+  margin: 4px 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-secondary);
 }
 
-.settings-row {
+.settings-nav [role='tablist'] {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.settings-value.zoom-setting {
+.settings-nav-item {
   display: flex;
-  flex-direction: row;
   align-items: center;
-  gap: 0.75rem;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text);
 }
 
-.zoom-setting input[type='range'] {
-  flex: 1;
-  min-width: 8rem;
-}
-
-.zoom-setting output {
-  min-width: 3.5rem;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.settings-label {
-  width: 90px;
+.settings-nav-item svg {
   flex-shrink: 0;
-  padding-top: 4px;
+  width: 17px;
+  height: 17px;
+  color: var(--text-secondary);
 }
 
-.settings-value {
+.settings-nav-item:hover:not(.active) {
+  background: var(--card-hover);
+}
+
+.settings-nav-item.active {
+  background: var(--row-selected);
+  color: var(--row-selected-text);
+  font-weight: 500;
+}
+
+.settings-nav-item.active svg {
+  color: var(--accent);
+}
+
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-pane {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  align-items: flex-start;
 }
 
-.folder-path {
+.settings-pane-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px 16px;
+}
+
+.settings-pane-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.settings-pane-header p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.settings-close {
+  flex-shrink: 0;
+  margin: -4px -8px 0 0;
+}
+
+.settings-pane-body[hidden] {
+  display: none;
+}
+
+.settings-pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 24px 24px;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+}
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 14px;
+}
+
+.settings-field + .settings-field {
+  border-top: 1px solid var(--divider);
+}
+
+.settings-field.stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.settings-field-text {
+  min-width: 0;
+}
+
+.settings-field-label {
+  display: block;
+  font-weight: 500;
+}
+
+.settings-field-help {
+  margin: 2px 0 0;
   font-size: 12px;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  direction: rtl;
-  text-align: left;
+}
+
+.settings-field-control {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.settings-field.stacked .settings-field-control {
+  align-items: stretch;
+}
+
+.settings-footnote {
+  margin: -4px 2px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-pane-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .settings-actions {
@@ -778,172 +928,299 @@ button.secondary:hover {
   gap: 8px;
 }
 
-.settings-note {
-  margin: 8px 0 0 102px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.settings-copyright {
-  margin: 0;
-  font-size: 11px;
-  color: var(--text-secondary);
-  text-align: center;
-}
-
-.settings-copyright a {
-  color: inherit;
-}
-
-.settings-text-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--input-border);
-  background: var(--input-bg);
-  outline: none;
-}
-
-.settings-text-input:focus {
-  border-color: var(--accent);
-}
-
-.collaboration-nickname-value {
+.inline-form {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.collaboration-nickname-value .settings-text-input {
+.inline-form .settings-text-input {
+  flex: 1;
+}
+
+.modal .settings-text-input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+  outline: none;
+}
+
+.modal .settings-text-input:focus {
+  border-color: var(--accent);
+}
+
+.modal .settings-text-input:disabled {
+  opacity: 0.6;
+}
+
+.problem {
+  color: var(--danger);
+}
+
+.zoom-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--control-bg);
+}
+
+.stepper button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 100%;
+  color: var(--text-secondary);
+}
+
+.stepper button:first-child {
+  border-radius: 7px 0 0 7px;
+}
+
+.stepper button:last-child {
+  border-radius: 0 7px 7px 0;
+}
+
+.stepper button:hover:not(:disabled) {
+  background: var(--card-hover);
+  color: var(--text);
+}
+
+.stepper button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.stepper svg {
+  width: 15px;
+  height: 15px;
+}
+
+.stepper output {
+  min-width: 3.25rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.folder-setting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 12px;
+  border-radius: 8px;
+  background: var(--card-bg);
+}
+
+.folder-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.folder-text {
   flex: 1;
   min-width: 0;
-}
-
-.ai-enabled-row,
-.settings-toggle-row {
-  align-items: center;
-}
-
-.ai-toggle-value,
-.settings-toggle-value {
-  flex-direction: row;
-  align-items: center;
-  font-size: 13px;
-}
-
-.ai-toggle-value input,
-.clear-key input {
-  width: auto;
-}
-
-.ai-key-value {
-  align-items: stretch;
-}
-
-.ai-model-value {
-  flex-direction: row;
-  align-items: stretch;
-}
-
-.ai-model-value .settings-text-input {
-  width: 100%;
-  color: var(--text-primary);
-}
-
-.clear-key {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.folder-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-path {
+  min-width: 0;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-secondary);
-  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Truncate from the start so the folder name itself stays visible. */
+  direction: rtl;
+  text-align: left;
 }
 
-.settings-ai-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
+/* A checkbox drawn as a switch, for settings that apply immediately. */
+.modal input.switch {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--input-border);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.modal input.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s;
+}
+
+.modal input.switch:checked {
+  background: var(--accent);
+}
+
+.modal input.switch:checked::after {
+  transform: translateX(16px);
+}
+
+.modal input.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.secondary.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px 3px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+}
+
+button.secondary.small svg {
+  width: 13px;
+  height: 13px;
+}
+
+button.link-button {
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+button.link-button:hover {
+  text-decoration: underline;
+}
+
+.settings-empty {
+  align-items: center;
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.settings-empty-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.settings-about {
+  padding: 20px 16px;
+  gap: 6px;
+}
+
+.settings-about p {
+  margin: 0;
+}
+
+.settings-about-version {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-about-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-about a {
+  color: var(--accent);
 }
 
 /* MARK: - NATS settings */
 
-.nats-server {
-  border: 1px solid var(--input-border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-}
-
 .nats-server-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.nats-server-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--text-secondary);
+}
+
+.nats-server-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nats-server-text .settings-field-help {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .nats-server-name {
   font-weight: 600;
-  font-size: 13px;
-}
-
-.nats-server-actions {
-  display: flex;
-  gap: 6px;
 }
 
 .nats-buckets {
   display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.nats-buckets .settings-field-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.nats-bucket-list {
+  display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 6px 0;
+  align-items: center;
+  gap: 6px;
 }
 
 .nats-bucket {
   font-size: 12px;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 999px;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--text-secondary);
-}
-
-.nats-server .settings-row {
-  gap: 8px;
-  align-items: center;
-}
-
-.nats-server .settings-row input {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--input-border);
-  background: var(--input-bg);
-  outline: none;
-}
-
-.nats-server .settings-row input:focus {
-  border-color: var(--accent);
-}
-
-.nats-add-server {
-  margin-top: 4px;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.nats-add-server input {
-  flex: 1 1 180px;
-  min-width: 0;
-  padding: 6px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--input-border);
-  background: var(--input-bg);
-  outline: none;
-}
-
-.nats-add-server input:focus {
-  border-color: var(--accent);
+  background: var(--card-bg);
+  color: var(--text);
 }
 
 .nats-credentials-picker {
@@ -959,12 +1236,12 @@ button.secondary:hover {
 }
 
 .modal > .nats-credentials-picker {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .segmented {
   display: inline-flex;
-  background: var(--input-bg);
+  background: var(--control-bg);
   border: 1px solid var(--input-border);
   border-radius: 8px;
   padding: 2px;
@@ -977,10 +1254,14 @@ button.secondary:hover {
   color: var(--text-secondary);
 }
 
-.segmented button.active {
-  background: var(--modal-bg);
+.segmented button:hover:not(.active) {
   color: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.segmented button.active {
+  background: var(--row-selected);
+  color: var(--row-selected-text);
+  font-weight: 500;
 }
 
 /* MARK: - Context menu */

@@ -114,6 +114,8 @@ export const setSort = (order: BoardSortOrder) => app().SetSort(order)
 export const setShowThumbnails = (show: boolean) => app().SetShowThumbnails(show)
 export const setCanvasAppearance = (appearance: CanvasAppearance) => app().SetCanvasAppearance(appearance)
 export const setApplicationZoom = (zoom: number) => app().SetApplicationZoom(zoom)
+export type AppVersionInfo = { version: string; development: boolean }
+export const appVersion = () => app().AppVersion() as Promise<AppVersionInfo>
 export const setCollaborationNickname = (nickname: string) => app().SetCollaborationNickname(nickname)
 export const discoverAIModels = (baseUrl: string, apiKey: string, clearApiKey: boolean) =>
   app().DiscoverAIModels(baseUrl, apiKey, clearApiKey) as Promise<AIModel[]>
