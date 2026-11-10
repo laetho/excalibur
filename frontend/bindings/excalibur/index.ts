@@ -11,6 +11,7 @@ export type {
     AIModel,
     AISettings,
     AISettingsUpdate,
+    AppVersionInfo,
     BoardInfo,
     CollabJoinResult,
     GroupInfo,
