@@ -672,3 +672,20 @@ func TestApplicationZoomDefaultsAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestBoardsFolderUsableTempDir(t *testing.T) {
+	if !boardsFolderUsable(t.TempDir()) {
+		t.Fatal("expected a temp dir to be a usable boards folder")
+	}
+}
+
+func TestBoardsFolderFallsBackWhenDocumentsBlocked(t *testing.T) {
+	home := t.TempDir()
+	// Block the preferred ~/Documents/Whiteboards location by making Documents a file.
+	if err := os.WriteFile(filepath.Join(home, "Documents"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := boardsFolder(home), filepath.Join(home, "Whiteboards"); got != want {
+		t.Fatalf("expected fallback %q, got %q", want, got)
+	}
+}

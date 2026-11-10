@@ -46,8 +46,7 @@ tasks:
 
   dev:
     desc: Run Wails v3 and a local JetStream-enabled NATS server
-    cmds:
-      - task --parallel dev:app dev:nats
+    deps: [dev:app, dev:nats]
 
   dev:app:
     internal: true
