@@ -1267,48 +1267,57 @@ button.secondary:hover {
 }
 
 /* Small, non-blocking durability indicator. It distinguishes edits that still
- * live only in the renderer from locally journaled and remotely synced state. */
-.canvas-persistence-status {
+ * live only in the renderer from locally journaled and remotely synced state.
+ *
+ * The badge is portaled into the .excalidraw root, so it inherits Excalidraw's
+ * theme tokens and follows the main-menu trigger's look (rounded square on
+ * --color-surface-low with the same ring). Its position uses Excalidraw's own
+ * layout variables, keeping it centered on the burger button and in the gutter
+ * to its right in both light and dark themes. */
+.excalidraw .canvas-persistence-status {
   position: absolute;
-  /* Excalidraw's main-menu trigger is a 40px button at 12px/12px. Keep the
-   * status centered beside it instead of covering the canvas controls below. */
-  top: 32px;
-  left: 64px;
+  top: var(--editor-container-padding);
+  left: calc(var(--editor-container-padding) + var(--lg-button-size) + 0.75rem);
   transform: translateY(-50%);
-  z-index: 9999;
+  z-index: 10000;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 10px;
-  border: 1px solid var(--sidebar-border);
-  border-radius: 999px;
-  background: var(--modal-bg);
-  color: var(--text-secondary);
-  box-shadow: var(--modal-shadow);
-  font-size: 12px;
+  height: var(--lg-button-size);
+  padding: 0 0.625rem;
+  border-radius: var(--border-radius-lg);
+  background: var(--color-surface-low);
+  box-shadow: 0 0 0 1px var(--color-surface-lowest);
+  color: var(--color-gray-60);
+  font-family: var(--ui-font);
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   pointer-events: none;
 }
 
 .canvas-persistence-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--text-secondary);
+  background: var(--color-gray-50);
 }
 
-.canvas-persistence-status.unwritten .canvas-persistence-dot,
-.canvas-persistence-status.retrying .canvas-persistence-dot {
-  background: #e8590c;
+.excalidraw .canvas-persistence-status.unwritten .canvas-persistence-dot,
+.excalidraw .canvas-persistence-status.retrying .canvas-persistence-dot {
+  background: var(--color-danger);
 }
 
-.canvas-persistence-status.writing .canvas-persistence-dot,
-.canvas-persistence-status.queued .canvas-persistence-dot {
-  background: #f59f00;
+.excalidraw .canvas-persistence-status.writing .canvas-persistence-dot,
+.excalidraw .canvas-persistence-status.queued .canvas-persistence-dot {
+  background: var(--color-warning-darker);
   animation: canvas-persistence-pulse 1s ease-in-out infinite alternate;
 }
 
-.canvas-persistence-status.synced .canvas-persistence-dot {
-  background: #2f9e44;
+.excalidraw .canvas-persistence-status.synced .canvas-persistence-dot {
+  background: var(--color-success-contrast);
 }
 
 @keyframes canvas-persistence-pulse {

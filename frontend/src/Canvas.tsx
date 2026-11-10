@@ -18,7 +18,8 @@ import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
 import type { ExcalidrawElement, OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { RemoteExcalidrawElement } from '@excalidraw/excalidraw/data/reconcile'
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   canvasChange,
   canvasLibrary,
@@ -1580,8 +1581,17 @@ export default function Canvas({
     (collabSynchronizing || collabSession.current?.documentId !== collabDocumentId || !collabJoinReady.current),
   )
 
+  // The persistence badge is portaled into the .excalidraw root so it inherits
+  // Excalidraw's theme tokens and can be aligned with the main-menu trigger
+  // using Excalidraw's own layout variables in both light and dark themes.
+  const canvasRootRef = useRef<HTMLDivElement | null>(null)
+  const [statusPortalNode, setStatusPortalNode] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setStatusPortalNode(canvasRootRef.current?.querySelector<HTMLElement>('.excalidraw') ?? null)
+  }, [board.key])
+
   return (
-    <div className="canvas">
+    <div className="canvas" ref={canvasRootRef}>
       <Excalidraw
         key={board.key}
         name={board.name}
@@ -1649,12 +1659,14 @@ export default function Canvas({
           </div>
         </div>
       )}
-      {collabDocumentId && persistenceStatus !== 'idle' && !showCollabSync && (
-        <div className={`canvas-persistence-status ${persistenceStatus}`} role="status" aria-live="polite">
-          <span className="canvas-persistence-dot" aria-hidden="true" />
-          <span>{PERSISTENCE_LABELS[persistenceStatus]}</span>
-        </div>
-      )}
+      {collabDocumentId && persistenceStatus !== 'idle' && !showCollabSync && statusPortalNode &&
+        createPortal(
+          <div className={`canvas-persistence-status ${persistenceStatus}`} role="status" aria-live="polite">
+            <span className="canvas-persistence-dot" aria-hidden="true" />
+            <span>{PERSISTENCE_LABELS[persistenceStatus]}</span>
+          </div>,
+          statusPortalNode,
+        )}
     </div>
   )
 }
