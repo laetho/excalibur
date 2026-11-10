@@ -790,6 +790,7 @@ function SourcesNav({
             <button key={source.id} className={`source-row local${groupState(source, group)}`} {...groupProps(source, group)}>
               <FolderIcon className="source-icon" />
               <span className="source-title">{lastPathComponent(group.name) || group.name}</span>
+              {activeSource === source.id && activeGroup === group.id && <span className="source-active-dot" aria-hidden="true" />}
               <span className="source-badge">Local</span>
             </button>
           )
