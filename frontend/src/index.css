@@ -10,18 +10,23 @@ body,
 /* The shell follows the system appearance; the canvas has its own setting (CanvasAppearance).
    Tones are lifted straight from Excalidraw's design tokens so the sidebar reads
    as part of the same app as the canvas (Assistant type, purple primary, the
-   same neutral surface ramp and modal shadow). */
+   same neutral surface ramp and modal shadow).
+
+   Contrast against the page/sidebar/modal background (WCAG ratio), kept as
+   the floor when tuning: raised surfaces (cards, pills, tags) >= 1.24,
+   hovers >= 1.4, borders/dividers >= 1.3, and the selected tint at least
+   1.14 above an unselected card so the two never blend. */
 :root {
   color-scheme: light dark;
   --bg: #ffffff; /* --default-bg-color */
   --sidebar-bg: #ffffff; /* --island-bg-color */
-  --sidebar-border: #f1f0ff; /* --default-border-color = --color-surface-high */
+  --sidebar-border: rgba(0, 0, 0, 0.12);
   --text: #1b1b1f; /* --color-on-surface */
   --text-secondary: #5c5c5c; /* --color-gray-70 */
-  --row-hover: #f1f0ff; /* --color-surface-high */
-  --card-bg: #f2f2f7; /* --color-surface-mid */
-  --card-hover: #e8e8f0;
-  --row-selected: #e3e2fe; /* --color-primary-light */
+  --row-hover: #ececf4; /* --color-surface-low */
+  --card-bg: #e6e6ef; /* 1.24 */
+  --card-hover: #d9d9e5; /* 1.40 */
+  --row-selected: #d7d5ff; /* --color-primary-light-darker, 1.41 */
   --row-selected-text: #030064; /* --color-on-primary-container */
   --accent: #6965db; /* --color-primary */
   --accent-strong: #5b57d1; /* --color-primary-darker */
@@ -29,37 +34,44 @@ body,
   --danger: #c92a2a;
   --danger-bg: #fff0f0; /* --color-danger-background */
   --danger-border: rgba(217, 139, 132, 0.9);
-  --input-bg: rgba(0, 0, 0, 0.05);
-  --input-border: rgba(0, 0, 0, 0.12);
+  --input-bg: rgba(0, 0, 0, 0.04);
+  --input-border: rgba(0, 0, 0, 0.18); /* 1.53 */
+  --control-bg: #f4f4f8; /* buttons, segmented controls, steppers */
   --modal-bg: #ffffff; /* --island-bg-color */
   --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
   --backdrop: rgba(0, 0, 0, 0.35);
   --thumbnail-border: rgba(0, 0, 0, 0.15);
-  --divider: rgba(0, 0, 0, 0.1);
+  --divider: rgba(0, 0, 0, 0.13); /* 1.35 */
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #121212; /* --default-bg-color */
     --sidebar-bg: #232329; /* --island-bg-color */
-    --sidebar-border: hsl(245, 10%, 21%); /* --color-surface-high */
+    --sidebar-border: hsl(245, 9%, 26%);
     --text: #e3e3e8; /* --color-on-surface */
     --text-secondary: #b8b8b8; /* --color-gray-40 */
     --danger: #ffa8a5; /* --color-danger */
     --danger-bg: rgba(255, 168, 165, 0.12);
     --danger-border: rgba(255, 168, 165, 0.4);
-    --row-hover: hsl(245, 10%, 21%); /* --color-surface-high */
-    --card-bg: hsl(245, 9%, 17%); /* just above --color-surface-low */
-    --card-hover: hsl(245, 10%, 21%); /* --color-surface-high */
-    --row-selected: #403e6a; /* --color-surface-primary-container */
+    --row-hover: hsl(245, 9%, 22%);
+    --card-bg: hsl(245, 9%, 22%); /* 1.26 */
+    --card-hover: hsl(245, 10%, 27%); /* 1.49 */
+    --row-selected: #48467a; /* 1.81; 1.44 above a card */
     --row-selected-text: #e0dfff; /* --color-on-primary-container */
-    --input-bg: hsl(240, 8%, 15%); /* --color-surface-low */
-    --input-border: rgba(255, 255, 255, 0.14);
+    /* Excalidraw's dark primary: #6965db is only 3.3:1 as text on the dark
+       background; this is 7:1, with dark text on filled buttons (8.5:1). */
+    --accent: #a8a5ff;
+    --accent-strong: #beb9ff;
+    --accent-text: #121212;
+    --input-bg: hsl(240, 8%, 11%); /* text fields sit slightly recessed, as in Excalidraw */
+    --input-border: rgba(255, 255, 255, 0.18); /* 1.79 */
+    --control-bg: hsl(245, 9%, 22%); /* buttons sit slightly raised */
     --modal-bg: #232329; /* --island-bg-color */
     --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
     --backdrop: rgba(0, 0, 0, 0.5);
     --thumbnail-border: rgba(255, 255, 255, 0.2);
-    --divider: hsl(245, 10%, 21%);
+    --divider: hsl(245, 9%, 26%); /* 1.45 */
   }
 }
 
@@ -628,12 +640,12 @@ button.primary:disabled {
 }
 
 button.secondary {
-  background: var(--input-bg);
+  background: var(--control-bg);
   border: 1px solid var(--input-border);
 }
 
-button.secondary:hover {
-  background: var(--row-hover);
+button.secondary:hover:not(:disabled) {
+  background: var(--card-hover);
 }
 
 .modal-actions button.destructive {
@@ -961,7 +973,7 @@ button.secondary:disabled {
   height: 32px;
   border: 1px solid var(--input-border);
   border-radius: 8px;
-  background: var(--input-bg);
+  background: var(--control-bg);
 }
 
 .stepper button {
@@ -1229,7 +1241,7 @@ button.link-button:hover {
 
 .segmented {
   display: inline-flex;
-  background: var(--input-bg);
+  background: var(--control-bg);
   border: 1px solid var(--input-border);
   border-radius: 8px;
   padding: 2px;
