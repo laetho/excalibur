@@ -55,6 +55,17 @@ export interface CollabJoinResult {
      * integer precision above 2^53-1.
      */
     "snapshotSequence": string;
+
+    /**
+     * Last retained update for this document when the consumer was created.
+     * The renderer does not report catch-up before this sequence is applied.
+     */
+    "replayThroughSequence": string;
+
+    /**
+     * Durable local updates that have not yet received a JetStream publish ACK.
+     */
+    "pendingLocalUpdates": number;
 }
 
 export interface GroupInfo {

@@ -171,7 +171,7 @@ func TestCollaborationOutboxSurvivesRestart(t *testing.T) {
 	if err := second.loadCollabOutbox(); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := second.collabOutbox[collabOutboxKey(entry)]; !ok || !reflect.DeepEqual(got, entry) {
+	if got, ok := second.collabOutbox[collabOutboxKey(entry)]; !ok || got.SourceID != entry.SourceID || got.Bucket != entry.Bucket || got.DocumentID != entry.DocumentID || got.MessageID != entry.MessageID || got.Data != entry.Data || got.Order == 0 {
 		t.Fatalf("reloaded outbox entry = %#v, present=%v", got, ok)
 	}
 	second.removeCollabOutbox(entry)
@@ -182,6 +182,208 @@ func TestCollaborationOutboxSurvivesRestart(t *testing.T) {
 	}
 	if len(third.collabOutbox) != 0 {
 		t.Fatalf("removed outbox was reloaded: %#v", third.collabOutbox)
+	}
+}
+
+func TestCollaborationOutboxMigratesLegacyArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	documentID := legacyDocumentID("bucket", "Board.excalidraw")
+	legacy := []collabOutboxEntry{
+		{SourceID: "source", Bucket: "bucket", DocumentID: documentID, MessageID: "peer:1", Data: `{"type":"scene","n":1}`},
+		{SourceID: "source", Bucket: "bucket", DocumentID: documentID, MessageID: "peer:2", Data: `{"type":"scene","n":2}`},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newApp()
+	app.outboxPath = path
+	if err := app.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	first := app.collabOutbox[collabOutboxKey(legacy[0])]
+	second := app.collabOutbox[collabOutboxKey(legacy[1])]
+	if first.Order == 0 || second.Order <= first.Order {
+		t.Fatalf("migrated order = %d, %d", first.Order, second.Order)
+	}
+	migrated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrated) == 0 || migrated[0] != '{' || !strings.HasSuffix(string(migrated), "\n") {
+		t.Fatalf("legacy outbox was not rewritten as a JSONL journal: %q", migrated)
+	}
+}
+
+func TestCollaborationOutboxIgnoresOnlyTornFinalRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	documentID := legacyDocumentID("bucket", "Board.excalidraw")
+	entry := collabOutboxEntry{SourceID: "source", Bucket: "bucket", DocumentID: documentID, MessageID: "peer:1", Data: `{"type":"scene"}`, Order: 1}
+	record, err := json.Marshal(collabOutboxRecord{Op: "put", Entry: &entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append(record, '\n'), []byte(`{"op":"put","entry":`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newApp()
+	app.outboxPath = path
+	if err := app.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.collabOutbox[collabOutboxKey(entry)]; got.Data != entry.Data || got.Order != entry.Order {
+		t.Fatalf("complete journal record was not recovered: %#v", got)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"op":"put"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := newApp()
+	empty.outboxPath = path
+	if err := empty.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.collabOutbox) != 0 {
+		t.Fatalf("torn-only journal recovered phantom entries: %#v", empty.collabOutbox)
+	}
+}
+
+func TestEmptyCollaborationOutboxJournalReloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newApp()
+	app.outboxPath = path
+	if err := app.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollabPublishIsDurableBeforeReturn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	documentID := legacyDocumentID("bucket", "Board.excalidraw")
+	app := newApp()
+	app.outboxPath = path
+
+	sequence, err := app.CollabPublish("source", "bucket", documentID, "peer:1", `{"type":"scene"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sequence != "0" {
+		t.Fatalf("local durability sequence = %q, want 0", sequence)
+	}
+	select {
+	case <-app.outboxWake:
+	default:
+		t.Fatal("CollabPublish did not wake the background replicator")
+	}
+
+	restarted := newApp()
+	restarted.outboxPath = path
+	if err := restarted.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	key := collabOutboxKey(collabOutboxEntry{
+		SourceID:   "source",
+		Bucket:     "bucket",
+		DocumentID: documentID,
+		MessageID:  "peer:1",
+	})
+	entry, ok := restarted.collabOutbox[key]
+	if !ok || entry.Data != `{"type":"scene"}` {
+		t.Fatalf("durable publication = %#v, present=%v", entry, ok)
+	}
+}
+
+func TestCollaborationBlobsAreDurableBeforeReturn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collab-outbox.json")
+	documentID := legacyDocumentID("bucket", "Board.excalidraw")
+	app := newApp()
+	app.outboxPath = path
+	files := `{"file:a":{"id":"a","dataURL":"data:image/png;base64,AA=="},"scene:peer:1":{"type":"scene","elements":[]}}`
+	if err := app.CollabPutFiles("source", "bucket", documentID, files); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.collabOutbox) != 2 {
+		t.Fatalf("blob outbox length = %d, want 2", len(app.collabOutbox))
+	}
+
+	restarted := newApp()
+	restarted.outboxPath = path
+	if err := restarted.loadCollabOutbox(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.collabOutbox) != 2 {
+		t.Fatalf("reloaded blob outbox length = %d, want 2", len(restarted.collabOutbox))
+	}
+	for _, entry := range restarted.collabOutbox {
+		if entry.Kind != "blob" || entry.BlobID == "" {
+			t.Fatalf("invalid blob outbox entry: %#v", entry)
+		}
+		if data, err := os.ReadFile(restarted.collabBlobPath(entry)); err != nil || len(data) == 0 {
+			t.Fatalf("blob payload was not persisted: size=%d err=%v", len(data), err)
+		}
+		restarted.removeCollabOutbox(entry)
+		if _, err := os.Stat(restarted.collabBlobPath(entry)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replicated blob payload still exists: %v", err)
+		}
+	}
+}
+
+func TestPendingResultPropagatesRendererFailure(t *testing.T) {
+	app := newApp()
+	result := make(chan struct {
+		edit *pendingEdit
+		err  error
+	}, 1)
+	go func() {
+		edit, err := app.takePending()
+		result <- struct {
+			edit *pendingEdit
+			err  error
+		}{edit: edit, err: err}
+	}()
+
+	var requestID string
+	deadline := time.Now().Add(time.Second)
+	for requestID == "" && time.Now().Before(deadline) {
+		app.pending.Range(func(key, _ any) bool {
+			requestID, _ = key.(string)
+			return false
+		})
+		if requestID == "" {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if requestID == "" {
+		t.Fatal("takePending did not register its request")
+	}
+	message := "could not persist final collaboration update"
+	app.PendingResult(requestID, nil, nil, &message)
+
+	got := <-result
+	if got.edit != nil {
+		t.Fatalf("pending edit = %#v, want nil", got.edit)
+	}
+	if got.err == nil || got.err.Error() != message {
+		t.Fatalf("pending error = %v, want %q", got.err, message)
+	}
+}
+
+func TestServiceShutdownDoesNotWaitForDestroyedRenderer(t *testing.T) {
+	app := newApp()
+	started := time.Now()
+	if err := app.ServiceShutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("ServiceShutdown took %v; renderer round-trip must happen before window close", elapsed)
 	}
 }
 
@@ -304,6 +506,22 @@ func TestCollaborationJetStreamDurability(t *testing.T) {
 	store.natsClients["test"] = client
 	app := newApp()
 	app.store = store
+	app.outboxPath = filepath.Join(t.TempDir(), "collab-outbox.json")
+	const blobID = "file:integration:1"
+	const blobJSON = `{"id":"integration","dataURL":"data:image/png;base64,AA==","version":1}`
+	if err := app.CollabPutFiles("nats:test", bucket, documentID, `{"`+blobID+`":`+blobJSON+`}`); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.collabOutbox) != 1 {
+		t.Fatalf("durable blob was not queued: %#v", app.collabOutbox)
+	}
+	app.flushCollabOutbox()
+	if len(app.collabOutbox) != 0 {
+		t.Fatalf("replicated blob remained queued: %#v", app.collabOutbox)
+	}
+	if blob, err := client.readCollabFile(bucket, documentID, blobID); err != nil || string(blob) != blobJSON {
+		t.Fatalf("replicated blob = %q, err=%v", blob, err)
+	}
 	const subscriberID = "renderer-test"
 	if _, err := app.CollabJoin("nats:test", bucket, documentID, subscriberID, "0"); err != nil {
 		t.Fatal(err)

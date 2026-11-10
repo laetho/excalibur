@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,13 +30,26 @@ import (
 )
 
 type pendingEdit struct{ Name, JSON string }
+type pendingResult struct {
+	Edit *pendingEdit
+	Err  error
+}
 
 type collabOutboxEntry struct {
 	SourceID   string `json:"sourceId"`
 	Bucket     string `json:"bucket"`
 	DocumentID string `json:"documentId"`
+	Kind       string `json:"kind,omitempty"`
 	MessageID  string `json:"messageId"`
+	BlobID     string `json:"blobId,omitempty"`
 	Data       string `json:"data"`
+	Order      uint64 `json:"order,omitempty"`
+}
+
+type collabOutboxRecord struct {
+	Op    string             `json:"op"`
+	Key   string             `json:"key,omitempty"`
+	Entry *collabOutboxEntry `json:"entry,omitempty"`
 }
 
 const (
@@ -56,15 +72,21 @@ type App struct {
 	// Durable collaboration messages are acknowledged only after the renderer
 	// confirms it received and validated the Wails event. This closes the final
 	// event-loss window between Go and the browser.
-	collabPending map[string]*nats.Msg
-	outboxMu      sync.Mutex
-	outboxPath    string
-	collabOutbox  map[string]collabOutboxEntry
-	requestID     atomic.Uint64
-	watcherMu     sync.Mutex
-	watcher       *fsnotify.Watcher
-	fsHandling    atomic.Bool
-	stop          chan struct{}
+	collabPending  map[string]*nats.Msg
+	outboxMu       sync.Mutex
+	outboxPath     string
+	collabOutbox   map[string]collabOutboxEntry
+	outboxOrder    uint64
+	outboxOps      uint64
+	outboxWake     chan struct{}
+	outboxWorkers  sync.WaitGroup
+	shutdownReady  atomic.Bool
+	shutdownSaving atomic.Bool
+	requestID      atomic.Uint64
+	watcherMu      sync.Mutex
+	watcher        *fsnotify.Watcher
+	fsHandling     atomic.Bool
+	stop           chan struct{}
 }
 
 func newApp() *App {
@@ -72,6 +94,7 @@ func newApp() *App {
 		subscriptions: map[string]*nats.Subscription{},
 		collabPending: map[string]*nats.Msg{},
 		collabOutbox:  map[string]collabOutboxEntry{},
+		outboxWake:    make(chan struct{}, 1),
 		stop:          make(chan struct{}),
 	}
 }
@@ -102,13 +125,20 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	a.startWatcher(folder)
 	go a.remoteRefreshLoop()
 	go a.refreshBucketsOnStartup()
-	go a.collabOutboxLoop()
+	a.outboxWorkers.Add(1)
+	go func() {
+		defer a.outboxWorkers.Done()
+		a.collabOutboxLoop()
+	}()
 	return nil
 }
 
 func (a *App) ServiceShutdown() error {
-	a.savePending()
+	// The renderer has already been torn down when service shutdown runs, so a
+	// canvas round-trip here can only time out. The WindowClosing hook performs
+	// the durability barrier while the renderer is still alive.
 	close(a.stop)
+	a.outboxWorkers.Wait()
 	a.watcherMu.Lock()
 	if a.watcher != nil {
 		_ = a.watcher.Close()
@@ -127,6 +157,17 @@ func (a *App) ServiceShutdown() error {
 		a.store.close()
 	}
 	a.mu.Unlock()
+	return nil
+}
+
+func (a *App) prepareShutdown() error {
+	if a.shutdownReady.Load() {
+		return nil
+	}
+	if err := a.savePending(); err != nil {
+		return err
+	}
+	a.shutdownReady.Store(true)
 	return nil
 }
 
@@ -150,7 +191,21 @@ func (a *App) GetState() (StoreSnapshot, error) {
 	return a.store.snapshot(), nil
 }
 
-func (a *App) CanvasReady() error { go a.refreshDetails(); return nil }
+func (a *App) CanvasReady() error {
+	a.mu.Lock()
+	if a.store == nil {
+		a.mu.Unlock()
+		return errors.New("store is not ready")
+	}
+	// CanvasReady is emitted only after the renderer has installed its canvas
+	// event listeners. Reopen the persisted selection here instead of asking the
+	// shell to navigate to it during startup, which would incorrectly run the
+	// pending-save barrier before a canvas has been opened.
+	err := a.openSelectedLocked()
+	a.mu.Unlock()
+	go a.refreshDetails()
+	return err
+}
 
 func (a *App) CanvasChange(name, jsonText string) error {
 	a.mu.Lock()
@@ -203,13 +258,17 @@ func (a *App) Log(level, message string) {
 	log.Printf("canvas %s: %s", level, message)
 }
 
-func (a *App) PendingResult(requestID string, name, jsonText *string) {
+func (a *App) PendingResult(requestID string, name, jsonText, errorMessage *string) {
 	value := (*pendingEdit)(nil)
 	if name != nil && jsonText != nil {
 		value = &pendingEdit{Name: *name, JSON: *jsonText}
 	}
+	result := pendingResult{Edit: value}
+	if errorMessage != nil && *errorMessage != "" {
+		result.Err = errors.New(*errorMessage)
+	}
 	if found, ok := a.pending.LoadAndDelete(requestID); ok {
-		found.(chan *pendingEdit) <- value
+		found.(chan pendingResult) <- result
 	}
 }
 
@@ -223,42 +282,38 @@ func (a *App) ThumbnailResult(requestID string, dataURL *string) {
 	}
 }
 
-func (a *App) takePending() *pendingEdit {
+func (a *App) takePending() (*pendingEdit, error) {
 	id := a.nextID("pending")
-	result := make(chan *pendingEdit, 1)
+	result := make(chan pendingResult, 1)
 	a.pending.Store(id, result)
 	a.emit("canvas:take-pending", map[string]any{"requestId": id})
 	select {
 	case value := <-result:
-		return value
-	case <-time.After(2 * time.Second):
+		return value.Edit, value.Err
+	case <-time.After(30 * time.Second):
 		a.pending.Delete(id)
-		return nil
+		return nil, errors.New("timed out while saving changes")
 	}
 }
 
-func (a *App) savePending() {
-	// Collaborative boards are persisted by the JetStream update log and its
-	// snapshot compactor. Asking the renderer for a full JSON scene here is both
-	// unnecessary and expensive: source/board switches used to wait for the
-	// renderer round-trip (up to two seconds), and the handler could synchronously
-	// encode a pending collaboration update before replying. Local boards still
-	// use the ordinary pending-scene save path below.
-	a.mu.Lock()
-	needsPendingScene := a.store != nil && a.store.isLocal()
-	a.mu.Unlock()
-	if !needsPendingScene {
-		return
+func (a *App) savePending() error {
+	// Navigation is a durability barrier for every board. Local boards return a
+	// complete JSON scene; collaborative boards return nil only after their final
+	// scene has been durably appended to the local outbox. Remote delivery remains
+	// asynchronous, so the common path does not wait on the network.
+	pending, err := a.takePending()
+	if err != nil {
+		return err
 	}
-	pending := a.takePending()
 	if pending == nil {
-		return
+		return nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.store != nil {
-		_ = a.store.saveBoard(pending.Name, pending.JSON)
+		return a.store.saveBoard(pending.Name, pending.JSON)
 	}
+	return nil
 }
 
 func (a *App) openSelectedLocked() error {
@@ -290,7 +345,9 @@ func (a *App) openSelectedLocked() error {
 }
 
 func (a *App) SelectBoard(id string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.store.board(id) == nil {
@@ -302,7 +359,9 @@ func (a *App) SelectBoard(id string) error {
 }
 
 func (a *App) CreateBoard(name string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.createBoard(name); err != nil {
@@ -313,7 +372,9 @@ func (a *App) CreateBoard(name string) error {
 }
 
 func (a *App) RenameBoard(id, name string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	wasOpen := a.store.selection == id
@@ -328,7 +389,9 @@ func (a *App) RenameBoard(id, name string) error {
 }
 
 func (a *App) DuplicateBoard(id string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.duplicateBoard(id); err != nil {
@@ -338,7 +401,9 @@ func (a *App) DuplicateBoard(id string) error {
 	return a.openSelectedLocked()
 }
 func (a *App) TrashBoard(id string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.trashBoard(id); err != nil {
@@ -349,7 +414,9 @@ func (a *App) TrashBoard(id string) error {
 }
 
 func (a *App) ImportPaths(paths []string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.importPaths(paths); err != nil {
@@ -359,7 +426,9 @@ func (a *App) ImportPaths(paths []string) error {
 	return a.openSelectedLocked()
 }
 func (a *App) ImportBoardData(name, jsonText string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.importBoardData(name, []byte(jsonText)); err != nil {
@@ -410,7 +479,9 @@ func (a *App) ChooseFolder() error {
 	if err != nil || folder == "" {
 		return err
 	}
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	if err = a.store.changeFolder(folder); err != nil {
 		a.mu.Unlock()
@@ -601,7 +672,9 @@ func (a *App) AddNatsServer(config NatsServerConfig) error {
 	return nil
 }
 func (a *App) UpdateNatsServer(config NatsServerConfig, keepPassword bool) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.updateNatsServer(config, keepPassword); err != nil {
@@ -612,7 +685,9 @@ func (a *App) UpdateNatsServer(config NatsServerConfig, keepPassword bool) error
 	return nil
 }
 func (a *App) RemoveNatsServer(id string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.removeNatsServer(id); err != nil {
@@ -647,7 +722,9 @@ func (a *App) AddBucket(sourceID, bucket string) error {
 // DeleteBucket permanently removes an empty NATS bucket. The backend verifies
 // emptiness immediately before deletion; the menu's state is only advisory.
 func (a *App) DeleteBucket(sourceID, bucket string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	if err := a.ensureNoCollabOutboxBucket(sourceID, bucket); err != nil {
 		return err
 	}
@@ -679,7 +756,9 @@ func (a *App) clearNatsBucketSubscriptions(sourceID, bucket string) {
 	}
 }
 func (a *App) ActivateSource(sourceID, groupID string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.activateSource(sourceID, groupID); err != nil {
@@ -693,7 +772,9 @@ func (a *App) ActivateSource(sourceID, groupID string) error {
 // rescans the active source so the sidebar reflects the current state. Any
 // server that could not be reached is reported in the returned error.
 func (a *App) RefreshBuckets() error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.store == nil {
@@ -707,7 +788,9 @@ func (a *App) RefreshBuckets() error {
 	return err
 }
 func (a *App) CopyBoardToSource(boardID, targetSource, targetGroup string) error {
-	a.savePending()
+	if err := a.savePending(); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.copyBoardToSource(boardID, targetSource, targetGroup); err != nil {
@@ -739,7 +822,19 @@ func (a *App) CollabSend(sourceID, bucket, documentID, data string) error {
 // CollabPublish appends a versioned Excalidraw scene to the board's durable
 // JetStream log. The publish acknowledgement sequence is used for snapshots.
 func collabOutboxKey(entry collabOutboxEntry) string {
+	if entry.Kind == "blob" {
+		return entry.SourceID + "\x00" + entry.Bucket + "\x00" + entry.DocumentID + "\x00blob\x00" + entry.BlobID
+	}
 	return entry.SourceID + "\x00" + entry.Bucket + "\x00" + entry.DocumentID + "\x00" + entry.MessageID
+}
+
+func collabOutboxDocumentKey(entry collabOutboxEntry) string {
+	return entry.SourceID + "\x00" + entry.Bucket + "\x00" + entry.DocumentID
+}
+
+func (a *App) collabBlobPath(entry collabOutboxEntry) string {
+	sum := sha256.Sum256([]byte(collabOutboxKey(entry)))
+	return filepath.Join(filepath.Dir(a.outboxPath), "collab-blobs", fmt.Sprintf("%x.json", sum[:16]))
 }
 
 func (a *App) loadCollabOutbox() error {
@@ -753,36 +848,160 @@ func (a *App) loadCollabOutbox() error {
 	if err != nil {
 		return err
 	}
-	var entries []collabOutboxEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	// Migrate the original whole-file JSON array on first load. New writes use an
+	// append-only journal so an offline backlog does not rewrite and fsync every
+	// older scene for each enqueue/acknowledgement.
+	var legacy []collabOutboxEntry
+	if json.Unmarshal(data, &legacy) == nil {
+		for i := range legacy {
+			if legacy[i].Order == 0 {
+				a.outboxOrder++
+				legacy[i].Order = a.outboxOrder
+			}
+			a.loadCollabOutboxEntryLocked(legacy[i])
+		}
+		if err := a.validateCollabBlobFilesLocked(); err != nil {
+			return err
+		}
+		return a.compactCollabOutboxLocked()
+	}
+
+	journal := string(data)
+	if strings.TrimSpace(journal) == "" {
+		return nil
+	}
+	// A crash can leave only the final append torn. Every earlier newline-ended
+	// record was fsynced independently and remains authoritative.
+	if !strings.HasSuffix(journal, "\n") {
+		if last := strings.LastIndexByte(journal, '\n'); last >= 0 {
+			journal = journal[:last+1]
+		} else {
+			// With no complete newline-terminated record, the entire journal is the
+			// one torn append. The old array format was already attempted above.
+			return nil
+		}
+	}
+	scanner := bufio.NewScanner(strings.NewReader(journal))
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var record collabOutboxRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return fmt.Errorf("invalid collaboration outbox journal: %w", err)
+		}
+		a.outboxOps++
+		switch record.Op {
+		case "put":
+			if record.Entry != nil {
+				a.loadCollabOutboxEntryLocked(*record.Entry)
+			}
+		case "del":
+			delete(a.collabOutbox, record.Key)
+		default:
+			return fmt.Errorf("invalid collaboration outbox operation %q", record.Op)
+		}
+	}
+	if err := scanner.Err(); err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.SourceID != "" && validDocumentID(entry.DocumentID) && entry.MessageID != "" {
-			a.collabOutbox[collabOutboxKey(entry)] = entry
+	return a.validateCollabBlobFilesLocked()
+}
+
+func (a *App) validateCollabBlobFilesLocked() error {
+	for _, entry := range a.collabOutbox {
+		if entry.Kind != "blob" {
+			continue
+		}
+		if info, err := os.Stat(a.collabBlobPath(entry)); err != nil {
+			return fmt.Errorf("pending collaboration blob %q is unavailable: %w", entry.BlobID, err)
+		} else if !info.Mode().IsRegular() {
+			return fmt.Errorf("pending collaboration blob %q is not a file", entry.BlobID)
 		}
 	}
 	return nil
 }
 
-// persistCollabOutboxLocked durably records an update before any NATS publish.
-// A crash after the server stores an update is harmless because Message-Id makes
-// replay idempotent inside the dedup window, and Excalidraw reconciliation is
-// itself idempotent after that window.
-func (a *App) persistCollabOutboxLocked() error {
-	entries := make([]collabOutboxEntry, 0, len(a.collabOutbox))
-	for _, entry := range a.collabOutbox {
-		entries = append(entries, entry)
+func (a *App) loadCollabOutboxEntryLocked(entry collabOutboxEntry) {
+	if entry.SourceID == "" || !validDocumentID(entry.DocumentID) ||
+		(entry.Kind == "blob" && entry.BlobID == "") ||
+		(entry.Kind != "blob" && entry.MessageID == "") {
+		return
 	}
-	sort.Slice(entries, func(i, j int) bool { return collabOutboxKey(entries[i]) < collabOutboxKey(entries[j]) })
-	data, err := json.Marshal(entries)
+	if entry.Order == 0 {
+		a.outboxOrder++
+		entry.Order = a.outboxOrder
+	} else if entry.Order > a.outboxOrder {
+		a.outboxOrder = entry.Order
+	}
+	a.collabOutbox[collabOutboxKey(entry)] = entry
+}
+
+func (a *App) appendCollabOutboxRecordLocked(record collabOutboxRecord) error {
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(a.outboxPath), 0o755); err != nil {
 		return err
 	}
-	return atomicWrite(a.outboxPath, data)
+	file, err := os.OpenFile(a.outboxPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.Write(append(data, '\n')); err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		a.outboxOps++
+	}
+	return err
+}
+
+// compactCollabOutboxLocked periodically bounds journal replay without putting
+// whole-backlog rewrites on the hot path.
+func (a *App) compactCollabOutboxLocked() error {
+	entries := make([]collabOutboxEntry, 0, len(a.collabOutbox))
+	for _, entry := range a.collabOutbox {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Order == entries[j].Order {
+			return collabOutboxKey(entries[i]) < collabOutboxKey(entries[j])
+		}
+		return entries[i].Order < entries[j].Order
+	})
+	var data []byte
+	for i := range entries {
+		record, err := json.Marshal(collabOutboxRecord{Op: "put", Entry: &entries[i]})
+		if err != nil {
+			return err
+		}
+		data = append(data, record...)
+		data = append(data, '\n')
+	}
+	if err := os.MkdirAll(filepath.Dir(a.outboxPath), 0o755); err != nil {
+		return err
+	}
+	if err := atomicWrite(a.outboxPath, data); err != nil {
+		return err
+	}
+	a.outboxOps = uint64(len(entries))
+	return nil
+}
+
+func (a *App) maybeCompactCollabOutboxLocked() {
+	threshold := uint64(len(a.collabOutbox)*4 + 256)
+	if a.outboxOps > threshold {
+		if err := a.compactCollabOutboxLocked(); err != nil {
+			log.Printf("could not compact collaboration outbox journal: %v", err)
+		}
+	}
 }
 
 func (a *App) enqueueCollabOutbox(entry collabOutboxEntry) error {
@@ -791,20 +1010,19 @@ func (a *App) enqueueCollabOutbox(entry collabOutboxEntry) error {
 	key := collabOutboxKey(entry)
 	previous, existed := a.collabOutbox[key]
 	if existed {
-		if previous != entry {
+		if previous.SourceID != entry.SourceID || previous.Bucket != entry.Bucket || previous.DocumentID != entry.DocumentID || previous.Kind != entry.Kind || previous.MessageID != entry.MessageID || previous.BlobID != entry.BlobID || previous.Data != entry.Data {
 			return errors.New("collaboration message id reused with different data")
 		}
 		return nil
 	}
-	a.collabOutbox[key] = entry
-	if err := a.persistCollabOutboxLocked(); err != nil {
-		if existed {
-			a.collabOutbox[key] = previous
-		} else {
-			delete(a.collabOutbox, key)
-		}
+	a.outboxOrder++
+	entry.Order = a.outboxOrder
+	if err := a.appendCollabOutboxRecordLocked(collabOutboxRecord{Op: "put", Entry: &entry}); err != nil {
+		a.outboxOrder--
 		return err
 	}
+	a.collabOutbox[key] = entry
+	a.maybeCompactCollabOutboxLocked()
 	return nil
 }
 
@@ -823,17 +1041,38 @@ func (a *App) ensureNoCollabOutboxBucket(sourceID, bucket string) error {
 
 func (a *App) removeCollabOutbox(entry collabOutboxEntry) {
 	a.outboxMu.Lock()
-	defer a.outboxMu.Unlock()
 	key := collabOutboxKey(entry)
 	if _, exists := a.collabOutbox[key]; !exists {
+		a.outboxMu.Unlock()
+		return
+	}
+	if err := a.appendCollabOutboxRecordLocked(collabOutboxRecord{Op: "del", Key: key}); err != nil {
+		// Retain the entry in memory and retry. Removing it without a durable delete
+		// would let the UI overclaim remote synchronization before restart safety.
+		log.Printf("could not record collaboration outbox acknowledgement: %v", err)
+		a.outboxMu.Unlock()
 		return
 	}
 	delete(a.collabOutbox, key)
-	if err := a.persistCollabOutboxLocked(); err != nil {
-		// Keep the in-memory removal: a stale disk entry can only cause an
-		// idempotent replay after restart, whereas re-adding it loops immediately.
-		log.Printf("could not compact collaboration outbox: %v", err)
+	a.maybeCompactCollabOutboxLocked()
+	pending := a.collabOutboxCountLocked(entry.DocumentID)
+	a.outboxMu.Unlock()
+	if entry.Kind == "blob" {
+		if err := os.Remove(a.collabBlobPath(entry)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("could not remove replicated collaboration blob: %v", err)
+		}
 	}
+	a.emit("canvas:collab-outbox", map[string]any{"documentId": entry.DocumentID, "pending": pending})
+}
+
+func (a *App) collabOutboxCountLocked(documentID string) int {
+	count := 0
+	for _, entry := range a.collabOutbox {
+		if entry.DocumentID == documentID {
+			count++
+		}
+	}
+	return count
 }
 
 func (a *App) flushCollabOutbox() {
@@ -842,22 +1081,73 @@ func (a *App) flushCollabOutbox() {
 	for _, entry := range a.collabOutbox {
 		entries = append(entries, entry)
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Order == entries[j].Order {
+			return collabOutboxKey(entries[i]) < collabOutboxKey(entries[j])
+		}
+		return entries[i].Order < entries[j].Order
+	})
 	a.outboxMu.Unlock()
+	// Documents are independent and may replicate in parallel, but each document
+	// must preserve durable append order. In particular, do not publish a newer
+	// background update after an older update for that document failed.
+	groups := make([][]collabOutboxEntry, 0)
+	groupIndex := make(map[string]int)
 	for _, entry := range entries {
-		a.mu.Lock()
-		store := a.store
-		var client *natsClient
-		var err error
-		if store != nil {
-			client, err = store.clientFor(entry.SourceID)
+		key := collabOutboxDocumentKey(entry)
+		index, ok := groupIndex[key]
+		if !ok {
+			index = len(groups)
+			groupIndex[key] = index
+			groups = append(groups, nil)
 		}
-		a.mu.Unlock()
-		if store == nil || err != nil {
-			continue
+		groups[index] = append(groups[index], entry)
+	}
+	const maxParallelDocuments = 4
+	sem := make(chan struct{}, maxParallelDocuments)
+	var workers sync.WaitGroup
+	for _, group := range groups {
+		group := group
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			a.flushCollabOutboxDocument(group)
+		}()
+	}
+	workers.Wait()
+}
+
+func (a *App) flushCollabOutboxDocument(entries []collabOutboxEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	a.mu.Lock()
+	store := a.store
+	var client *natsClient
+	var err error
+	if store != nil {
+		client, err = store.clientFor(entries[0].SourceID)
+	}
+	a.mu.Unlock()
+	if store == nil || err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.Kind == "blob" {
+			data, readErr := os.ReadFile(a.collabBlobPath(entry))
+			if readErr != nil {
+				log.Printf("could not read pending collaboration blob: %v", readErr)
+				return
+			}
+			if err = client.writeCollabFile(entry.Bucket, entry.DocumentID, entry.BlobID, data); err != nil {
+				return
+			}
+		} else if _, err = client.publishCollabUpdate(entry.Bucket, entry.DocumentID, entry.MessageID, []byte(entry.Data)); err != nil {
+			return
 		}
-		if _, err = client.publishCollabUpdate(entry.Bucket, entry.DocumentID, entry.MessageID, []byte(entry.Data)); err == nil {
-			a.removeCollabOutbox(entry)
-		}
+		a.removeCollabOutbox(entry)
 	}
 }
 
@@ -868,6 +1158,8 @@ func (a *App) collabOutboxLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			a.flushCollabOutbox()
+		case <-a.outboxWake:
 			a.flushCollabOutbox()
 		case <-a.stop:
 			return
@@ -886,42 +1178,63 @@ func (a *App) CollabPublish(sourceID, bucket, documentID, messageID, data string
 	if err := a.enqueueCollabOutbox(entry); err != nil {
 		return "", fmt.Errorf("could not persist collaboration update: %w", err)
 	}
-	a.mu.Lock()
-	client, err := a.store.clientFor(sourceID)
-	a.mu.Unlock()
-	if err != nil {
-		return "", err
+	a.outboxMu.Lock()
+	pending := a.collabOutboxCountLocked(documentID)
+	a.outboxMu.Unlock()
+	a.emit("canvas:collab-outbox", map[string]any{"documentId": documentID, "pending": pending})
+	// The durable local append is the navigation barrier. Wake the background
+	// replicator, but never make board switching wait for the remote NATS RTT.
+	// The renderer advances snapshot sequence only from its ordered subscription,
+	// so it does not depend on a publish acknowledgement here.
+	select {
+	case a.outboxWake <- struct{}{}:
+	default:
 	}
-	sequence, err := client.publishCollabUpdate(bucket, documentID, messageID, []byte(data))
-	if err != nil {
-		return "", err
-	}
-	a.removeCollabOutbox(entry)
-	return strconv.FormatUint(sequence, 10), nil
+	return "0", nil
 }
 
 // CollabPutFiles stores immutable JSON blobs outside the JetStream update log,
 // avoiding the server's per-message payload limit. Values are normally
 // Excalidraw files; an oversized scene batch uses the same blob channel.
 func (a *App) CollabPutFiles(sourceID, bucket, documentID, filesJSON string) error {
-	a.mu.Lock()
 	if sourceID == localSourceID {
-		a.mu.Unlock()
 		return nil
 	}
-	client, err := a.store.clientFor(sourceID)
-	a.mu.Unlock()
-	if err != nil {
-		return err
+	if sourceID == "" || !validDocumentID(documentID) {
+		return errors.New("invalid collaboration files")
 	}
 	var files map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 		return fmt.Errorf("invalid collaboration files: %w", err)
 	}
 	for fileID, data := range files {
-		if err := client.writeCollabFile(bucket, documentID, fileID, data); err != nil {
+		if fileID == "" || len(data) == 0 {
+			return errors.New("invalid collaboration file")
+		}
+		entry := collabOutboxEntry{SourceID: sourceID, Bucket: bucket, DocumentID: documentID, Kind: "blob", BlobID: fileID}
+		path := a.collabBlobPath(entry)
+		if existing, err := os.ReadFile(path); err == nil {
+			if !bytes.Equal(existing, data) {
+				return errors.New("collaboration blob key reused with different data")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		} else if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("could not create collaboration blob outbox: %w", err)
+		} else if err := atomicWrite(path, data); err != nil {
+			return fmt.Errorf("could not persist collaboration blob: %w", err)
+		}
+		if err := a.enqueueCollabOutbox(entry); err != nil {
 			return err
 		}
+	}
+	a.outboxMu.Lock()
+	pending := a.collabOutboxCountLocked(documentID)
+	a.outboxMu.Unlock()
+	a.emit("canvas:collab-outbox", map[string]any{"documentId": documentID, "pending": pending})
+	select {
+	case a.outboxWake <- struct{}{}:
+	default:
 	}
 	return nil
 }
@@ -984,7 +1297,14 @@ func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSeq
 			return CollabJoinResult{}, err
 		}
 	}
-	result := CollabJoinResult{SnapshotSequence: strconv.FormatUint(snapshotSequence, 10)}
+	a.outboxMu.Lock()
+	pendingLocalUpdates := a.collabOutboxCountLocked(documentID)
+	a.outboxMu.Unlock()
+	result := CollabJoinResult{
+		SnapshotSequence:      strconv.FormatUint(snapshotSequence, 10),
+		ReplayThroughSequence: strconv.FormatUint(snapshotSequence, 10),
+		PendingLocalUpdates:   pendingLocalUpdates,
+	}
 	if snapshotData != nil {
 		text := string(snapshotData)
 		result.Snapshot = &text
@@ -1032,6 +1352,7 @@ func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSeq
 		})
 	}, opts...)
 	if err != nil {
+		client.invalidateCollabStream(bucket)
 		return CollabJoinResult{}, err
 	}
 	presence, err := client.conn.Subscribe(collabPresenceSubject(bucket, documentID), func(msg *nats.Msg) {
@@ -1060,6 +1381,15 @@ func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSeq
 	}
 	a.subscriptions[key] = updates
 	a.subscriptions[key+"\x00presence"] = presence
+	if last, lastErr := client.js.GetLastMsg(stream, collabUpdateSubject(bucket, documentID)); lastErr == nil {
+		result.ReplayThroughSequence = strconv.FormatUint(last.Sequence, 10)
+	} else if !errors.Is(lastErr, nats.ErrMsgNotFound) {
+		_ = updates.Unsubscribe()
+		_ = presence.Unsubscribe()
+		delete(a.subscriptions, key)
+		delete(a.subscriptions, key+"\x00presence")
+		return CollabJoinResult{}, lastErr
+	}
 	return result, nil
 }
 
@@ -1085,7 +1415,12 @@ func (a *App) CollabAck(sourceID, bucket, documentID, subscriberID, sequence str
 		// Duplicate renderer acknowledgements are idempotent.
 		return nil
 	}
-	return msg.AckSync(nats.AckWait(5 * time.Second))
+	// The renderer has already validated and applied this update before calling
+	// us. AckSync adds one NATS round trip to every replayed scene, turning a
+	// minute of retained edits into hundreds of serial network RTTs on load.
+	// A normal ACK is safe here: if its protocol publish is lost, JetStream
+	// redelivers the update and renderer reconciliation is idempotent.
+	return msg.Ack()
 }
 
 // CollabLeave stops consuming a document while its canvas is closed. Without
@@ -1154,7 +1489,7 @@ func (a *App) CollabSnapshot(sourceID, bucket, boardID, documentID, sequenceText
 	}
 	data := []byte(jsonText)
 	snapshotName := collabSnapshotName(documentID, sequence, data)
-	if err := client.writeCollabSnapshot(bucket, documentID, sequence, data); err != nil {
+	if _, err := client.writeCollabSnapshotObject(bucket, documentID, sequence, data); err != nil {
 		return err
 	}
 	// Snapshot objects can be large. Re-fence immediately before touching the
@@ -1191,6 +1526,20 @@ func (a *App) CollabSnapshot(sourceID, bucket, boardID, documentID, sequenceText
 		_ = client.deleteObject(bucket, snapshotName)
 		_ = client.deleteObject(bucket, boardID)
 		return errors.New("collaboration board was renamed or deleted")
+	}
+	// Activate only after every potentially slow upload/materialization and all
+	// deletion/identity checks. Once indexed, this immutable object is never
+	// deleted, so the snapshot pointer cannot dangle if the lease is lost later.
+	owned, err = client.renewLock(bucket, documentID, owner, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		_ = client.deleteObject(bucket, snapshotName)
+		return errors.New("collaboration snapshot lease lost before activation")
+	}
+	if err := client.activateCollabSnapshot(bucket, documentID, snapshotName, sequence); err != nil {
+		return err
 	}
 	// Compact only through the previous snapshot, not the one just written. A
 	// joining client may have discovered that previous snapshot immediately
@@ -1447,7 +1796,15 @@ func (a *App) handleFilesystemChange() {
 	}
 	a.mu.Unlock()
 
-	pending := a.takePending()
+	pending, pendingErr := a.takePending()
+	if pendingErr != nil {
+		log.Printf("could not collect pending edits before external file merge: %v", pendingErr)
+		// Do not reopen the file from disk when the renderer could not provide its
+		// pending state. Doing so would replace potentially newer in-memory edits
+		// with the externally modified file—the same data-loss class that the
+		// navigation durability barrier is designed to prevent.
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.store == nil || !a.store.isLocal() || a.store.selection != selected {

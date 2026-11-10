@@ -41,6 +41,7 @@ import {
   onCanvasRename,
   onCanvasSetLibrary,
   onCollab,
+  onCollabOutbox,
   onRenderThumbnail,
   onTakePending,
   openLink,
@@ -58,8 +59,6 @@ const SAVE_DEBOUNCE_MS = 300
  * The latest trailing state is always retained behind an in-flight publish.
  */
 const COLLAB_UPDATE_INTERVAL_MS = 150
-/** Rare integrity repair. JetStream replay is the normal recovery path. */
-const COLLAB_FULL_SYNC_INTERVAL_MS = 5 * 60_000
 /** Compaction is less frequent than live repair; JetStream retains updates between snapshots. */
 const COLLAB_SNAPSHOT_INTERVAL_MS = 60_000
 const COLLAB_INITIAL_SNAPSHOT_DELAY_MS = 2_000
@@ -96,15 +95,17 @@ type CollabMessage =
   | {
       type: 'scene'
       from: string
+      messageId?: string
       elements: readonly ExcalidrawElement[]
       appState?: Partial<AppState>
+      appStateVersion?: AppStateVersion
       fileVersions?: Record<string, number>
       /** Immutable ObjectStore blob key for each advertised file version. */
       fileRefs?: Record<string, string>
       /** Compatibility with early v2 messages. */
       fileIds?: string[]
     }
-  | { type: 'scene-ref'; from: string; ref: string }
+  | { type: 'scene-ref'; from: string; ref: string; messageId?: string }
   | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser' }
 
 type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems; snapshotSequence: string }
@@ -128,6 +129,17 @@ function collaborationDisplayName(remotePeerId: string, nickname?: string): stri
 type PendingScene = { name: string; elements: readonly ExcalidrawElement[]; appState: AppState; files: BinaryFiles }
 type PendingCollabScene = Pick<PendingScene, 'elements' | 'appState' | 'files'> & { session: CollabSession }
 type BufferedCollabEvent = { data: string; sequence: string; delivery: string }
+type PersistenceStatus = 'idle' | 'unwritten' | 'writing' | 'queued' | 'retrying' | 'synced'
+type AppStateVersion = { counter: number; peerId: string }
+type CollabSnapshotData = ImportedDataState & { collaboration?: { appStateVersion?: AppStateVersion } }
+
+const PERSISTENCE_LABELS: Record<Exclude<PersistenceStatus, 'idle'>, string> = {
+  unwritten: 'Unwritten changes',
+  writing: 'Saving locally…',
+  queued: 'Saved locally · syncing…',
+  retrying: 'Saving changes · retrying…',
+  synced: 'Synced',
+}
 
 const MAX_COLLAB_MESSAGE_BYTES = 700_000
 
@@ -166,6 +178,20 @@ function collabFileRef(id: string, version: number, dataURL: string): string {
 
 function serialize(scene: PendingScene) {
   return { name: scene.name, json: serializeAsJSON(scene.elements, scene.appState, scene.files, 'local') }
+}
+
+/** Excalidraw exports intentionally remove deleted elements. Collaboration
+ * checkpoints must retain those tombstones until every stale peer has observed
+ * them, otherwise compaction can allow deleted shapes to be resurrected. */
+function serializeCollabSnapshot(scene: PendingScene, appStateVersion: AppStateVersion) {
+  const data = JSON.parse(serializeAsJSON(scene.elements, scene.appState, scene.files, 'local')) as Record<string, unknown>
+  data.elements = scene.elements
+  data.collaboration = { appStateVersion }
+  return JSON.stringify(data)
+}
+
+function compareAppStateVersion(a: AppStateVersion, b: AppStateVersion): number {
+  return a.counter === b.counter ? a.peerId.localeCompare(b.peerId) : a.counter - b.counter
 }
 
 function parseBoard(json: string): ImportedDataState {
@@ -272,6 +298,8 @@ export default function Canvas({
   const [collabRestart, setCollabRestart] = useState(0)
   /** Keep a stale snapshot covered until its retained updates are reconciled. */
   const [collabSynchronizing, setCollabSynchronizing] = useState(false)
+  /** Visible durability state for the open board. */
+  const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>('idle')
   const boardRef = useRef<OpenBoard | null>(null)
   boardRef.current = board
   const boardKey = board?.key ?? null
@@ -298,20 +326,32 @@ export default function Canvas({
   const collabRevision = useRef(0)
   /** Snapshots wait until every local durable publish has an acknowledged stream sequence. */
   const collabPublishesPending = useRef(0)
+  /** Durable events currently queued or waiting on referenced blobs/files. */
+  const collabAppliesPending = useRef(0)
+  const collabApplyChain = useRef<Promise<void>>(Promise.resolve())
+  /** Backend outbox count: zero is required before the UI may claim Synced. */
+  const collabOutboxPending = useRef(0)
+  /** Locally durable messages that have not yet been replayed and applied. */
+  const awaitingOwnMessages = useRef<Set<string>>(new Set())
   /** Latest local scene waiting for a bounded-rate collaboration publication. */
   const pendingCollab = useRef<PendingCollabScene | null>(null)
   const collabSyncTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const fullSyncTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const snapshotTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const initialSnapshotTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const snapshotInFlight = useRef<number | null>(null)
   const joinRetryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /** Highest durable update sequence incorporated into the local scene. */
   const collabSequence = useRef(0n)
+  /** Join-time stream watermark required before initial catch-up is complete. */
+  const collabReplayThrough = useRef(0n)
   /** Contiguous per-consumer delivery watermark; unlike stream sequence it has no cross-board gaps. */
   const collabDelivery = useRef(0n)
   /** Stream sequence of the latest applied remote background value. */
   const remoteAppStateSequence = useRef(0n)
+  const appStateClock = useRef(0)
+  const appStateVersion = useRef<AppStateVersion>({ counter: 0, peerId })
+  const hasModernAppStateVersion = useRef(false)
+  const publishedAppStateVersion = useRef<AppStateVersion>({ counter: -1, peerId: '' })
   const collabMessageCounter = useRef(0)
   /** File versions already stored in ObjectStore for this document. */
   const uploadedFileRefs = useRef<Map<string, string>>(new Map())
@@ -321,6 +361,8 @@ export default function Canvas({
   const publishedElementVersions = useRef<Map<string, string>>(new Map())
   /** At most one normal scene publication runs per session; newer input coalesces behind it. */
   const sessionPublishes = useRef<Map<string, number>>(new Map())
+  /** Every local-durability operation for a session, including forced navigation flushes. */
+  const sessionDurability = useRef<Map<string, Promise<void>>>(new Map())
   /** Set after scheduleCollabSync is declared, so a completed publish can drain coalesced input. */
   const resumeCollabSync = useRef<() => void>(() => undefined)
   /** Failed publications remain bound to their document and retry independently. */
@@ -335,6 +377,8 @@ export default function Canvas({
   /** Timer for the leader renewal / follower contest loop. */
   const lockTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const pending = useRef<PendingScene | null>(null)
+  /** Serial local disk writes; failed scenes remain in `pending` for retry/navigation. */
+  const localSaveInFlight = useRef<Promise<void>>(Promise.resolve())
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /** Latest cursor position waiting for the bandwidth-limited presence update. */
   const pendingPointer = useRef<Extract<CollabMessage, { type: 'pointer' }> | null>(null)
@@ -482,12 +526,16 @@ export default function Canvas({
       // Reuse the same IDs across retries so JetStream deduplicates a batch
       // whose publish acknowledgement was lost after the server stored it.
       const messageIds = batches.map(() => `${peerId}:${++collabMessageCounter.current}`)
+      const advertisedAppStateVersion = { ...appStateVersion.current }
+      const advertiseAppState = full || compareAppStateVersion(advertisedAppStateVersion, publishedAppStateVersion.current) > 0
+      if (advertiseAppState) hasModernAppStateVersion.current = true
 
       // Each logical publication retries independently. A session-wide key lets
       // a later successful update cancel an earlier failed update and strands
       // its Promise (which also blocks snapshots forever).
       const retryKey = `${session.documentId}:${session.generation}:${messageIds[0]}`
       if (collabSession.current?.generation === session.generation) collabPublishesPending.current++
+      if (collabSession.current?.generation === session.generation) setPersistenceStatus('writing')
       const run = async () => {
         if (Object.keys(changedFiles).length > 0) {
           await collabPutFiles(session.sourceId, session.bucket, session.documentId, JSON.stringify(changedFiles))
@@ -499,8 +547,10 @@ export default function Canvas({
           const message: CollabMessage = {
             type: 'scene',
             from: peerId,
+            messageId: messageIds[i],
             elements: batches[i],
-            appState: i === 0 ? { viewBackgroundColor: appState.viewBackgroundColor } : undefined,
+            appState: i === 0 && advertiseAppState ? { viewBackgroundColor: appState.viewBackgroundColor } : undefined,
+            appStateVersion: i === 0 && advertiseAppState ? advertisedAppStateVersion : undefined,
             fileVersions: i === 0
               ? Object.fromEntries(Object.entries(files).map(([id, file]) => [id, file.version ?? 0]))
               : undefined,
@@ -513,22 +563,27 @@ export default function Canvas({
             // an immutable blob and publish a small durable reference instead.
             const ref = `scene:${messageIds[i]}`
             await collabPutFiles(session.sourceId, session.bucket, session.documentId, JSON.stringify({ [ref]: message }))
-            encoded = JSON.stringify({ type: 'scene-ref', from: peerId, ref } satisfies CollabMessage)
+            encoded = JSON.stringify({ type: 'scene-ref', from: peerId, ref, messageId: messageIds[i] } satisfies CollabMessage)
           }
           // A publish acknowledgement does not mean this client has consumed
           // every earlier stream entry. Snapshot progress advances only in the
           // ordered subscription callback below, after each scene is applied.
+          awaitingOwnMessages.current.add(messageIds[i])
           await collabPublish(session.sourceId, session.bucket, session.documentId, messageIds[i], encoded)
         }
         if (collabSession.current?.generation === session.generation) {
           for (const element of changedElements) {
             publishedElementVersions.current.set(element.id, `${element.version}:${element.versionNonce}`)
           }
+          if (advertiseAppState && compareAppStateVersion(advertisedAppStateVersion, publishedAppStateVersion.current) > 0) {
+            publishedAppStateVersion.current = advertisedAppStateVersion
+          }
         }
         const existing = retryTimers.current.get(retryKey)
         if (existing) clearTimeout(existing)
         retryTimers.current.delete(retryKey)
         const wasRetrying = collabRetryingPublishes.current.delete(retryKey)
+        if (collabSession.current?.generation === session.generation) setPersistenceStatus('queued')
         if (wasRetrying && collabRetryingPublishes.current.size === 0 && !collabRepairing.current) {
           api.current?.setToast({ message: 'Collaboration changes saved', duration: 3000, closable: true })
         }
@@ -536,6 +591,7 @@ export default function Canvas({
       const attempt = (): Promise<void> => run().catch((err: unknown) => {
         log('error', `${errorContext}: ${String(err)}; retrying`)
         collabRetryingPublishes.current.add(retryKey)
+        if (collabSession.current?.generation === session.generation) setPersistenceStatus('retrying')
         if (!collabRepairing.current) {
           api.current?.setToast({ message: 'Changes pending — retrying…', duration: Infinity, closable: false })
         }
@@ -548,7 +604,7 @@ export default function Canvas({
           }, 1_000))
         })
       })
-      attempt()
+      const publication = attempt()
         .finally(() => {
           const remaining = Math.max(0, (sessionPublishes.current.get(sessionPublishKey) ?? 1) - 1)
           if (remaining === 0) {
@@ -564,23 +620,41 @@ export default function Canvas({
             collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
           }
         })
+      // Forced navigation can start a final full scene beside an older publish.
+      // Track both so the backend does not change boards until every update has
+      // reached the durable local outbox.
+      const previous = sessionDurability.current.get(sessionPublishKey) ?? Promise.resolve()
+      const durability = Promise.all([previous, publication]).then(() => undefined)
+      sessionDurability.current.set(sessionPublishKey, durability)
+      // Use both branches instead of dropping the Promise returned by `finally`:
+      // a terminal failure must reach the navigation barrier without also
+      // becoming an unrelated unhandled rejection in the renderer.
+      const clearDurability = () => {
+        if (sessionDurability.current.get(sessionPublishKey) === durability) {
+          sessionDurability.current.delete(sessionPublishKey)
+        }
+      }
+      durability.then(clearDurability, clearDurability)
+      return publication
     },
     [],
   )
 
   /** Publish the latest local scene at a bounded rate. Excalidraw elements carry
    * their own version/versionNonce conflict metadata and are reconciled by peers. */
-  const flushPendingCollab = useCallback(() => {
+  const flushPendingCollab = useCallback((force = false) => {
     clearTimeout(collabSyncTimer.current)
     collabSyncTimer.current = undefined
     const scene = pendingCollab.current
-    const instance = api.current
-    if (!scene || !instance) return false
+    // The pending scene is already an immutable onChange capture. Do not depend
+    // on the imperative API still being mounted: during teardown its ref may be
+    // cleared before the final durability barrier runs.
+    if (!scene) return null
     const sessionPublishKey = `${scene.session.documentId}:${scene.session.generation}`
-    if ((sessionPublishes.current.get(sessionPublishKey) ?? 0) > 0) {
+    if (!force && (sessionPublishes.current.get(sessionPublishKey) ?? 0) > 0) {
       // Keep replacing this with the newest onChange scene while one update is
       // in flight. Its completion will call resumeCollabSync and publish once.
-      return false
+      return null
     }
     pendingCollab.current = null
     collabScene.current = {
@@ -591,21 +665,45 @@ export default function Canvas({
     }
     collabDirty.current = true
     collabRevision.current++
-    publishCollabScene(scene.session, scene.elements, scene.appState, scene.files, 'Could not publish a collaboration update')
-    return true
+    // A forced navigation flush is a self-contained repair scene. It may run
+    // beside an older retry, so include every element and let Excalidraw's
+    // element versions deterministically keep the newest state on any arrival
+    // order.
+    return publishCollabScene(
+      scene.session,
+      scene.elements,
+      scene.appState,
+      scene.files,
+      'Could not publish a collaboration update',
+      force,
+    )
   }, [publishCollabScene])
 
   /** Send only the newest cursor position in each bandwidth window. */
   const flushPointer = useCallback(() => {
     clearTimeout(pointerTimer.current)
     pointerTimer.current = undefined
-    clearInterval(presenceTimer.current)
-    presenceTimer.current = undefined
-    peerLastSeen.current.clear()
     const message = pendingPointer.current
     pendingPointer.current = null
     const target = collabSession.current
     if (message && target) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
+  }, [])
+
+  const savePendingLocal = useCallback((): Promise<void> => {
+    const operation = localSaveInFlight.current.then(async () => {
+      while (!collabSession.current) {
+        const scene = pending.current
+        if (!scene) return
+        const { name, json } = serialize(scene)
+        await Promise.resolve(canvasChange(name, json))
+        // Never clear a newer edit that arrived while this disk write ran.
+        if (pending.current === scene) pending.current = null
+      }
+    })
+    // Keep the serialization chain usable after an error, while returning the
+    // real failure to the caller that initiated this save.
+    localSaveInFlight.current = operation.catch(() => undefined)
+    return operation
   }, [])
 
   const flush = useCallback(() => {
@@ -614,16 +712,11 @@ export default function Canvas({
     // Collaboration is persisted by durable updates plus immutable snapshots.
     // Local boards retain the ordinary debounced JSON write path.
     if (!collabSession.current) {
-      const scene = pending.current
-      pending.current = null
-      if (scene) {
-        const { name, json } = serialize(scene)
-        canvasChange(name, json)
-      }
+      void savePendingLocal().catch((err: unknown) => log('error', `Could not save canvas changes: ${String(err)}`))
     }
     flushView()
     return true
-  }, [flushPendingCollab, flushView])
+  }, [flushPendingCollab, flushView, savePendingLocal])
 
   /**
    * Batch rapid Excalidraw changes into one latest-scene publication per
@@ -644,7 +737,7 @@ export default function Canvas({
    * Reconcile a remote scene using Excalidraw's own collaboration semantics.
    * Remote updates never enter the local undo stack.
    */
-  const applyRemoteScene = useCallback((message: Extract<CollabMessage, { type: 'scene' }>, sequence = '0') => {
+  const applyRemoteScene = useCallback(async (message: Extract<CollabMessage, { type: 'scene' }>, sequence = '0'): Promise<void> => {
     const instance = api.current
     if (!instance) throw new Error('canvas is not ready')
     if (!Array.isArray(message.elements)) throw new Error('invalid collaboration scene')
@@ -664,11 +757,31 @@ export default function Canvas({
     const currentAppState = instance.getAppState()
     const messageSequence = sequenceMax(0n, sequence)
     const advertisedBackground = message.appState?.viewBackgroundColor
-    const remoteBackground = advertisedBackground !== undefined && messageSequence >= remoteAppStateSequence.current
-      ? advertisedBackground
-      : undefined
-    if (remoteBackground !== undefined) remoteAppStateSequence.current = messageSequence
-    const reconciledAppState = remoteBackground
+    const advertisedVersion = message.appStateVersion
+    let remoteBackground: AppState['viewBackgroundColor'] | undefined
+    if (
+      advertisedBackground !== undefined &&
+      advertisedVersion &&
+      Number.isSafeInteger(advertisedVersion.counter) &&
+      advertisedVersion.counter >= 0 &&
+      typeof advertisedVersion.peerId === 'string'
+    ) {
+      hasModernAppStateVersion.current = true
+      appStateClock.current = Math.max(appStateClock.current, advertisedVersion.counter)
+      if (compareAppStateVersion(advertisedVersion, appStateVersion.current) >= 0) {
+        appStateVersion.current = advertisedVersion
+        remoteBackground = advertisedBackground
+      }
+    } else if (
+      advertisedBackground !== undefined &&
+      !hasModernAppStateVersion.current &&
+      messageSequence >= remoteAppStateSequence.current
+    ) {
+      // Compatibility for updates written before explicit app-state clocks.
+      remoteAppStateSequence.current = messageSequence
+      remoteBackground = advertisedBackground
+    }
+    const reconciledAppState = remoteBackground !== undefined
       ? ({ ...currentAppState, viewBackgroundColor: remoteBackground } as AppState)
       : currentAppState
     // Set before updateScene: its onChange is synchronous in parts of Excalidraw.
@@ -685,7 +798,7 @@ export default function Canvas({
     collabRevision.current++
     instance.updateScene({
       elements: reconciled,
-      appState: remoteBackground ? ({ viewBackgroundColor: remoteBackground } as AppState) : undefined,
+      appState: remoteBackground !== undefined ? ({ viewBackgroundColor: remoteBackground } as AppState) : undefined,
       captureUpdate: CaptureUpdateAction.NEVER,
     })
     const target = collabSession.current
@@ -695,8 +808,8 @@ export default function Canvas({
       .map(([id]) => ({ id, ref: message.fileRefs?.[id] ?? id }))
     if (target && missingFiles.length > 0) {
       collabPublishesPending.current++
-      collabGetFiles(target.sourceId, target.bucket, target.documentId, missingFiles.map(({ ref }) => ref))
-        .then((json) => {
+      try {
+        const json = await collabGetFiles(target.sourceId, target.bucket, target.documentId, missingFiles.map(({ ref }) => ref))
           if (collabSession.current?.generation !== target.generation) return
           const blobs = JSON.parse(json) as BinaryFiles
           const received = Object.fromEntries(
@@ -714,17 +827,17 @@ export default function Canvas({
             collabDirty.current = true
             collabRevision.current++
           }
-        })
-        .catch((err: unknown) => {
-          if (collabSession.current?.generation !== target.generation) return
+      } catch (err) {
+        if (collabSession.current?.generation === target.generation) {
           log('error', `Could not load collaboration files: ${String(err)}; replaying the document`)
           requestCollabReplay('Reconnecting collaboration — retrieving shared files…')
-        })
-        .finally(() => {
-          if (collabSession.current?.generation === target.generation) {
-            collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
-          }
-        })
+        }
+        throw err
+      } finally {
+        if (collabSession.current?.generation === target.generation) {
+          collabPublishesPending.current = Math.max(0, collabPublishesPending.current - 1)
+        }
+      }
     }
     clearTimeout(timer.current)
     timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
@@ -753,13 +866,16 @@ export default function Canvas({
       !scene ||
       !isLeader.current ||
       !collabDirty.current ||
+      !collabJoinReady.current ||
+      collabRepairing.current ||
       sequence === 0n ||
       collabPublishesPending.current > 0 ||
+      collabAppliesPending.current > 0 ||
       snapshotInFlight.current === target.generation
     ) return
     const revision = collabRevision.current
     snapshotInFlight.current = target.generation
-    const { json } = serialize(scene)
+    const json = serializeCollabSnapshot(scene, appStateVersion.current)
     collabSnapshot(target.sourceId, target.bucket, target.boardId, target.documentId, sequence.toString(), json, target.subscriberId)
       .then(() => {
         if (collabRevision.current === revision) collabDirty.current = false
@@ -771,6 +887,12 @@ export default function Canvas({
   }, [])
 
   const teardownCollab = useCallback(() => {
+    // A normal bounded-rate flush coalesces behind an in-flight publish. During
+    // navigation there will be no next timer to drain that trailing scene, so
+    // force it into its own immutable-session publication before clearing the
+    // refs. The backend outbox makes the initiated publish durable and its retry
+    // remains routed to the board being left.
+    flushPendingCollab(true)
     const session = collabSession.current
     collabSession.current = null
     collabJoinReady.current = false
@@ -778,8 +900,6 @@ export default function Canvas({
     clearTimeout(collabSyncTimer.current)
     collabSyncTimer.current = undefined
     pendingCollab.current = null
-    clearInterval(fullSyncTimer.current)
-    fullSyncTimer.current = undefined
     clearInterval(snapshotTimer.current)
     snapshotTimer.current = undefined
     clearTimeout(initialSnapshotTimer.current)
@@ -790,15 +910,27 @@ export default function Canvas({
     clearTimeout(pointerTimer.current)
     pointerTimer.current = undefined
     pendingPointer.current = null
+    clearInterval(presenceTimer.current)
+    presenceTimer.current = undefined
+    peerLastSeen.current.clear()
     collabScene.current = null
     collabDirty.current = false
     collabRevision.current = 0
     collabPublishesPending.current = 0
+    collabAppliesPending.current = 0
+    collabApplyChain.current = Promise.resolve()
+    collabOutboxPending.current = 0
+    awaitingOwnMessages.current.clear()
     uploadedFileRefs.current.clear()
     publishedElementVersions.current.clear()
     collabSequence.current = 0n
+    collabReplayThrough.current = 0n
     collabDelivery.current = 0n
     remoteAppStateSequence.current = 0n
+    appStateClock.current = 0
+    appStateVersion.current = { counter: 0, peerId }
+    hasModernAppStateVersion.current = false
+    publishedAppStateVersion.current = { counter: -1, peerId: '' }
     // Stop the election loop and drop the leader lease (only if we still own it).
     clearInterval(lockTimer.current)
     lockTimer.current = undefined
@@ -816,7 +948,7 @@ export default function Canvas({
         log('error', `Could not leave collaboration: ${String(err)}`),
       )
     }
-  }, [])
+  }, [flushPendingCollab])
 
   /** Stop being the leader: stop renewing and stop writing the bucket. */
   const loseLeadership = useCallback(() => {
@@ -860,9 +992,9 @@ export default function Canvas({
   }, [becomeLeader, loseLeadership])
 
   /** Resolve a wire scene that was too large for one NATS message. */
-  const applySceneReference = useCallback((session: CollabSession, ref: string, sequence: string) => {
+  const applySceneReference = useCallback((session: CollabSession, ref: string, sequence: string): Promise<void> => {
     collabPublishesPending.current++
-    collabGetFiles(session.sourceId, session.bucket, session.documentId, [ref])
+    return collabGetFiles(session.sourceId, session.bucket, session.documentId, [ref])
       .then((json) => {
         if (collabSession.current?.generation !== session.generation) return
         const blobs = JSON.parse(json) as Record<string, unknown>
@@ -870,12 +1002,13 @@ export default function Canvas({
         if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'scene') {
           throw new Error('invalid referenced collaboration scene')
         }
-        applyRemoteScene(message as Extract<CollabMessage, { type: 'scene' }>, sequence)
+        return applyRemoteScene(message as Extract<CollabMessage, { type: 'scene' }>, sequence)
       })
       .catch((err: unknown) => {
         if (collabSession.current?.generation !== session.generation) return
         log('error', `Could not load a referenced collaboration scene: ${String(err)}; replaying the document`)
         requestCollabReplay('Reconnecting collaboration — retrieving a large update…')
+        throw err
       })
       .finally(() => {
         if (collabSession.current?.generation === session.generation) {
@@ -885,15 +1018,39 @@ export default function Canvas({
   }, [applyRemoteScene, requestCollabReplay])
 
   const acknowledgeCollabEvent = useCallback((session: CollabSession, event: BufferedCollabEvent) => {
-    if (event.sequence === '0') return
-    collabAck(session.sourceId, session.bucket, session.documentId, session.subscriberId, event.sequence)
-      .catch((err: unknown) => log('error', `Could not acknowledge collaboration update: ${String(err)}`))
+    if (event.sequence === '0') return Promise.resolve()
+    return collabAck(session.sourceId, session.bucket, session.documentId, session.subscriberId, event.sequence)
   }, [])
+
+  const markCollabSyncedIfComplete = useCallback((session: CollabSession) => {
+    const key = `${session.documentId}:${session.generation}`
+    if (
+      collabSession.current?.generation === session.generation &&
+      collabJoinReady.current &&
+      collabSequence.current >= collabReplayThrough.current &&
+      collabAppliesPending.current === 0
+    ) {
+      setCollabSynchronizing(false)
+      finishCollabRepair()
+    }
+    if (
+      collabSession.current?.generation === session.generation &&
+      collabJoinReady.current &&
+      !collabRepairing.current &&
+      collabOutboxPending.current === 0 &&
+      awaitingOwnMessages.current.size === 0 &&
+      collabSequence.current >= collabReplayThrough.current &&
+      collabAppliesPending.current === 0 &&
+      !pendingCollab.current &&
+      (sessionPublishes.current.get(key) ?? 0) === 0 &&
+      collabRetryingPublishes.current.size === 0
+    ) setPersistenceStatus('synced')
+  }, [finishCollabRepair])
 
   /** Apply one event after the join snapshot has established the replay baseline. */
   const handleCollabEvent = useCallback(
-    (session: CollabSession, event: BufferedCollabEvent) => {
-      if (collabSession.current?.generation !== session.generation) return
+    async (session: CollabSession, event: BufferedCollabEvent): Promise<void> => {
+      if (collabSession.current?.generation !== session.generation || !collabJoinReady.current) return
       let delivery = 0n
       if (event.sequence !== '0') {
         try {
@@ -901,7 +1058,10 @@ export default function Canvas({
         } catch {
           delivery = 0n
         }
-        if (delivery <= collabDelivery.current) return // duplicate renderer event
+        if (delivery <= collabDelivery.current) {
+          await acknowledgeCollabEvent(session, event)
+          return
+        }
         if (delivery !== collabDelivery.current + 1n) {
           // Durable messages are ACKed only below, after this renderer validates
           // them. A delivery gap still forces a fresh snapshot-based replay;
@@ -940,54 +1100,78 @@ export default function Canvas({
         requestCollabReplay('Reconnecting collaboration — repairing an unsupported update…')
         return
       }
-      if (event.sequence !== '0') {
-        collabDelivery.current = delivery
-        collabSequence.current = sequenceMax(collabSequence.current, event.sequence)
-      }
-      // Durable publishes and Core presence both echo to their sender. The
-      // sequence is recorded above, but the local scene/cursor is already shown.
-      if ('from' in message && message.from === peerId) {
-        acknowledgeCollabEvent(session, event)
-        return
-      }
       if (message.type === 'scene') {
         if (!Array.isArray(message.elements) || typeof message.from !== 'string') return
         try {
-          applyRemoteScene(message, event.sequence)
-          acknowledgeCollabEvent(session, event)
+          // Do not skip our own retained events. They are already visible during
+          // the live session, but after reopening the board its baseline snapshot
+          // may predate them. Reconciliation is version-based and idempotent.
+          await applyRemoteScene(message, event.sequence)
         } catch (err) {
           log('error', `Could not reconcile a remote scene: ${String(err)}; replaying the document`)
           requestCollabReplay('Reconnecting collaboration — reconciling shared changes…')
+          return
         }
-        return
-      }
-      if (message.type === 'scene-ref') {
+      } else if (message.type === 'scene-ref') {
         if (typeof message.from !== 'string' || typeof message.ref !== 'string') return
-        applySceneReference(session, message.ref, event.sequence)
-        // The renderer has durably received the reference. If resolving it
-        // fails, applySceneReference forces a fresh retained-log replay.
-        acknowledgeCollabEvent(session, event)
-        return
-      }
-      if (
+        // ACK only after the referenced scene is fetched and reconciled. This
+        // keeps a missing ObjectStore blob replayable instead of falsely marking
+        // the update as synchronized.
+        try {
+          await applySceneReference(session, message.ref, event.sequence)
+        } catch {
+          return
+        }
+      } else if (
         message.type !== 'pointer' ||
         typeof message.peerId !== 'string' ||
         typeof message.x !== 'number' ||
         typeof message.y !== 'number' ||
         (message.tool !== 'pointer' && message.tool !== 'laser')
-      ) return
-      if (message.peerId === peerId) return
-      peerLastSeen.current.set(message.peerId, Date.now())
-      const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
-      collaborators.set(message.peerId as SocketId, {
-        pointer: { x: message.x, y: message.y, tool: message.tool },
-        username: collaborationDisplayName(message.peerId, message.nickname),
-        color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
-      })
-      api.current?.updateScene({ collaborators })
+      ) {
+        return
+      } else {
+        if (message.peerId === peerId) return
+        peerLastSeen.current.set(message.peerId, Date.now())
+        const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
+        collaborators.set(message.peerId as SocketId, {
+          pointer: { x: message.x, y: message.y, tool: message.tool },
+          username: collaborationDisplayName(message.peerId, message.nickname),
+          color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
+        })
+        api.current?.updateScene({ collaborators })
+        return
+      }
+      if (message.from === peerId && message.messageId) {
+        awaitingOwnMessages.current.delete(message.messageId)
+      }
+      // This is the contiguous-applied commit point. Referenced scenes and all
+      // file dependencies have completed; only now may compaction cover it.
+      if (collabSession.current?.generation !== session.generation || !collabJoinReady.current) return
+      collabDelivery.current = delivery
+      collabSequence.current = sequenceMax(collabSequence.current, event.sequence)
+      try {
+        await acknowledgeCollabEvent(session, event)
+      } catch (err) {
+        log('error', `Could not acknowledge collaboration update: ${String(err)}`)
+      }
     },
     [acknowledgeCollabEvent, applyRemoteScene, applySceneReference, requestCollabReplay],
   )
+
+  const enqueueCollabEvent = useCallback((session: CollabSession, event: BufferedCollabEvent): Promise<void> => {
+    if (event.sequence === '0') return handleCollabEvent(session, event)
+    collabAppliesPending.current++
+    const operation = collabApplyChain.current.then(() => handleCollabEvent(session, event))
+    const tracked = operation.finally(() => {
+      if (collabSession.current?.generation === session.generation) {
+        collabAppliesPending.current = Math.max(0, collabAppliesPending.current - 1)
+        markCollabSyncedIfComplete(session)
+      }
+    })
+    collabApplyChain.current = tracked.catch(() => undefined)
+    return tracked
+  }, [handleCollabEvent, markCollabSyncedIfComplete])
 
   useEffect(() => {
     let key = 0
@@ -999,6 +1183,7 @@ export default function Canvas({
         try {
           const data = parseBoard(json)
           setBoard({ name, data, key: ++key, library: library.current, snapshotSequence: snapshotSequence ?? '0' })
+          setPersistenceStatus('idle')
           boardNameRef.current = name
           lastVersion.current = null
           lastBackground.current = data.appState?.viewBackgroundColor
@@ -1053,18 +1238,40 @@ export default function Canvas({
       }),
       onTakePending((requestId) => {
         clearTimeout(timer.current)
-        flushPendingCollab()
+        const session = collabSession.current
+        const publication = flushPendingCollab(true)
         flushView()
         // Durable collaboration updates/snapshots own remote-board persistence;
-        // returning a full JSON scene here would restore the old multi-writer race.
-        const scene = collabSession.current ? null : pending.current
-        pending.current = null
-        if (scene) {
-          const { name, json } = serialize(scene)
-          pendingResult(requestId, name, json)
-        } else {
-          pendingResult(requestId, null, null)
+        // returning a full JSON scene here would restore the old multi-writer
+        // race. Do not acknowledge navigation until all current publications
+        // have reached the backend's durable local outbox.
+        if (session) {
+          const key = `${session.documentId}:${session.generation}`
+          const durability = sessionDurability.current.get(key) ?? publication ?? Promise.resolve()
+          setPersistenceStatus('writing')
+          durability
+            .then(() => {
+              if (collabSession.current?.generation === session.generation) setPersistenceStatus('queued')
+              return pendingResult(requestId, null, null, null)
+            })
+            .catch((err: unknown) => {
+              if (collabSession.current?.generation === session.generation) setPersistenceStatus('retrying')
+              return pendingResult(requestId, null, null, String(err))
+            })
+          return
         }
+        // Wait for any debounced disk write already in flight. If it failed,
+        // `pending` still contains the exact scene and is returned to the
+        // backend navigation/quit barrier for a synchronous retry. Do not clear
+        // it here; onCanvasOpen clears it only after navigation succeeds.
+        localSaveInFlight.current.then(() => {
+          const scene = pending.current
+          if (scene) {
+            const { name, json } = serialize(scene)
+            return pendingResult(requestId, name, json, null)
+          }
+          return pendingResult(requestId, null, null, null)
+        }).catch((err: unknown) => pendingResult(requestId, null, null, String(err)))
       }),
 	      onAICanvasOperations((targetBoardId, json) => {
 	        if (targetBoardId !== boardIdRef.current) return
@@ -1083,7 +1290,7 @@ export default function Canvas({
 	        }
 	      }),
     ]
-    canvasReady()
+    Promise.resolve(canvasReady()).catch((err: unknown) => log('error', `Could not open the selected board: ${String(err)}`))
     window.addEventListener('pagehide', flush)
     return () => {
       window.removeEventListener('pagehide', flush)
@@ -1140,17 +1347,18 @@ export default function Canvas({
     collabJoinReady.current = false
     bufferedCollabEvents.current = []
     collabJoin(session.sourceId, session.bucket, session.documentId, session.subscriberId, currentBoard.snapshotSequence)
-      .then((result) => {
+      .then(async (result) => {
         if (cancelled || collabSession.current?.generation !== session.generation) {
           // Cleanup may have run before the asynchronous backend join created
           // its subscriptions. Leave again after completion to avoid a leak.
           collabLeave(session.sourceId, session.bucket, session.documentId, session.subscriberId).catch(() => undefined)
           return
         }
-        collabSequence.current = sequenceMax(collabSequence.current, result.snapshotSequence)
+        collabOutboxPending.current = result.pendingLocalUpdates ?? 0
+        collabReplayThrough.current = sequenceMax(0n, result.replayThroughSequence ?? result.snapshotSequence)
         if (result.snapshot) {
           try {
-            const data = parseBoard(result.snapshot)
+            const data = parseBoard(result.snapshot) as CollabSnapshotData
             const snapshotFiles = data.files ?? {}
             if (Object.keys(snapshotFiles).length > 0) {
               api.current?.addFiles(Object.values(snapshotFiles))
@@ -1163,15 +1371,17 @@ export default function Canvas({
               from: 'snapshot',
               elements: data.elements ?? [],
               appState: data.appState ?? undefined,
+              appStateVersion: data.collaboration?.appStateVersion,
               fileVersions: Object.fromEntries(Object.entries(snapshotFiles).map(([id, file]) => [id, file.version ?? 0])),
             }
-            applyRemoteScene(message, result.snapshotSequence)
+            await applyRemoteScene(message, result.snapshotSequence)
           } catch (err) {
             log('error', `Could not apply the collaboration snapshot: ${String(err)}`)
             requestCollabReplay('Reconnecting collaboration — repairing the saved scene…')
             return
           }
         }
+        collabSequence.current = sequenceMax(collabSequence.current, result.snapshotSequence)
         // Events can arrive as soon as the backend subscribes, before the join
         // result reaches us. Apply the snapshot first, then replay those events
         // in exact stream order. Presence (sequence 0) is harmless in this list.
@@ -1183,15 +1393,16 @@ export default function Canvas({
           return aa < bb ? -1 : aa > bb ? 1 : 0
         })
         collabJoinReady.current = true
-        for (const event of buffered) handleCollabEvent(session, event)
+        await Promise.all(buffered.map((event) => enqueueCollabEvent(session, event)))
         // A buffered event may have exposed a delivery gap or invalid payload
         // and already requested a fresh replay. Do not start a second set of
         // timers or report recovery for the abandoned session.
         if (!collabJoinReady.current) return
-        finishCollabRepair()
-        setCollabSynchronizing(false)
-        sendFullScene()
-        fullSyncTimer.current = setInterval(sendFullScene, COLLAB_FULL_SYNC_INTERVAL_MS)
+        markCollabSyncedIfComplete(session)
+        // Only seed a genuinely new collaboration log. Existing documents are
+        // recovered from snapshots plus retained updates; republishing the whole
+        // scene on every join wastes bandwidth and reconciliation time.
+        if (collabReplayThrough.current === 0n && collabSequence.current === 0n) sendFullScene()
         snapshotTimer.current = setInterval(writeSnapshot, COLLAB_SNAPSHOT_INTERVAL_MS)
         presenceTimer.current = setInterval(() => {
           const instance = api.current
@@ -1234,8 +1445,9 @@ export default function Canvas({
     collabRestart,
     flushPendingCollab,
     finishCollabRepair,
-    handleCollabEvent,
+    enqueueCollabEvent,
     lockLoop,
+    markCollabSyncedIfComplete,
     sendFullScene,
     showCollabRepairing,
     teardownCollab,
@@ -1255,7 +1467,7 @@ export default function Canvas({
         bufferedCollabEvents.current.push(event)
         return
       }
-      handleCollabEvent(session, event)
+      void enqueueCollabEvent(session, event)
     }).then((u) => {
       if (cancelled) u()
       else unlisten = u
@@ -1264,7 +1476,29 @@ export default function Canvas({
       cancelled = true
       unlisten?.()
     }
-  }, [handleCollabEvent])
+  }, [enqueueCollabEvent])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    onCollabOutbox((documentId, count) => {
+      const session = collabSession.current
+      if (!session || session.documentId !== documentId) return
+      collabOutboxPending.current = Math.max(0, count)
+      if (count > 0) {
+        setPersistenceStatus('queued')
+      } else {
+        markCollabSyncedIfComplete(session)
+      }
+    }).then((u) => {
+      if (cancelled) u()
+      else unlisten = u
+    })
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [markCollabSyncedIfComplete])
 
   const onChange = (elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     if (!board) return
@@ -1308,13 +1542,21 @@ export default function Canvas({
       fileSignature === lastFileSignature.current &&
       background === lastBackground.current
     ) return
+    const backgroundChanged = background !== lastBackground.current
     lastVersion.current = version
     lastFileSignature.current = fileSignature
     lastBackground.current = background
     const session = collabSession.current
     if (session) {
+      if (backgroundChanged) {
+        const counter = Math.max(appStateClock.current, appStateVersion.current.counter) + 1
+        appStateClock.current = counter
+        appStateVersion.current = { counter, peerId }
+        hasModernAppStateVersion.current = true
+      }
       // Keep only the newest drag/resize snapshot and publish it at a bounded
       // rate. Peers reconcile Excalidraw's element versions and tombstones.
+      setPersistenceStatus('unwritten')
       pendingCollab.current = { session, elements, appState, files }
       scheduleCollabSync()
     } else {
@@ -1405,6 +1647,12 @@ export default function Canvas({
             <span className="canvas-syncing-spinner" aria-hidden="true" />
             <span>Syncing latest changes…</span>
           </div>
+        </div>
+      )}
+      {collabDocumentId && persistenceStatus !== 'idle' && !showCollabSync && (
+        <div className={`canvas-persistence-status ${persistenceStatus}`} role="status" aria-live="polite">
+          <span className="canvas-persistence-dot" aria-hidden="true" />
+          <span>{PERSISTENCE_LABELS[persistenceStatus]}</span>
         </div>
       )}
     </div>

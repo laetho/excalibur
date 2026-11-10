@@ -130,6 +130,11 @@ type CollabJoinResult struct {
 	// JetStream sequences are decimal strings because JavaScript numbers lose
 	// integer precision above 2^53-1.
 	SnapshotSequence string `json:"snapshotSequence"`
+	// Last retained update for this document when the consumer was created.
+	// The renderer does not report catch-up before this sequence is applied.
+	ReplayThroughSequence string `json:"replayThroughSequence"`
+	// Durable local updates that have not yet received a JetStream publish ACK.
+	PendingLocalUpdates int `json:"pendingLocalUpdates"`
 }
 
 type Notice struct {

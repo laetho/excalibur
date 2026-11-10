@@ -947,7 +947,11 @@ func (a *App) canvasDataForAI(boardID string) (string, []byte, error) {
 	if !selected {
 		return "", nil, errAIChatBoardChanged
 	}
-	if pending := a.takePending(); pending != nil {
+	pending, err := a.takePending()
+	if err != nil {
+		return "", nil, err
+	}
+	if pending != nil {
 		if pending.Name+fileExtension != boardID {
 			return "", nil, errAIChatBoardChanged
 		}

@@ -242,9 +242,9 @@ export default function Shell() {
     getState()
       .then((snapshot) => {
         setSnapshot(snapshot)
-        // Open the selected board on startup (mirrors Swift's `.task(id: store.selection)`),
-        // and again after a web-content reload, like Swift's `canvas.onReloaded`.
-        if (snapshot.selection) selectBoard(snapshot.selection)
+        // CanvasReady reopens the persisted selection after the canvas event
+        // listeners are installed. Do not navigate here: startup has no prior
+        // canvas whose pending changes need the navigation durability barrier.
       })
       .catch((err) => log('error', `Could not load the boards: ${String(err)}`))
     const unlistens: Promise<() => void>[] = [

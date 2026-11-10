@@ -1266,6 +1266,55 @@ button.secondary:hover {
   to { transform: rotate(360deg); }
 }
 
+/* Small, non-blocking durability indicator. It distinguishes edits that still
+ * live only in the renderer from locally journaled and remotely synced state. */
+.canvas-persistence-status {
+  position: absolute;
+  /* Excalidraw's main-menu trigger is a 40px button at 12px/12px. Keep the
+   * status centered beside it instead of covering the canvas controls below. */
+  top: 32px;
+  left: 64px;
+  transform: translateY(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 999px;
+  background: var(--modal-bg);
+  color: var(--text-secondary);
+  box-shadow: var(--modal-shadow);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.canvas-persistence-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.canvas-persistence-status.unwritten .canvas-persistence-dot,
+.canvas-persistence-status.retrying .canvas-persistence-dot {
+  background: #e8590c;
+}
+
+.canvas-persistence-status.writing .canvas-persistence-dot,
+.canvas-persistence-status.queued .canvas-persistence-dot {
+  background: #f59f00;
+  animation: canvas-persistence-pulse 1s ease-in-out infinite alternate;
+}
+
+.canvas-persistence-status.synced .canvas-persistence-dot {
+  background: #2f9e44;
+}
+
+@keyframes canvas-persistence-pulse {
+  to { opacity: 0.35; }
+}
+
 /* Let the native window background show through until Excalidraw has rendered. */
 html,
 body {

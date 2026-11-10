@@ -96,8 +96,8 @@ export const openLink = (url: string) => app().OpenLink(url)
 export const showAlert = (message: string) => app().ShowAlert(message)
 export const log = (level: 'error' | 'info', message: string) => app().Log(level, message)
 export const thumbnailResult = (requestId: string, dataUrl: string | null) => app().ThumbnailResult(requestId, dataUrl)
-export const pendingResult = (requestId: string, name: string | null, json: string | null) =>
-  app().PendingResult(requestId, name, json)
+export const pendingResult = (requestId: string, name: string | null, json: string | null, errorMessage: string | null = null) =>
+  app().PendingResult(requestId, name, json, errorMessage)
 export const selectBoard = (id: string) => app().SelectBoard(id)
 export const createBoard = (name: string) => app().CreateBoard(name)
 export const renameBoard = (id: string, name: string) => app().RenameBoard(id, name)
@@ -222,6 +222,13 @@ export function onAIStream(cb: (requestId: string, kind: 'answer' | 'thinking', 
 export function onCollab(cb: (documentId: string, subscriberId: string, data: string, sequence: string, delivery: string) => void): Promise<Unlisten> {
   return listen<{ documentId: string; subscriberId: string; data: string; sequence: string; delivery: string }>('canvas:collab', (payload) =>
     cb(payload.documentId, payload.subscriberId, payload.data, payload.sequence, payload.delivery),
+  )
+}
+
+/** Number of locally durable updates still waiting for a JetStream publish ACK. */
+export function onCollabOutbox(cb: (documentId: string, pending: number) => void): Promise<Unlisten> {
+  return listen<{ documentId: string; pending: number }>('canvas:collab-outbox', (payload) =>
+    cb(payload.documentId, payload.pending),
   )
 }
 

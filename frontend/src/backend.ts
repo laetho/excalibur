@@ -57,7 +57,7 @@ export const collabSend = (sourceId: string, bucket: string, documentId: string,
 /** Subscribes to durable updates and returns the newest snapshot. */
 export const collabJoin = (sourceId: string, bucket: string, documentId: string, subscriberId: string, baselineSequence: string) => {
   if (isWails) return ipc.collabJoin(sourceId, bucket, documentId, subscriberId, baselineSequence)
-  return Promise.resolve({ snapshot: null, snapshotSequence: baselineSequence })
+  return Promise.resolve({ snapshot: null, snapshotSequence: baselineSequence, replayThroughSequence: baselineSequence, pendingLocalUpdates: 0 })
 }
 
 export const collabLeave = (sourceId: string, bucket: string, documentId: string, subscriberId: string) => {
@@ -112,6 +112,11 @@ export const collabReleaseLock = (sourceId: string, bucket: string, documentId: 
 /** A collaboration message arrived for the open board. No-op in the SwiftUI app. */
 export function onCollab(cb: (documentId: string, subscriberId: string, data: string, sequence: string, delivery: string) => void): Promise<Unlisten> {
   if (isWails) return ipc.onCollab(cb)
+  return Promise.resolve(() => {})
+}
+
+export function onCollabOutbox(cb: (documentId: string, pending: number) => void): Promise<Unlisten> {
+  if (isWails) return ipc.onCollabOutbox(cb)
   return Promise.resolve(() => {})
 }
 
@@ -196,8 +201,8 @@ export function onTakePending(cb: (requestId: string) => void): Promise<Unlisten
   return Promise.resolve(() => {})
 }
 
-export function pendingResult(requestId: string, name: string | null, json: string | null) {
-  if (isWails) return ipc.pendingResult(requestId, name, json)
+export function pendingResult(requestId: string, name: string | null, json: string | null, errorMessage: string | null = null) {
+  if (isWails) return ipc.pendingResult(requestId, name, json, errorMessage)
   const slot = pendingSlots.get(requestId)
   if (slot) slot.value = name !== null && json !== null ? { name, json } : null
 }

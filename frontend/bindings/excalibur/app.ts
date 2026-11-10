@@ -209,8 +209,8 @@ export function OpenLink(rawURL: string): $CancellablePromise<void> {
     return $Call.ByID(3484688677, rawURL);
 }
 
-export function PendingResult(requestID: string, name: string | null, jsonText: string | null): $CancellablePromise<void> {
-    return $Call.ByID(3262191997, requestID, name, jsonText);
+export function PendingResult(requestID: string, name: string | null, jsonText: string | null, errorMessage: string | null): $CancellablePromise<void> {
+    return $Call.ByID(3262191997, requestID, name, jsonText, errorMessage);
 }
 
 export function PickFile(extensions: string[] | null): $CancellablePromise<$models.PickFileResult | null> {

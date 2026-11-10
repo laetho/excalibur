@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
 //go:embed all:frontend/dist
@@ -13,9 +14,26 @@ var assets embed.FS
 
 func main() {
 	backend := newApp()
-	wailsApp := application.New(application.Options{
+	var wailsApp *application.App
+	wailsApp = application.New(application.Options{
 		Name:        "Excalibur",
 		Description: "The board of legend",
+		ShouldQuit: func() bool {
+			if backend.shutdownReady.Load() {
+				return true
+			}
+			if backend.shutdownSaving.CompareAndSwap(false, true) {
+				go func() {
+					if err := backend.prepareShutdown(); err != nil {
+						log.Printf("could not save changes before quit: %v", err)
+						backend.shutdownSaving.Store(false)
+						return
+					}
+					wailsApp.Quit()
+				}()
+			}
+			return false
+		},
 		Services: []application.Service{
 			application.NewService(backend),
 		},
@@ -40,6 +58,26 @@ func main() {
 		URL:                "/",
 		Zoom:               defaultApplicationZoom,
 		ZoomControlEnabled: true,
+	})
+	// ServiceShutdown runs after the webview is gone, which is too late to ask
+	// Canvas for its pending scene. Cancel the first close request, persist while
+	// the renderer is alive, then close for real. A failed barrier leaves the
+	// window open so the user can retry instead of silently losing changes.
+	var removeCloseHook func()
+	removeCloseHook = backend.window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		event.Cancel()
+		if !backend.shutdownSaving.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			if err := backend.prepareShutdown(); err != nil {
+				log.Printf("could not save changes before quit: %v", err)
+				backend.shutdownSaving.Store(false)
+				return
+			}
+			removeCloseHook()
+			backend.window.Close()
+		}()
 	})
 	backend.window.SetMenu(menu)
 
@@ -75,7 +113,7 @@ func nativeMenu(app *App) *application.Menu {
 	if runtime.GOOS != "darwin" {
 		file.AddSeparator()
 		add(file, "Settings…", "CmdOrCtrl+,", "settings")
-		file.Add("Quit").SetAccelerator("CmdOrCtrl+Q").OnClick(func(*application.Context) { app.wailsApp.Quit() })
+		file.Add("Quit").SetAccelerator("CmdOrCtrl+Q").OnClick(func(*application.Context) { app.window.Close() })
 	}
 
 	if runtime.GOOS == "darwin" {

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,10 +23,12 @@ import (
 )
 
 type natsClient struct {
-	config NatsServerConfig
-	conn   *nats.Conn
-	js     nats.JetStreamContext
-	jsm    jetstream.JetStream
+	config   NatsServerConfig
+	conn     *nats.Conn
+	js       nats.JetStreamContext
+	jsm      jetstream.JetStream
+	streamMu sync.RWMutex
+	streams  map[string]struct{}
 }
 
 func connectNATS(config NatsServerConfig) (*natsClient, error) {
@@ -54,7 +57,7 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 		nc.Close()
 		return nil, fmt.Errorf("could not initialise JetStream on %q: %w", config.Name, err)
 	}
-	return &natsClient{config: config, conn: nc, js: js, jsm: jsm}, nil
+	return &natsClient{config: config, conn: nc, js: js, jsm: jsm, streams: map[string]struct{}{}}, nil
 }
 
 // normalizeNatsServerConfig validates authentication before a connection is
@@ -161,6 +164,9 @@ func (c *natsClient) deleteBucket(bucket string) error {
 	if err = c.js.DeleteStream(collabStreamName(bucket)); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
 		log.Printf("could not delete collaboration history for removed bucket %q: %v", bucket, err)
 	}
+	c.streamMu.Lock()
+	delete(c.streams, collabStreamName(bucket))
+	c.streamMu.Unlock()
 	return nil
 }
 
@@ -262,8 +268,25 @@ func collabPresenceSubject(bucket, documentID string) string {
 	return "wb.crdt.v2." + collabBucketToken(bucket) + "." + documentID + ".presence"
 }
 
+func (c *natsClient) invalidateCollabStream(bucket string) {
+	c.streamMu.Lock()
+	delete(c.streams, collabStreamName(bucket))
+	c.streamMu.Unlock()
+}
+
 func (c *natsClient) ensureCollabStream(bucket string) (string, error) {
 	name := collabStreamName(bucket)
+	c.streamMu.RLock()
+	_, ready := c.streams[name]
+	c.streamMu.RUnlock()
+	if ready {
+		return name, nil
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if _, ready = c.streams[name]; ready {
+		return name, nil
+	}
 	if info, err := c.js.StreamInfo(name); err == nil {
 		// Updates must not expire independently of per-document snapshot progress.
 		// Older builds configured time/size limits which could silently discard the
@@ -276,6 +299,7 @@ func (c *natsClient) ensureCollabStream(bucket string) (string, error) {
 				return "", fmt.Errorf("could not make collaboration stream %q lossless: %w", name, updateErr)
 			}
 		}
+		c.streams[name] = struct{}{}
 		return name, nil
 	} else if !errors.Is(err, nats.ErrStreamNotFound) {
 		return "", err
@@ -294,10 +318,12 @@ func (c *natsClient) ensureCollabStream(bucket string) (string, error) {
 	if err != nil {
 		// Another client may have created the stream after our StreamInfo call.
 		if _, infoErr := c.js.StreamInfo(name); infoErr == nil {
+			c.streams[name] = struct{}{}
 			return name, nil
 		}
 		return "", fmt.Errorf("could not create collaboration stream %q: %w", name, err)
 	}
+	c.streams[name] = struct{}{}
 	return name, nil
 }
 
@@ -315,6 +341,9 @@ func (c *natsClient) publishCollabUpdate(bucket, documentID, messageID string, d
 	}
 	ack, err := c.js.PublishMsg(msg)
 	if err != nil {
+		// The stream may have been deleted or reconfigured outside this process.
+		// Revalidate on the next retry rather than pinning a stale cache entry.
+		c.invalidateCollabStream(bucket)
 		return 0, err
 	}
 	return ack.Sequence, nil
@@ -445,14 +474,23 @@ func (c *natsClient) readCollabFile(bucket, documentID, fileID string) ([]byte, 
 	return c.readObject(bucket, collabFileName(documentID, fileID))
 }
 
-func (c *natsClient) writeCollabSnapshot(bucket, documentID string, sequence uint64, data []byte) error {
+// writeCollabSnapshotObject uploads an immutable candidate without making it
+// discoverable. The caller must re-check its lease and all board deletion/
+// identity fences before activating the index.
+func (c *natsClient) writeCollabSnapshotObject(bucket, documentID string, sequence uint64, data []byte) (string, error) {
 	if !validDocumentID(documentID) || sequence == 0 {
-		return errors.New("invalid collaboration snapshot")
+		return "", errors.New("invalid collaboration snapshot")
 	}
 	name := collabSnapshotName(documentID, sequence, data)
 	if err := c.writeObject(bucket, name, data); err != nil {
-		return err
+		return "", err
 	}
+	return name, nil
+}
+
+// activateCollabSnapshot is the commit point. Callers must never delete this
+// object after the CAS index can reference it.
+func (c *natsClient) activateCollabSnapshot(bucket, documentID, name string, sequence uint64) error {
 	if err := c.updateCollabSnapshotIndex(bucket, documentID, collabSnapshotIndex{Name: name, Sequence: sequence}); err != nil {
 		return err
 	}
@@ -480,6 +518,17 @@ func (c *natsClient) writeCollabSnapshot(bucket, documentID string, sequence uin
 		}
 	}
 	return nil
+}
+
+// writeCollabSnapshot is retained for internal callers and tests that do not
+// participate in the frontend lease protocol. Production compaction uploads,
+// re-fences, and activates explicitly in App.CollabSnapshot.
+func (c *natsClient) writeCollabSnapshot(bucket, documentID string, sequence uint64, data []byte) error {
+	name, err := c.writeCollabSnapshotObject(bucket, documentID, sequence, data)
+	if err != nil {
+		return err
+	}
+	return c.activateCollabSnapshot(bucket, documentID, name, sequence)
 }
 
 func (c *natsClient) latestCollabSnapshot(bucket, documentID string) ([]byte, uint64, error) {
