@@ -472,7 +472,8 @@ select,
   flex: 1 1 0;
   min-height: 80px;
   overflow-y: auto;
-  padding: 0 8px 8px;
+  /* Same 16px gutter as the bucket pills, so both span the same width. */
+  padding: 0 16px 8px;
 }
 
 .board-row {
