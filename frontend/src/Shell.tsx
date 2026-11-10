@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
+import { CloseIcon, FilterIcon, MenuIcon, PlusIcon, RefreshIcon, SettingsIcon } from './icons'
 import {
   activateSource,
   addBucket,
@@ -393,7 +394,7 @@ export default function Shell() {
           </button>
           <div className="view-options">
             <button className="icon-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards and show thumbnails">
-              ☰
+              <MenuIcon />
             </button>
             {viewOptionsOpen && (
               <div className="popover">
@@ -414,10 +415,11 @@ export default function Shell() {
             )}
           </div>
           <button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings (⌘,)">
-            ⚙
+            <SettingsIcon />
           </button>
         </div>
         <div className="search">
+          <FilterIcon className="search-icon" />
           <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
         </div>
         <div className="sources">
@@ -430,10 +432,10 @@ export default function Shell() {
                 disabled={refreshingSources}
                 title="Refresh buckets"
               >
-                ↻
+                <RefreshIcon />
               </button>
               <button className="icon-button" onClick={() => setAddServerOpen(true)} title="Add a NATS server">
-                +
+                <PlusIcon />
               </button>
             </div>
           </div>
@@ -770,7 +772,7 @@ function SourcesNav({
             <span className="source-name-text">{source.name}</span>
             {source.kind === 'nats' && (
               <button className="icon-button source-add" onClick={() => onNewBucket(source)} title="New Bucket…">
-                +
+                <PlusIcon />
               </button>
             )}
           </div>
@@ -972,7 +974,7 @@ function AIChatOverlay({
           </select>
         </div>
         <button className="icon-button" onClick={onClose} title="Close AI assistant" aria-label="Close AI assistant">
-          ×
+          <CloseIcon />
         </button>
       </header>
       <div className="ai-chat-messages" aria-live="polite">

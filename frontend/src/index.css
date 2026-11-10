@@ -7,27 +7,30 @@ body,
   overflow: hidden;
 }
 
-/* The shell follows the system appearance; the canvas has its own setting (CanvasAppearance). */
+/* The shell follows the system appearance; the canvas has its own setting (CanvasAppearance).
+   Tones are lifted straight from Excalidraw's design tokens so the sidebar reads
+   as part of the same app as the canvas (Assistant type, purple primary, the
+   same neutral surface ramp and modal shadow). */
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --sidebar-bg: #f2f2f7;
-  --sidebar-border: rgba(0, 0, 0, 0.12);
-  --text: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --row-hover: rgba(0, 0, 0, 0.06);
-  --row-selected: #d0e2ff;
-  --row-selected-text: #1d1d1f;
-  --accent: #0a84ff;
-  --accent-strong: #0066d6;
+  --bg: #ffffff; /* --default-bg-color */
+  --sidebar-bg: #ffffff; /* --island-bg-color */
+  --sidebar-border: #f1f0ff; /* --default-border-color = --color-surface-high */
+  --text: #1b1b1f; /* --color-on-surface */
+  --text-secondary: #5c5c5c; /* --color-gray-70 */
+  --row-hover: #f1f0ff; /* --color-surface-high */
+  --row-selected: #e3e2fe; /* --color-primary-light */
+  --row-selected-text: #030064; /* --color-on-primary-container */
+  --accent: #6965db; /* --color-primary */
+  --accent-strong: #5b57d1; /* --color-primary-darker */
   --accent-text: #ffffff;
-  --danger: #a32118;
-  --danger-bg: #fff0ee;
-  --danger-border: #d98b84;
+  --danger: #c92a2a;
+  --danger-bg: #fff0f0; /* --color-danger-background */
+  --danger-border: rgba(217, 139, 132, 0.9);
   --input-bg: rgba(0, 0, 0, 0.05);
-  --input-border: rgba(0, 0, 0, 0.15);
-  --modal-bg: #ffffff;
-  --modal-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  --input-border: rgba(0, 0, 0, 0.12);
+  --modal-bg: #ffffff; /* --island-bg-color */
+  --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
   --backdrop: rgba(0, 0, 0, 0.35);
   --thumbnail-border: rgba(0, 0, 0, 0.15);
   --divider: rgba(0, 0, 0, 0.1);
@@ -35,24 +38,24 @@ body,
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1e1e1e;
-    --sidebar-bg: #232326;
-    --sidebar-border: rgba(255, 255, 255, 0.12);
-    --text: #f5f5f7;
-    --text-secondary: #a1a1a6;
-    --danger: #ff938a;
-    --danger-bg: rgba(255, 91, 79, 0.14);
-    --danger-border: rgba(255, 147, 138, 0.55);
-    --row-hover: rgba(255, 255, 255, 0.07);
-    --row-selected: #1f4f9e;
-    --row-selected-text: #ffffff;
-    --input-bg: rgba(255, 255, 255, 0.08);
-    --input-border: rgba(255, 255, 255, 0.2);
-    --modal-bg: #2c2c2e;
-    --modal-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+    --bg: #121212; /* --default-bg-color */
+    --sidebar-bg: #232329; /* --island-bg-color */
+    --sidebar-border: hsl(245, 10%, 21%); /* --color-surface-high */
+    --text: #e3e3e8; /* --color-on-surface */
+    --text-secondary: #b8b8b8; /* --color-gray-40 */
+    --danger: #ffa8a5; /* --color-danger */
+    --danger-bg: rgba(255, 168, 165, 0.12);
+    --danger-border: rgba(255, 168, 165, 0.4);
+    --row-hover: hsl(245, 10%, 21%); /* --color-surface-high */
+    --row-selected: #403e6a; /* --color-surface-primary-container */
+    --row-selected-text: #e0dfff; /* --color-on-primary-container */
+    --input-bg: hsl(240, 8%, 15%); /* --color-surface-low */
+    --input-border: rgba(255, 255, 255, 0.14);
+    --modal-bg: #232329; /* --island-bg-color */
+    --modal-shadow: 0px 100px 80px rgba(0, 0, 0, 0.07), 0px 41.7776px 33.4221px rgba(0, 0, 0, 0.0503), 0px 22.3363px 17.869px rgba(0, 0, 0, 0.0417), 0px 12.5216px 10.0172px rgba(0, 0, 0, 0.035), 0px 6.6501px 5.32008px rgba(0, 0, 0, 0.0283), 0px 2.76726px 2.21381px rgba(0, 0, 0, 0.0197);
     --backdrop: rgba(0, 0, 0, 0.5);
     --thumbnail-border: rgba(255, 255, 255, 0.2);
-    --divider: rgba(255, 255, 255, 0.12);
+    --divider: hsl(245, 10%, 21%);
   }
 }
 
@@ -61,7 +64,7 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: Assistant, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
@@ -155,13 +158,18 @@ select,
 }
 
 .icon-button {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
 }
 
 .icon-button:hover {
@@ -225,12 +233,25 @@ select,
 /* MARK: - Search */
 
 .search {
+  position: relative;
   padding: 0 8px 8px;
+}
+
+.search .search-icon {
+  position: absolute;
+  left: 19px;
+  top: 0;
+  bottom: 8px;
+  margin: auto 0;
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+  pointer-events: none;
 }
 
 .search input {
   width: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px 7px 32px;
   border-radius: 7px;
   border: 1px solid transparent;
   background: var(--input-bg);
@@ -271,10 +292,14 @@ select,
 
 .sources-header .icon-button {
   padding: 0;
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   line-height: 1;
-  font-size: 14px;
+}
+
+.sources-header .icon-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .sources-header-actions {

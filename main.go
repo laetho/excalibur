@@ -88,9 +88,6 @@ func main() {
 
 func nativeMenu(app *App) *application.Menu {
 	root := application.NewMenu()
-	if runtime.GOOS == "darwin" {
-		root.AddRole(application.AppMenu)
-	}
 	emit := func(id string) func(*application.Context) {
 		return func(*application.Context) { app.emit("menu:"+id, map[string]any{}) }
 	}
@@ -99,6 +96,25 @@ func nativeMenu(app *App) *application.Menu {
 		if accelerator != "" {
 			item.SetAccelerator(accelerator)
 		}
+	}
+
+	if runtime.GOOS == "darwin" {
+		// The menu under the app name in the menu bar. macOS makes the first
+		// top-level menu the application menu; roles resolve inside it, so we
+		// build it by hand to place Settings (the native equivalent of the
+		// sidebar gear) right after About, as standard macOS apps do.
+		appMenu := root.AddSubmenu("Excalibur")
+		appMenu.AddRole(application.About)
+		appMenu.AddSeparator()
+		add(appMenu, "Settings…", "CmdOrCtrl+,", "settings")
+		appMenu.AddSeparator()
+		appMenu.AddRole(application.ServicesMenu)
+		appMenu.AddSeparator()
+		appMenu.AddRole(application.Hide)
+		appMenu.AddRole(application.HideOthers)
+		appMenu.AddRole(application.UnHide)
+		appMenu.AddSeparator()
+		appMenu.AddRole(application.Quit)
 	}
 
 	file := root.AddSubmenu("File")
