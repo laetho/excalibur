@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -734,7 +735,8 @@ func TestImportCredentialsFileCopiesPrivately(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "NATS USER JWT") {
 		t.Fatalf("copy unreadable or wrong: %v", err)
 	}
-	if info, _ := os.Stat(dst); info.Mode().Perm() != 0o600 {
+	// Windows has no Unix permission bits; files are protected by ACLs there.
+	if info, _ := os.Stat(dst); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("expected mode 0600, got %v", info.Mode().Perm())
 	}
 }
