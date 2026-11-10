@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
+import { CloseIcon, DatabaseIcon, FilterIcon, FolderIcon, PlusIcon, RefreshIcon, SearchIcon } from './icons'
 import {
   activateSource,
   addBucket,
@@ -235,6 +236,9 @@ export default function Shell() {
       case 'settings':
         setSettingsOpen(true)
         break
+      case 'add-server':
+        setAddServerOpen(true)
+        break
     }
   }, [])
 
@@ -387,13 +391,14 @@ export default function Shell() {
         }}
         onDrop={handleDrop}
       >
-        <div className="sidebar-toolbar">
-          <button className="new-board" onClick={() => setCreating(true)} title="New Board (Ctrl+N)">
-            New Board
-          </button>
+        <div className="search-row">
+          <div className="search">
+            <SearchIcon className="search-icon" />
+            <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
+          </div>
           <div className="view-options">
-            <button className="icon-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards and show thumbnails">
-              ☰
+            <button className="icon-button filter-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards">
+              <FilterIcon />
             </button>
             {viewOptionsOpen && (
               <div className="popover">
@@ -405,55 +410,36 @@ export default function Shell() {
                     Sort by Date Edited
                   </button>
                 </div>
-                <div className="popover-divider" />
-                <label className="popover-toggle">
-                  <input type="checkbox" checked={snapshot.showThumbnails} onChange={(event) => setShowThumbnails(event.target.checked)} />
-                  Show Thumbnails
-                </label>
               </div>
             )}
           </div>
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings (⌘,)">
-            ⚙
+        </div>
+        <div className="sidebar-divider" role="separator" />
+        <SourcesNav
+          sources={snapshot.sources}
+          activeSource={snapshot.activeSource}
+          activeGroup={snapshot.activeGroup}
+          switchingSource={switchingSource}
+          refreshing={refreshingSources}
+          onRefresh={handleRefreshSources}
+          onActivateSource={handleActivateSource}
+          onDropBoard={handleDropBoard}
+          onNewBucket={setNewBucketFor}
+          onSourceMenu={(event, source) => {
+            event.preventDefault()
+            setSourceMenu({ x: event.clientX, y: event.clientY, source })
+          }}
+          onBucketMenu={(event, source, group) => {
+            event.preventDefault()
+            setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
+          }}
+        />
+        <div className="sidebar-divider" role="separator" />
+        <div className="boards-header">
+          <span className="boards-title">Boards</span>
+          <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
+            <PlusIcon />
           </button>
-        </div>
-        <div className="search">
-          <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
-        </div>
-        <div className="sources">
-          <div className="sources-header">
-            <span className="sources-title">Sources</span>
-            <div className="sources-header-actions">
-              <button
-                className={`icon-button${refreshingSources ? ' refreshing' : ''}`}
-                onClick={handleRefreshSources}
-                disabled={refreshingSources}
-                title="Refresh buckets"
-              >
-                ↻
-              </button>
-              <button className="icon-button" onClick={() => setAddServerOpen(true)} title="Add a NATS server">
-                +
-              </button>
-            </div>
-          </div>
-          <SourcesNav
-            sources={snapshot.sources}
-            activeSource={snapshot.activeSource}
-            activeGroup={snapshot.activeGroup}
-            switchingSource={switchingSource}
-            onActivateSource={handleActivateSource}
-            onDropBoard={handleDropBoard}
-            onNewBucket={setNewBucketFor}
-            onSourceMenu={(event, source) => {
-              event.preventDefault()
-              setSourceMenu({ x: event.clientX, y: event.clientY, source })
-            }}
-            onBucketMenu={(event, source, group) => {
-              event.preventDefault()
-              setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
-            }}
-          />
         </div>
         <div className="board-list">
           {snapshot.boards.length === 0 ? (
@@ -741,6 +727,8 @@ function SourcesNav({
   activeSource,
   activeGroup,
   switchingSource,
+  refreshing,
+  onRefresh,
   onActivateSource,
   onDropBoard,
   onNewBucket,
@@ -751,6 +739,8 @@ function SourcesNav({
   activeSource: string
   activeGroup: string
   switchingSource: string | null
+  refreshing: boolean
+  onRefresh: () => void
   onActivateSource: (sourceId: string, groupId: string) => void
   onDropBoard: (boardId: string, targetSource: string, targetGroup: string) => void
   onNewBucket: (source: SourceInfo) => void
@@ -758,63 +748,96 @@ function SourcesNav({
   onBucketMenu: (event: React.MouseEvent, source: SourceInfo, group: GroupInfo) => void
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
+
+  // Shared drop/activation behaviour for anything that represents a group: the
+  // local folder card and every bucket row inside a server card.
+  const groupProps = (source: SourceInfo, group: GroupInfo) => ({
+    onClick: () => onActivateSource(source.id, group.id),
+    disabled: switchingSource !== null,
+    'aria-busy': switchingSource === `${source.id}\u0000${group.id}`,
+    'aria-current': activeSource === source.id && activeGroup === group.id ? ('true' as const) : undefined,
+    onDragEnter: (event: React.DragEvent) => {
+      event.preventDefault()
+      setDragOver(`${source.id}\u0000${group.id}`)
+    },
+    onDragLeave: () => setDragOver((key) => (key === `${source.id}\u0000${group.id}` ? null : key)),
+    onDragOver: (event: React.DragEvent) => {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+    },
+    onDrop: (event: React.DragEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setDragOver(null)
+      const boardId = event.dataTransfer.getData('text/plain')
+      if (boardId) onDropBoard(boardId, source.id, group.id)
+    },
+    title: group.id,
+  })
+  const groupState = (source: SourceInfo, group: GroupInfo) =>
+    `${activeSource === source.id && activeGroup === group.id ? ' active' : ''}${
+      dragOver === `${source.id}\u0000${group.id}` ? ' drag-over' : ''
+    }`
+
   return (
-    <div className="sources-list">
-      {sources.map((source) => (
-        <div key={source.id} className="source">
-          <div
-            className="source-name"
-            title={source.kind === 'nats' ? `${source.name} (right-click for options)` : undefined}
-            onContextMenu={source.kind === 'nats' ? (event) => onSourceMenu(event, source) : undefined}
-          >
-            <span className="source-name-text">{source.name}</span>
-            {source.kind === 'nats' && (
-              <button className="icon-button source-add" onClick={() => onNewBucket(source)} title="New Bucket…">
-                +
+    <div className="sources">
+      {sources.map((source) => {
+        if (source.kind === 'local') {
+          // The local source is a single folder: render it as one clickable card.
+          const group = source.groups[0]
+          if (!group) return null
+          return (
+            <button key={source.id} className={`source-row local${groupState(source, group)}`} {...groupProps(source, group)}>
+              <FolderIcon className="source-icon" />
+              <span className="source-title">{lastPathComponent(group.name) || group.name}</span>
+              <span className="source-badge">Local</span>
+            </button>
+          )
+        }
+        return (
+          <div key={source.id} className="source-server">
+            <div
+              className="source-row"
+              title={`${source.name} (right-click for options)`}
+              onContextMenu={(event) => onSourceMenu(event, source)}
+            >
+              <DatabaseIcon className="source-icon" />
+              <span className="source-title">{source.name}</span>
+              <span className="row-actions">
+                <button
+                  className={`icon-button row-action${refreshing ? ' refreshing' : ''}`}
+                  onClick={onRefresh}
+                  disabled={refreshing}
+                  title="Refresh buckets"
+                  aria-label="Refresh buckets"
+                >
+                  <RefreshIcon />
+                </button>
+                <button className="icon-button row-action" onClick={() => onNewBucket(source)} title="New Bucket…" aria-label="New Bucket">
+                  <PlusIcon />
+                </button>
+              </span>
+            </div>
+            {source.groups.length === 0 ? (
+              <button className="source-empty" onClick={() => onNewBucket(source)}>
+                No buckets yet. Create one…
               </button>
+            ) : (
+              source.groups.map((group) => (
+                <button
+                  key={group.id}
+                  className={`source-group${groupState(source, group)}`}
+                  onContextMenu={(event) => onBucketMenu(event, source, group)}
+                  {...groupProps(source, group)}
+                >
+                  <span className="source-group-name">{group.name}</span>
+                  {activeSource === source.id && activeGroup === group.id && <span className="source-active-dot" aria-hidden="true" />}
+                </button>
+              ))
             )}
           </div>
-          {source.kind === 'nats' && source.groups.length === 0 && (
-            <button className="source-empty" onClick={() => onNewBucket(source)}>
-              No buckets yet. Create one…
-            </button>
-          )}
-          {source.groups.map((group) => (
-            <button
-              key={group.id}
-              className={`source-group${activeSource === source.id && activeGroup === group.id ? ' active' : ''}${
-                dragOver === group.id ? ' drag-over' : ''
-              }`}
-              onClick={() => onActivateSource(source.id, group.id)}
-              onContextMenu={source.kind === 'nats' ? (event) => onBucketMenu(event, source, group) : undefined}
-              disabled={switchingSource !== null}
-              aria-busy={switchingSource === `${source.id}\u0000${group.id}`}
-              onDragEnter={(event) => {
-                event.preventDefault()
-                setDragOver(group.id)
-              }}
-              onDragLeave={() => setDragOver((g) => (g === group.id ? null : g))}
-              onDragOver={(event) => {
-                event.preventDefault()
-                event.dataTransfer.dropEffect = 'copy'
-              }}
-              onDrop={(event) => {
-                event.preventDefault()
-                event.stopPropagation()
-                setDragOver(null)
-                const boardId = event.dataTransfer.getData('text/plain')
-                if (boardId) onDropBoard(boardId, source.id, group.id)
-              }}
-              title={group.id}
-            >
-              <span className="source-group-icon">
-                {switchingSource === `${source.id}\u0000${group.id}` ? '…' : group.kind === 'bucket' ? '◈' : '▸'}
-              </span>
-              {group.name}
-            </button>
-          ))}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -972,7 +995,7 @@ function AIChatOverlay({
           </select>
         </div>
         <button className="icon-button" onClick={onClose} title="Close AI assistant" aria-label="Close AI assistant">
-          ×
+          <CloseIcon />
         </button>
       </header>
       <div className="ai-chat-messages" aria-live="polite">
@@ -1674,6 +1697,13 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
             Boards are plain .excalidraw files. To version them, make the folder a git repository and commit when you like. Avoid folders
             inside Documents, Desktop or Downloads: macOS then won’t let Show in Finder select the file.
           </p>
+          <label className="settings-row settings-toggle-row">
+            <span className="settings-label">Thumbnails</span>
+            <span className="settings-value settings-toggle-value">
+              <input type="checkbox" checked={snapshot.showThumbnails} onChange={(event) => setShowThumbnails(event.target.checked)} />
+              Show board thumbnails in the sidebar
+            </span>
+          </label>
         </section>
         <section>
           <h3>Application</h3>
