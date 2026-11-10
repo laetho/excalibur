@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
-import { CloseIcon, DatabaseIcon, FilterIcon, FolderIcon, PlusIcon, RefreshIcon, SearchIcon } from './icons'
+import {
+  AppearanceIcon,
+  CloseIcon,
+  DatabaseIcon,
+  FilterIcon,
+  FolderIcon,
+  InfoIcon,
+  PlusIcon,
+  RefreshIcon,
+  SearchIcon,
+  SparklesIcon,
+  UsersIcon,
+} from './icons'
 import {
   activateSource,
   addBucket,
@@ -121,7 +133,12 @@ function lastPathComponent(path: string): string {
   return parts[parts.length - 1] ?? path
 }
 
-const APPEARANCE_TITLES: Record<CanvasAppearance, string> = { system: 'Match System', light: 'Light', dark: 'Dark' }
+const APPEARANCE_TITLES: Record<CanvasAppearance, string> = { system: 'System', light: 'Light', dark: 'Dark' }
+
+const PLATFORM = typeof navigator === 'undefined' ? '' : navigator.platform || navigator.userAgent
+const IS_MAC = /Mac/i.test(PLATFORM)
+/** The platform's name for its file manager, for "Show in …" actions. */
+const FILE_MANAGER = IS_MAC ? 'Finder' : /Win/i.test(PLATFORM) ? 'File Explorer' : 'File Manager'
 
 /** The raw server id behind a NATS source id ("nats:<id>"). */
 function rawServerId(sourceId: string): string {
@@ -161,6 +178,7 @@ export default function Shell() {
   const [bucketDeleteError, setBucketDeleteError] = useState<string | null>(null)
   /** The NATS server a new bucket is being created on. */
   const [newBucketFor, setNewBucketFor] = useState<SourceInfo | null>(null)
+  const [removingServer, setRemovingServer] = useState<SourceInfo | null>(null)
   const [aiOpen, setAIOpen] = useState(false)
   const closeAI = useCallback(() => setAIOpen(false), [])
 
@@ -549,6 +567,7 @@ export default function Shell() {
       )}
       {addServerOpen && <AddServerDialog onClose={() => setAddServerOpen(false)} />}
       {newBucketFor && <NewBucketDialog source={newBucketFor} onClose={() => setNewBucketFor(null)} />}
+      {removingServer && <RemoveServerDialog source={removingServer} onClose={() => setRemovingServer(null)} />}
       {sourceMenu && (
         <div className="context-menu" style={{ left: sourceMenu.x, top: sourceMenu.y }} role="menu">
           <button
@@ -564,13 +583,12 @@ export default function Shell() {
           <button
             role="menuitem"
             className="destructive"
-            title="The boards stay on the server; add it again to see them."
             onClick={() => {
-              removeNatsServer(rawServerId(sourceMenu.source.id)).catch((err) => log('error', `Could not remove the server: ${String(err)}`))
+              setRemovingServer(sourceMenu.source)
               setSourceMenu(null)
             }}
           >
-            Remove Server
+            Remove Server…
           </button>
         </div>
       )}
@@ -602,9 +620,11 @@ export default function Shell() {
             <p className="alert-message">
               This permanently deletes the empty bucket and its collaboration history from {deletingBucket.source.name}.
             </p>
-            {bucketDeleteError && <p className="form-error">{bucketDeleteError}</p>}
+            {bucketDeleteError && <p className="problem">{bucketDeleteError}</p>}
             <div className="modal-actions">
-              <button disabled={bucketDeleteBusy} onClick={() => setDeletingBucket(null)}>Cancel</button>
+              <button className="secondary" disabled={bucketDeleteBusy} onClick={() => setDeletingBucket(null)}>
+                Cancel
+              </button>
               <button
                 className="destructive"
                 disabled={bucketDeleteBusy}
@@ -1186,6 +1206,7 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
   const [password, setPassword] = useState('')
   const [credentialsFile, setCredentialsFile] = useState('')
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     inputRef.current?.focus()
@@ -1194,6 +1215,8 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
   const trimmedName = name.trim()
   const trimmedUrl = url.trim()
   const problem = !trimmedName ? 'Enter a name.' : !trimmedUrl ? 'Enter a server URL.' : null
+  // Only point out missing fields once the user has started filling in the form.
+  const touched = Boolean(trimmedName || trimmedUrl)
 
   const confirm = async () => {
     if (problem || busy) return
@@ -1207,11 +1230,13 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
       credentialsFile,
       buckets: [],
     }
+    setError(null)
     try {
       await addNatsServer(config)
       onClose()
     } catch (err) {
       log('error', `Could not add the NATS server: ${String(err)}`)
+      setError(String(err))
       setBusy(false)
     }
   }
@@ -1228,7 +1253,7 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
         <input
           ref={inputRef}
           value={name}
-          placeholder="Name, e.g. Office server"
+          placeholder="Name, e.g. Office"
           onChange={(event) => setName(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') confirm()
@@ -1273,7 +1298,9 @@ function AddServerDialog({ onClose }: { onClose: () => void }) {
             }
           }}
         />
-        <p className={problem ? 'problem' : 'hint'}>{problem ?? 'Authenticate with username/password or a standard NATS .creds file.'}</p>
+        <p className={error || (touched && problem) ? 'problem' : 'hint'}>
+          {error ?? (touched ? problem : null) ?? 'Sign in with a username and password, or choose a NATS credentials file.'}
+        </p>
         <div className="modal-actions">
           <button className="secondary" disabled={busy} onClick={onClose}>
             Cancel
@@ -1339,8 +1366,8 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
     >
       <div className="modal" role="dialog" aria-modal="true">
         <h2>Edit NATS Server</h2>
-        <input ref={inputRef} value={name} placeholder="Server name" onChange={(event) => setName(event.target.value)} />
-        <input value={url} placeholder="nats://host:port" onChange={(event) => setUrl(event.target.value)} />
+        <input ref={inputRef} value={name} placeholder="Name, e.g. Office" onChange={(event) => setName(event.target.value)} />
+        <input value={url} placeholder="URL, e.g. nats://localhost:4222" onChange={(event) => setUrl(event.target.value)} />
         <input
           value={username}
           autoComplete="username"
@@ -1352,7 +1379,7 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
           value={password}
           type="password"
           autoComplete="new-password"
-          placeholder={server.hasPassword && !removePassword ? 'Saved — enter a new password to replace' : 'Password (optional)'}
+          placeholder={server.hasPassword && !removePassword ? 'Saved. Enter a new password to replace it.' : 'Password (optional)'}
           disabled={Boolean(credentialsFile) || removePassword}
           onChange={(event) => {
             setPassword(event.target.value)
@@ -1388,7 +1415,7 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
           }}
         />
         <p className={error || problem ? 'problem' : 'hint'}>
-          {error ?? problem ?? 'The new connection is verified before these settings replace the saved server.'}
+          {error ?? problem ?? 'The connection is tested before your changes are saved.'}
         </p>
         <div className="modal-actions">
           <button className="secondary" disabled={busy} onClick={onClose}>
@@ -1546,125 +1573,97 @@ function NameDialog({
   )
 }
 
-/** Settings: the boards folder, the canvas appearance, and NATS servers. */
+// MARK: - Settings
+
+type SettingsTab = 'appearance' | 'boards' | 'collaboration' | 'servers' | 'ai' | 'about'
+
+const SETTINGS_TABS: { id: SettingsTab; title: string; description: string; Icon: (props: React.SVGProps<SVGSVGElement>) => React.ReactElement }[] = [
+  { id: 'appearance', title: 'Appearance', description: 'Adjust how the canvas and the interface look.', Icon: AppearanceIcon },
+  { id: 'boards', title: 'Boards', description: 'Choose where boards on this computer are saved.', Icon: FolderIcon },
+  {
+    id: 'collaboration',
+    title: 'Collaboration',
+    description: 'Control how you appear to others when you edit a shared board together.',
+    Icon: UsersIcon,
+  },
+  {
+    id: 'servers',
+    title: 'NATS Servers',
+    description: 'Connect to NATS servers to store boards in shared buckets and collaborate in real time.',
+    Icon: DatabaseIcon,
+  },
+  {
+    id: 'ai',
+    title: 'AI Assistant',
+    description: 'Chat with Dramallama about the open board, using any OpenAI-compatible API.',
+    Icon: SparklesIcon,
+  },
+  { id: 'about', title: 'About', description: 'Version and credits.', Icon: InfoIcon },
+]
+
+/** One labelled setting: label and help text on the left, the control on the right (or below when `stacked`). */
+function SettingsField({
+  label,
+  help,
+  htmlFor,
+  stacked = false,
+  children,
+}: {
+  label: string
+  help?: React.ReactNode
+  htmlFor?: string
+  stacked?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`settings-field${stacked ? ' stacked' : ''}`}>
+      <div className="settings-field-text">
+        <label className="settings-field-label" htmlFor={htmlFor}>
+          {label}
+        </label>
+        {help && <p className="settings-field-help">{help}</p>}
+      </div>
+      <div className="settings-field-control">{children}</div>
+    </div>
+  )
+}
+
+/** Settings, split into tabs with a vertical navigation list on the left. */
 function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose: () => void }) {
-  const [serverName, setServerName] = useState('')
-  const [serverUrl, setServerUrl] = useState('')
-  const [serverUsername, setServerUsername] = useState('')
-  const [serverPassword, setServerPassword] = useState('')
-  const [serverCredentialsFile, setServerCredentialsFile] = useState('')
-  const [collaborationNickname, setCollaborationNicknameValue] = useState(snapshot.collaborationNickname)
-  const [collaborationNicknameError, setCollaborationNicknameError] = useState<string | null>(null)
-  const [collaborationNicknameSaving, setCollaborationNicknameSaving] = useState(false)
-  const [bucketFor, setBucketFor] = useState<string | null>(null)
-  const [bucketName, setBucketName] = useState('')
+  const [tab, setTab] = useState<SettingsTab>('appearance')
+  const [addingServer, setAddingServer] = useState(false)
   const [editingServer, setEditingServer] = useState<NatsServerSettings | null>(null)
-  const [aiEnabled, setAIEnabled] = useState(snapshot.ai.enabled)
-  const [aiBaseUrl, setAIBaseUrl] = useState(snapshot.ai.baseUrl)
-  const [aiModel, setAIModel] = useState(snapshot.ai.model)
-  const [aiApiKey, setAIApiKey] = useState('')
-  const [clearAIKey, setClearAIKey] = useState(false)
-  const [aiModels, setAIModels] = useState<AIModel[]>([])
-  const [aiModelsLoading, setAIModelsLoading] = useState(false)
-  const [aiSaving, setAISaving] = useState(false)
-  const [aiError, setAIError] = useState<string | null>(null)
-  const loadedInitialAIModels = useRef(false)
+  const [removingServer, setRemovingServer] = useState<SourceInfo | null>(null)
+  const [newBucketFor, setNewBucketFor] = useState<SourceInfo | null>(null)
+  const tabRefs = useRef(new Map<SettingsTab, HTMLButtonElement>())
+  const nestedDialogOpen = addingServer || editingServer !== null || removingServer !== null || newBucketFor !== null
 
-  const natsSources = snapshot.sources.filter((source) => source.kind === 'nats')
-
-  const saveCollaborationNickname = async () => {
-    setCollaborationNicknameSaving(true)
-    setCollaborationNicknameError(null)
-    try {
-      await setCollaborationNickname(collaborationNickname)
-      setCollaborationNicknameValue(collaborationNickname.trim())
-    } catch (err) {
-      setCollaborationNicknameError(String(err))
-    } finally {
-      setCollaborationNicknameSaving(false)
-    }
-  }
-
-  const loadAIModels = useCallback(async () => {
-    setAIModelsLoading(true)
-    setAIError(null)
-    try {
-      const models = await discoverAIModels(aiBaseUrl.trim(), aiApiKey, clearAIKey)
-      setAIModels(models)
-      setAIModel((current) => {
-        const match = models.find((item) => item.model === current || item.id === current)
-        return match?.model ?? models[0]?.model ?? ''
-      })
-    } catch (err) {
-      setAIModels([])
-      setAIError(String(err))
-    } finally {
-      setAIModelsLoading(false)
-    }
-  }, [aiApiKey, aiBaseUrl, clearAIKey])
-
+  // Escape closes Settings, unless one of its own dialogs is open on top.
   useEffect(() => {
-    if (loadedInitialAIModels.current || !aiEnabled || !aiBaseUrl.trim()) return
-    loadedInitialAIModels.current = true
-    void loadAIModels()
-  }, [aiBaseUrl, aiEnabled, loadAIModels])
+    if (nestedDialogOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [nestedDialogOpen, onClose])
 
-  const addServer = async () => {
-    const name = serverName.trim()
-    const url = serverUrl.trim()
-    if (!name || !url) return
-    const config: NatsServerConfig = {
-      id: newServerId(),
-      name,
-      url,
-      username: serverUsername.trim(),
-      password: serverPassword,
-      credentialsFile: serverCredentialsFile,
-      buckets: [],
-    }
-    try {
-      await addNatsServer(config)
-      setServerName('')
-      setServerUrl('')
-      setServerUsername('')
-      setServerPassword('')
-      setServerCredentialsFile('')
-    } catch (err) {
-      log('error', `Could not add the NATS server: ${String(err)}`)
-    }
+  // Arrow keys move between tabs, as in a native vertical tab list.
+  const onTabKeyDown = (event: React.KeyboardEvent) => {
+    const index = SETTINGS_TABS.findIndex((item) => item.id === tab)
+    let next = index
+    if (event.key === 'ArrowDown') next = (index + 1) % SETTINGS_TABS.length
+    else if (event.key === 'ArrowUp') next = (index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = SETTINGS_TABS.length - 1
+    else return
+    event.preventDefault()
+    const id = SETTINGS_TABS[next].id
+    setTab(id)
+    tabRefs.current.get(id)?.focus()
   }
 
-  const saveAI = async () => {
-    setAISaving(true)
-    setAIError(null)
-    try {
-      await setAISettings({
-        enabled: aiEnabled,
-        baseUrl: aiBaseUrl.trim(),
-        model: aiModel.trim(),
-        apiKey: aiApiKey,
-        clearApiKey: clearAIKey,
-      })
-      setAIApiKey('')
-      setClearAIKey(false)
-    } catch (err) {
-      setAIError(String(err))
-    } finally {
-      setAISaving(false)
-    }
-  }
-
-  const addBucketTo = async (sourceId: string) => {
-    const bucket = bucketName.trim()
-    if (!bucket) return
-    try {
-      await addBucket(sourceId, bucket)
-      setBucketFor(null)
-      setBucketName('')
-    } catch (err) {
-      log('error', `Could not add the bucket: ${String(err)}`)
-    }
-  }
+  const current = SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0]
 
   return (
     <div
@@ -1673,312 +1672,523 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="modal settings" role="dialog" aria-modal="true">
-        <h2>Settings</h2>
-        <section>
-          <h3>Boards</h3>
-          <div className="settings-row">
-            <span className="settings-label">Folder</span>
-            <div className="settings-value">
-              <span className="folder-path" title={snapshot.folder}>
-                {snapshot.folder}
-              </span>
-              <div className="settings-actions">
-                <button className="secondary" onClick={() => revealFolder()}>
-                  Show in Finder
-                </button>
-                <button className="secondary" onClick={() => chooseFolder()}>
-                  Change…
-                </button>
-              </div>
-            </div>
-          </div>
-          <p className="settings-note">
-            Boards are plain .excalidraw files. To version them, make the folder a git repository and commit when you like. Avoid folders
-            inside Documents, Desktop or Downloads: macOS then won’t let Show in Finder select the file.
-          </p>
-          <label className="settings-row settings-toggle-row">
-            <span className="settings-label">Thumbnails</span>
-            <span className="settings-value settings-toggle-value">
-              <input type="checkbox" checked={snapshot.showThumbnails} onChange={(event) => setShowThumbnails(event.target.checked)} />
-              Show board thumbnails in the sidebar
-            </span>
-          </label>
-        </section>
-        <section>
-          <h3>Application</h3>
-          <div className="settings-row">
-            <span className="settings-label">Interface zoom</span>
-            <div className="settings-value zoom-setting">
-              <input
-                type="range"
-                min="50"
-                max="200"
-                step="10"
-                value={Math.round(snapshot.applicationZoom * 100)}
-                aria-label="Application interface zoom"
-                onChange={(event) => setApplicationZoom(Number(event.target.value) / 100)}
-              />
-              <output>{Math.round(snapshot.applicationZoom * 100)}%</output>
-              <button className="secondary" disabled={snapshot.applicationZoom === 1} onClick={() => setApplicationZoom(1)}>
-                Reset
-              </button>
-            </div>
-          </div>
-          <p className="settings-note">Scales the complete application interface. Excalidraw canvas zoom remains independent.</p>
-        </section>
-        <section>
-          <h3>Canvas</h3>
-          <div className="settings-row">
-            <span className="settings-label">Appearance</span>
-            <div className="segmented">
-              {(['system', 'light', 'dark'] as const).map((appearance) => (
-                <button
-                  key={appearance}
-                  className={snapshot.canvasAppearance === appearance ? 'active' : ''}
-                  onClick={() => setCanvasAppearance(appearance)}
-                >
-                  {APPEARANCE_TITLES[appearance]}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="settings-note">Use a light canvas even when the app is in dark mode, or the other way around.</p>
-        </section>
-        <section>
-          <h3>NATS Servers</h3>
-          <div className="settings-row">
-            <span className="settings-label">Collaboration nickname</span>
-            <div className="settings-value collaboration-nickname-value">
-              <input
-                className="settings-text-input"
-                value={collaborationNickname}
-                maxLength={40}
-                placeholder="Peer name (optional)"
-                aria-label="Collaboration nickname"
-                onChange={(event) => {
-                  setCollaborationNicknameValue(event.target.value)
-                  setCollaborationNicknameError(null)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !collaborationNicknameSaving) void saveCollaborationNickname()
-                }}
-              />
+      <div className="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <nav className="settings-nav" aria-label="Settings sections">
+          <h2 id="settings-title" className="settings-nav-title">
+            Settings
+          </h2>
+          <div role="tablist" aria-orientation="vertical" onKeyDown={onTabKeyDown}>
+            {SETTINGS_TABS.map(({ id, title, Icon }) => (
               <button
-                className="secondary"
-                disabled={collaborationNicknameSaving || collaborationNickname.trim() === snapshot.collaborationNickname}
-                onClick={() => void saveCollaborationNickname()}
+                key={id}
+                ref={(element) => {
+                  if (element) tabRefs.current.set(id, element)
+                  else tabRefs.current.delete(id)
+                }}
+                id={`settings-tab-${id}`}
+                role="tab"
+                aria-selected={tab === id}
+                aria-controls={`settings-panel-${id}`}
+                tabIndex={tab === id ? 0 : -1}
+                className={`settings-nav-item${tab === id ? ' active' : ''}`}
+                onClick={() => setTab(id)}
               >
-                {collaborationNicknameSaving ? 'Saving…' : 'Save'}
+                <Icon />
+                {title}
               </button>
-            </div>
+            ))}
           </div>
-          <p className={collaborationNicknameError ? 'problem' : 'settings-note'}>
-            {collaborationNicknameError ?? 'Shown beside your cursor in collaboration sessions. Leave blank to use an anonymous Peer name.'}
-          </p>
-          {natsSources.length === 0 ? (
-            <p className="settings-note">
-              No NATS servers yet. Add one to keep boards on a server (in buckets) and collaborate live. Boards stay on the server when you
-              remove it here.
-            </p>
-          ) : (
-            natsSources.map((source) => (
-              <div key={source.id} className="nats-server">
-                <div className="nats-server-head">
-                  <span className="nats-server-name">{source.name}</span>
-                  <div className="nats-server-actions">
-                    <button
-                      className="secondary"
-                      onClick={() => setEditingServer(snapshot.natsServers.find((server) => server.id === rawServerId(source.id)) ?? null)}
-                    >
-                      Edit…
-                    </button>
-                    <button className="secondary" onClick={() => removeNatsServer(rawServerId(source.id))}>
-                      Remove
-                    </button>
-                  </div>
-                </div>
-                <div className="nats-buckets">
-                  {source.groups.map((group) => (
-                    <span key={group.id} className="nats-bucket">
-                      {group.name}
-                    </span>
-                  ))}
-                </div>
-                {bucketFor === source.id ? (
-                  <div className="settings-row">
-                    <input
-                      value={bucketName}
-                      placeholder="Bucket name"
-                      onChange={(event) => setBucketName(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') addBucketTo(source.id)
-                        if (event.key === 'Escape') {
-                          setBucketFor(null)
-                          setBucketName('')
-                        }
-                      }}
-                    />
-                    <button className="primary" onClick={() => addBucketTo(source.id)}>
-                      Add
-                    </button>
-                    <button
-                      className="secondary"
-                      onClick={() => {
-                        setBucketFor(null)
-                        setBucketName('')
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                ) : (
-                  <button className="secondary" onClick={() => setBucketFor(source.id)}>
-                    Add Bucket…
-                  </button>
-                )}
-              </div>
-            ))
-          )}
-          <div className="settings-row nats-add-server">
-            <input value={serverName} placeholder="Server name" onChange={(event) => setServerName(event.target.value)} />
+        </nav>
+        <section className="settings-pane">
+          <header className="settings-pane-header">
+            <div>
+              <h3>{current.title}</h3>
+              <p>{current.description}</p>
+            </div>
+            <button className="icon-button settings-close" onClick={onClose} title="Close (Esc)" aria-label="Close settings">
+              <CloseIcon />
+            </button>
+          </header>
+          {/* Every page stays mounted (only hidden), so unsaved edits survive switching tabs. */}
+          {SETTINGS_TABS.map(({ id }) => (
+            <div
+              key={id}
+              id={`settings-panel-${id}`}
+              className="settings-pane-body"
+              role="tabpanel"
+              aria-labelledby={`settings-tab-${id}`}
+              hidden={tab !== id}
+            >
+              {id === 'appearance' && <AppearanceSettings snapshot={snapshot} />}
+              {id === 'boards' && <BoardsSettings snapshot={snapshot} />}
+              {id === 'collaboration' && <CollaborationSettings snapshot={snapshot} />}
+              {id === 'servers' && (
+                <ServersSettings
+                  snapshot={snapshot}
+                  onAdd={() => setAddingServer(true)}
+                  onEdit={setEditingServer}
+                  onRemove={setRemovingServer}
+                  onNewBucket={setNewBucketFor}
+                />
+              )}
+              {id === 'ai' && <AISettingsPane snapshot={snapshot} />}
+              {id === 'about' && <AboutSettings />}
+            </div>
+          ))}
+        </section>
+      </div>
+      {addingServer && <AddServerDialog onClose={() => setAddingServer(false)} />}
+      {editingServer && <EditServerDialog server={editingServer} onClose={() => setEditingServer(null)} />}
+      {removingServer && <RemoveServerDialog source={removingServer} onClose={() => setRemovingServer(null)} />}
+      {newBucketFor && <NewBucketDialog source={newBucketFor} onClose={() => setNewBucketFor(null)} />}
+    </div>
+  )
+}
+
+function AppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
+  const zoomPercent = Math.round(snapshot.applicationZoom * 100)
+  return (
+    <>
+      <div className="settings-group">
+        <SettingsField label="Canvas theme" help="The rest of the app follows your system appearance.">
+          <div className="segmented" role="radiogroup" aria-label="Canvas theme">
+            {(['system', 'light', 'dark'] as const).map((appearance) => (
+              <button
+                key={appearance}
+                role="radio"
+                aria-checked={snapshot.canvasAppearance === appearance}
+                className={snapshot.canvasAppearance === appearance ? 'active' : ''}
+                onClick={() => setCanvasAppearance(appearance)}
+              >
+                {APPEARANCE_TITLES[appearance]}
+              </button>
+            ))}
+          </div>
+        </SettingsField>
+        <SettingsField label="Interface zoom" help="Scales the whole interface. Zoom on the canvas is set separately." htmlFor="settings-zoom">
+          <div className="zoom-setting">
             <input
-              value={serverUrl}
-              placeholder="nats://host:port"
-              onChange={(event) => setServerUrl(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') addServer()
-              }}
+              id="settings-zoom"
+              type="range"
+              min="50"
+              max="200"
+              step="10"
+              value={zoomPercent}
+              onChange={(event) => setApplicationZoom(Number(event.target.value) / 100)}
             />
-            <input
-              value={serverUsername}
-              placeholder="Username (optional)"
-              disabled={Boolean(serverCredentialsFile)}
-              onChange={(event) => setServerUsername(event.target.value)}
-            />
-            <input
-              value={serverPassword}
-              type="password"
-              placeholder="Password (optional)"
-              disabled={Boolean(serverCredentialsFile)}
-              onChange={(event) => setServerPassword(event.target.value)}
-            />
-            <NatsCredentialsPicker
-              value={serverCredentialsFile}
-              onChange={(path) => {
-                setServerCredentialsFile(path)
-                if (path) {
-                  setServerUsername('')
-                  setServerPassword('')
-                }
-              }}
-            />
-            <button className="primary" onClick={addServer}>
-              Add Server
+            <output htmlFor="settings-zoom">{zoomPercent}%</output>
+            <button className="secondary" disabled={snapshot.applicationZoom === 1} onClick={() => setApplicationZoom(1)}>
+              Reset
             </button>
           </div>
-          <p className="settings-note">Use username/password or choose a standard NATS .creds file. Credential contents stay outside the webview.</p>
-        </section>
-        <section>
-          <h3>AI Assistant</h3>
-          <label className="settings-row ai-enabled-row">
-            <span className="settings-label">Dramallama</span>
-            <span className="settings-value ai-toggle-value">
-              <input type="checkbox" checked={aiEnabled} onChange={(event) => setAIEnabled(event.target.checked)} />
-              Enable the canvas chat overlay
+        </SettingsField>
+      </div>
+      <div className="settings-group">
+        <SettingsField label="Board thumbnails" help="Show a preview of each board in the sidebar." htmlFor="settings-thumbnails">
+          <input
+            id="settings-thumbnails"
+            className="switch"
+            type="checkbox"
+            role="switch"
+            checked={snapshot.showThumbnails}
+            onChange={(event) => setShowThumbnails(event.target.checked)}
+          />
+        </SettingsField>
+      </div>
+    </>
+  )
+}
+
+function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
+  return (
+    <>
+      <div className="settings-group">
+        <SettingsField
+          label="Boards folder"
+          help="Boards are saved as plain .excalidraw files. To keep a history, make the folder a Git repository."
+          stacked
+        >
+          <div className="folder-setting">
+            <span className="folder-path" title={snapshot.folder}>
+              {snapshot.folder}
             </span>
-          </label>
-          <div className="settings-row">
-            <span className="settings-label">API URL</span>
-            <input
-              className="settings-text-input"
-              value={aiBaseUrl}
-              placeholder="http://localhost:8080 or …/v1"
-              onChange={(event) => {
-                setAIBaseUrl(event.target.value)
-                setAIModels([])
-              }}
-            />
-          </div>
-          <div className="settings-row">
-            <span className="settings-label">Model</span>
-            <div className="settings-value ai-model-value">
-              <select
-                className="settings-text-input"
-                value={aiModels.some((item) => item.model === aiModel) ? aiModel : ''}
-                disabled={aiModelsLoading || aiModels.length === 0}
-                onChange={(event) => setAIModel(event.target.value)}
-              >
-                <option value="">{aiModelsLoading ? 'Discovering models…' : 'Choose a discovered model'}</option>
-                {aiModels.map((model) => (
-                  <option key={model.model} value={model.model} title={model.model}>
-                    {model.id}
-                  </option>
-                ))}
-              </select>
-              <button className="secondary" disabled={aiModelsLoading || !aiBaseUrl.trim()} onClick={loadAIModels}>
-                {aiModelsLoading ? 'Discovering…' : 'Discover Models'}
+            <div className="settings-actions">
+              <button className="secondary" onClick={() => revealFolder()}>
+                Show in {FILE_MANAGER}
+              </button>
+              <button className="secondary" onClick={() => chooseFolder()}>
+                Change…
               </button>
             </div>
           </div>
-          <div className="settings-row">
-            <span className="settings-label">API key</span>
-            <div className="settings-value ai-key-value">
+        </SettingsField>
+      </div>
+      {IS_MAC && (
+        <p className="settings-footnote">
+          Avoid folders inside Documents, Desktop or Downloads. macOS restricts access to them, so Finder can’t reveal individual boards.
+        </p>
+      )}
+    </>
+  )
+}
+
+function CollaborationSettings({ snapshot }: { snapshot: StoreSnapshot }) {
+  const [nickname, setNickname] = useState(snapshot.collaborationNickname)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const unchanged = nickname.trim() === snapshot.collaborationNickname
+
+  const save = async () => {
+    if (saving || unchanged) return
+    setSaving(true)
+    setError(null)
+    try {
+      await setCollaborationNickname(nickname)
+      setNickname(nickname.trim())
+      setSaved(true)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="settings-group">
+      <SettingsField
+        label="Display name"
+        help={
+          error ? (
+            <span className="problem">{error}</span>
+          ) : (
+            'Shown next to your cursor on shared boards. Leave it empty to appear as an anonymous peer.'
+          )
+        }
+        htmlFor="settings-nickname"
+        stacked
+      >
+        <div className="inline-form">
+          <input
+            id="settings-nickname"
+            className="settings-text-input"
+            value={nickname}
+            maxLength={40}
+            placeholder="Anonymous"
+            onChange={(event) => {
+              setNickname(event.target.value)
+              setSaved(false)
+              setError(null)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void save()
+            }}
+          />
+          <button className="primary" disabled={saving || unchanged} onClick={() => void save()}>
+            {saving ? 'Saving…' : saved && unchanged ? 'Saved' : 'Save'}
+          </button>
+        </div>
+      </SettingsField>
+    </div>
+  )
+}
+
+function serverAuthSummary(server: NatsServerSettings | undefined): string {
+  if (!server) return ''
+  if (server.credentialsFile) return 'Credentials file'
+  if (server.username) return `User “${server.username}”`
+  return 'No authentication'
+}
+
+function ServersSettings({
+  snapshot,
+  onAdd,
+  onEdit,
+  onRemove,
+  onNewBucket,
+}: {
+  snapshot: StoreSnapshot
+  onAdd: () => void
+  onEdit: (server: NatsServerSettings) => void
+  onRemove: (source: SourceInfo) => void
+  onNewBucket: (source: SourceInfo) => void
+}) {
+  const natsSources = snapshot.sources.filter((source) => source.kind === 'nats')
+  return (
+    <>
+      {natsSources.length === 0 ? (
+        <div className="settings-group settings-empty">
+          <p className="settings-empty-title">No servers</p>
+          <p className="settings-field-help">Add a NATS server to store boards in shared buckets and edit them together in real time.</p>
+        </div>
+      ) : (
+        natsSources.map((source) => {
+          const server = snapshot.natsServers.find((item) => item.id === rawServerId(source.id))
+          return (
+            <div key={source.id} className="settings-group nats-server">
+              <div className="nats-server-head">
+                <DatabaseIcon className="nats-server-icon" />
+                <div className="nats-server-text">
+                  <span className="nats-server-name">{source.name}</span>
+                  <span className="settings-field-help">
+                    {server?.url}
+                    {server && ' · '}
+                    {serverAuthSummary(server)}
+                  </span>
+                </div>
+                <div className="settings-actions">
+                  <button className="secondary" disabled={!server} onClick={() => server && onEdit(server)}>
+                    Edit…
+                  </button>
+                  <button className="secondary" onClick={() => onRemove(source)}>
+                    Remove…
+                  </button>
+                </div>
+              </div>
+              <div className="nats-buckets">
+                <span className="settings-field-label">Buckets</span>
+                <div className="nats-bucket-list">
+                  {source.groups.length === 0 ? (
+                    <span className="settings-field-help">No buckets yet.</span>
+                  ) : (
+                    source.groups.map((group) => (
+                      <span key={group.id} className="nats-bucket">
+                        {group.name}
+                      </span>
+                    ))
+                  )}
+                  <button className="link-button" onClick={() => onNewBucket(source)}>
+                    New Bucket…
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        })
+      )}
+      <div className="settings-pane-actions">
+        <button className="primary" onClick={onAdd}>
+          Add Server…
+        </button>
+      </div>
+      <p className="settings-footnote">Removing a server only disconnects this app. Boards stay on the server.</p>
+    </>
+  )
+}
+
+function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
+  const [enabled, setEnabled] = useState(snapshot.ai.enabled)
+  const [baseUrl, setBaseUrl] = useState(snapshot.ai.baseUrl)
+  const [model, setModel] = useState(snapshot.ai.model)
+  const [apiKey, setApiKey] = useState('')
+  const [clearKey, setClearKey] = useState(false)
+  const [models, setModels] = useState<AIModel[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const loadedInitialModels = useRef(false)
+
+  const loadModels = useCallback(async () => {
+    setModelsLoading(true)
+    setError(null)
+    try {
+      const discovered = await discoverAIModels(baseUrl.trim(), apiKey, clearKey)
+      setModels(discovered)
+      setModel((current) => {
+        const match = discovered.find((item) => item.model === current || item.id === current)
+        return match?.model ?? discovered[0]?.model ?? ''
+      })
+    } catch (err) {
+      setModels([])
+      setError(String(err))
+    } finally {
+      setModelsLoading(false)
+    }
+  }, [apiKey, baseUrl, clearKey])
+
+  useEffect(() => {
+    if (loadedInitialModels.current || !enabled || !baseUrl.trim()) return
+    loadedInitialModels.current = true
+    void loadModels()
+  }, [baseUrl, enabled, loadModels])
+
+  const changed = () => {
+    setSaved(false)
+    setError(null)
+  }
+  const modelChosen = models.some((item) => item.model === model)
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      await setAISettings({ enabled, baseUrl: baseUrl.trim(), model: model.trim(), apiKey, clearApiKey: clearKey })
+      setApiKey('')
+      setClearKey(false)
+      setSaved(true)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="settings-group">
+        <SettingsField label="Enable AI assistant" help="Adds a chat panel to the canvas." htmlFor="settings-ai-enabled">
+          <input
+            id="settings-ai-enabled"
+            className="switch"
+            type="checkbox"
+            role="switch"
+            checked={enabled}
+            onChange={(event) => {
+              setEnabled(event.target.checked)
+              changed()
+            }}
+          />
+        </SettingsField>
+      </div>
+      <div className="settings-group">
+        <SettingsField label="API URL" help="The base URL of an OpenAI-compatible API." htmlFor="settings-ai-url" stacked>
+          <input
+            id="settings-ai-url"
+            className="settings-text-input"
+            value={baseUrl}
+            placeholder="http://localhost:8080/v1"
+            onChange={(event) => {
+              setBaseUrl(event.target.value)
+              setModels([])
+              changed()
+            }}
+          />
+        </SettingsField>
+        <SettingsField label="API key" help="Optional. Stored outside the app’s web view." htmlFor="settings-ai-key" stacked>
+          <input
+            id="settings-ai-key"
+            className="settings-text-input"
+            type="password"
+            value={apiKey}
+            placeholder={snapshot.ai.hasApiKey && !clearKey ? 'Saved. Enter a new key to replace it.' : 'None'}
+            onChange={(event) => {
+              setApiKey(event.target.value)
+              setModels([])
+              if (event.target.value) setClearKey(false)
+              changed()
+            }}
+          />
+          {snapshot.ai.hasApiKey && (
+            <label className="checkbox-label">
               <input
-                className="settings-text-input"
-                type="password"
-                value={aiApiKey}
-                placeholder={snapshot.ai.hasApiKey && !clearAIKey ? 'Saved — enter a new key to replace' : 'Optional'}
+                type="checkbox"
+                checked={clearKey}
                 onChange={(event) => {
-                  setAIApiKey(event.target.value)
-                  setAIModels([])
-                  if (event.target.value) setClearAIKey(false)
+                  setClearKey(event.target.checked)
+                  setModels([])
+                  changed()
                 }}
               />
-              {snapshot.ai.hasApiKey && (
-                <label className="clear-key">
-                  <input
-                    type="checkbox"
-                    checked={clearAIKey}
-                    onChange={(event) => {
-                      setClearAIKey(event.target.checked)
-                      setAIModels([])
-                    }}
-                  />
-                  Remove saved key
-                </label>
-              )}
-            </div>
-          </div>
-          <p className="settings-note">The current .excalidraw file is sent only when Dramallama calls the get_canvas_file tool.</p>
-          {aiError && <p className="settings-note problem">{aiError}</p>}
-          <div className="settings-ai-actions">
-            <button
-              className="primary"
-              disabled={aiSaving || (aiEnabled && !aiModels.some((item) => item.model === aiModel))}
-              onClick={saveAI}
+              Remove saved key
+            </label>
+          )}
+        </SettingsField>
+        <SettingsField label="Model" help="Load the models available at the API URL, then choose one." htmlFor="settings-ai-model" stacked>
+          <div className="inline-form">
+            <select
+              id="settings-ai-model"
+              className="settings-text-input"
+              value={modelChosen ? model : ''}
+              disabled={modelsLoading || models.length === 0}
+              onChange={(event) => {
+                setModel(event.target.value)
+                changed()
+              }}
             >
-              {aiSaving ? 'Saving…' : 'Save AI Settings'}
+              <option value="">{modelsLoading ? 'Loading models…' : models.length === 0 ? 'No models loaded' : 'Choose a model'}</option>
+              {models.map((item) => (
+                <option key={item.model} value={item.model} title={item.model}>
+                  {item.id}
+                </option>
+              ))}
+            </select>
+            <button className="secondary" disabled={modelsLoading || !baseUrl.trim()} onClick={() => void loadModels()}>
+              {modelsLoading ? 'Loading…' : 'Load Models'}
             </button>
           </div>
-        </section>
-        <p className="settings-copyright">
-          Copyright © 2026{' '}
-          <a href="https://github.com/laetho" target="_blank" rel="noreferrer">
-            github.com/laetho
-          </a>{' '}
-          and{' '}
-          <a href="https://github.com/niklashaakonsen" target="_blank" rel="noreferrer">
-            github.com/niklashaakonsen
-          </a>
-        </p>
+        </SettingsField>
+      </div>
+      <p className={error ? 'settings-footnote problem' : 'settings-footnote'}>
+        {error ?? 'The board is only sent to the API when the assistant asks to read it.'}
+      </p>
+      <div className="settings-pane-actions">
+        <button className="primary" disabled={saving || saved || (enabled && !modelChosen)} onClick={() => void save()}>
+          {saving ? 'Saving…' : saved ? 'Saved' : 'Save'}
+        </button>
+      </div>
+    </>
+  )
+}
+
+function AboutSettings() {
+  return (
+    <div className="settings-group settings-about">
+      <p className="settings-about-name">Excalibur</p>
+      <p className="settings-field-help">The board of legend. A desktop home for your Excalidraw boards.</p>
+      <p className="settings-field-help">
+        Copyright © 2026{' '}
+        <a href="https://github.com/laetho" target="_blank" rel="noreferrer">
+          laetho
+        </a>{' '}
+        and{' '}
+        <a href="https://github.com/niklashaakonsen" target="_blank" rel="noreferrer">
+          niklashaakonsen
+        </a>
+        .
+      </p>
+    </div>
+  )
+}
+
+/** Confirms disconnecting a NATS server. Its boards stay on the server. */
+function RemoveServerDialog({ source, onClose }: { source: SourceInfo; onClose: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const remove = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await removeNatsServer(rawServerId(source.id))
+      onClose()
+    } catch (err) {
+      setError(String(err))
+      setBusy(false)
+    }
+  }
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose()
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !busy) onClose()
+      }}
+    >
+      <div className="modal alert" role="alertdialog" aria-modal="true" aria-labelledby="remove-server-title">
+        <h2 id="remove-server-title">Remove “{source.name}”?</h2>
+        <p className="alert-message">Its boards stay on the server. Add the server again to see them.</p>
+        {error && <p className="problem">{error}</p>}
         <div className="modal-actions">
-          <button className="primary" onClick={onClose}>
-            Done
+          <button className="secondary" disabled={busy} onClick={onClose} autoFocus>
+            Cancel
+          </button>
+          <button className="destructive" disabled={busy} onClick={() => void remove()}>
+            {busy ? 'Removing…' : 'Remove Server'}
           </button>
         </div>
       </div>
-      {editingServer && <EditServerDialog server={editingServer} onClose={() => setEditingServer(null)} />}
     </div>
   )
 }
@@ -2008,7 +2218,7 @@ function ContextMenu({
         Duplicate
       </button>
       <button role="menuitem" onClick={onReveal}>
-        Show in Finder
+        Show in {FILE_MANAGER}
       </button>
       <div className="context-menu-divider" />
       <button role="menuitem" className="destructive" onClick={onTrash}>
