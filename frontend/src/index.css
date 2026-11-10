@@ -379,18 +379,14 @@ select,
   color: var(--text);
 }
 
-/* The local folder row is itself the clickable group: flat by default, with
-   the bucket pill treatment on hover/active. */
+/* The local folder row is itself the clickable group. Give it the same pill
+   treatment as a bucket on hover/active, bleeding into the gutter so its icon
+   stays aligned with the server rows. */
 .source-row.local {
-  /* Same geometry as a bucket pill, so every clickable row spans one width. */
-  padding: 0 12px;
-  border-radius: 8px;
-}
-
-/* Inset the server header by the pill padding so the folder icon, the server
-   icon and the bucket names all share one column. */
-.source-server > .source-row {
-  padding-left: 12px;
+  margin: 0 -8px;
+  width: calc(100% + 16px);
+  padding: 0 8px;
+  border-radius: 6px;
 }
 
 .source-row.local:hover:not(.active) {
