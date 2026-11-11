@@ -55,11 +55,13 @@ Set `EXCALIBUR_DEV_NATS_PORT` to use another development port. The former
 `EXCALIWAILS_DEV_NATS_PORT` name remains supported for compatibility.
 `task run` also starts or reuses this server while running the built application.
 
-## Dramallama AI assistant
+## Merlin assistant
 
-Enable the canvas chat overlay in Settings and configure the URL and model for
-your OpenAI-compatible Dramallama API. The URL may be a server root, a `/v1`
-base URL, or the full `/chat/completions` endpoint. API keys are optional.
+Enable Merlin in Settings and configure the URL and model for your
+OpenAI-compatible API. A floating Merlin button with a sparkle icon at the top of the canvas toggles Merlin's
+expandable panel beside the canvas, so the panel never covers the drawing. The
+URL may be a server root, a `/v1` base URL, or the full `/chat/completions`
+endpoint. API keys are optional.
 
 The chat harness advertises `get_canvas_file` for reading the current complete
 `.excalidraw` JSON (including embedded files) and `apply_canvas_operations` for
@@ -69,7 +71,7 @@ user switches canvases, and applied through Excalidraw's normal undo, save, and
 collaboration paths. Canvas data is sent only when the model calls the read
 tool. The harness supports iterative inspect/edit cycles for larger requests,
 with a bounded tool budget and a final tool-free summary turn to prevent runaway
-loops. The overlay keeps chat local to the current app session.
+loops. The panel keeps chat local to the current app session.
 
 For direct edit requests, the harness forces an inspect-then-edit tool sequence
 instead of accepting a printed JSON “blueprint” as a successful canvas change.

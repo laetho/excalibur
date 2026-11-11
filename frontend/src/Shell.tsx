@@ -505,35 +505,41 @@ export default function Shell() {
       </aside>
 
       <main className="main">
-        <Canvas
-          canvasAppearance={snapshot.canvasAppearance}
-          collaborationNickname={snapshot.collaborationNickname}
-          boardId={snapshot.selection}
-          collab={collab}
-        />
-        {snapshot.selection == null && (
-          <div className="no-selection">
-            <p className="empty-title">No Board Selected</p>
-            <p className="empty-description">Select a board in the sidebar, or create a new one.</p>
-            <button className="primary" onClick={() => setCreating(true)}>
-              New Board
-            </button>
-          </div>
-        )}
-        {snapshot.ai.enabled && (
-          <>
+        <div className="canvas-stage" data-canvas-appearance={snapshot.canvasAppearance}>
+          <Canvas
+            canvasAppearance={snapshot.canvasAppearance}
+            collaborationNickname={snapshot.collaborationNickname}
+            boardId={snapshot.selection}
+            collab={collab}
+          />
+          {snapshot.selection == null && (
+            <div className="no-selection">
+              <p className="empty-title">No Board Selected</p>
+              <p className="empty-description">Select a board in the sidebar, or create a new one.</p>
+              <button className="primary" onClick={() => setCreating(true)}>
+                New Board
+              </button>
+            </div>
+          )}
+          {snapshot.ai.enabled && (
             <button
-              className={`ai-launcher${aiOpen ? ' open' : ''}`}
+              className={`merlin-canvas-toggle${aiOpen && openBoard ? ' open' : ''}`}
               onClick={() => setAIOpen((open) => !open)}
               disabled={!openBoard}
-              title={!openBoard ? 'Select a board to use the AI assistant' : aiOpen ? 'Close AI assistant' : 'Open AI assistant'}
-              aria-expanded={aiOpen}
-              aria-controls="ai-chat-panel"
+              title={!openBoard ? 'Select a board to use Merlin' : aiOpen ? 'Collapse Merlin' : 'Open Merlin'}
+              aria-expanded={Boolean(aiOpen && openBoard)}
+              aria-controls="merlin-panel"
+              aria-label={aiOpen && openBoard ? 'Collapse Merlin' : 'Open Merlin'}
             >
-              AI
+              <SparklesIcon />
+              <span>Merlin</span>
             </button>
+          )}
+        </div>
+        {snapshot.ai.enabled && (
+          <aside className={`merlin-sidebar${aiOpen && openBoard ? ' open' : ''}`} aria-label="Merlin assistant">
             {aiOpen && openBoard && (
-              <AIChatOverlay
+              <MerlinPanel
                 key={openBoard.id}
                 baseUrl={snapshot.ai.baseUrl}
                 model={snapshot.ai.model}
@@ -542,7 +548,7 @@ export default function Shell() {
                 onClose={closeAI}
               />
             )}
-          </>
+          </aside>
         )}
       </main>
 
@@ -870,9 +876,9 @@ function SourcesNav({
   )
 }
 
-// MARK: - AI assistant
+// MARK: - Merlin assistant
 
-function AIChatOverlay({
+function MerlinPanel({
   baseUrl,
   model,
   boardId,
@@ -1004,10 +1010,10 @@ function AIChatOverlay({
   }, [boardId, busy, queue])
 
   return (
-    <section id="ai-chat-panel" className="ai-chat-panel" aria-label="Dramallama assistant">
+    <section id="merlin-panel" className="merlin-panel" aria-label="Merlin assistant">
       <header className="ai-chat-header">
         <div>
-          <strong>Dramallama · {boardName}</strong>
+          <strong>Merlin @ {boardName}</strong>
           <select
             aria-label="AI model"
             value={selectedModel}
@@ -1022,7 +1028,7 @@ function AIChatOverlay({
             ))}
           </select>
         </div>
-        <button className="icon-button" onClick={onClose} title="Close AI assistant" aria-label="Close AI assistant">
+        <button className="icon-button" onClick={onClose} title="Collapse Merlin" aria-label="Collapse Merlin">
           <CloseIcon />
         </button>
       </header>
@@ -1030,15 +1036,15 @@ function AIChatOverlay({
         {messages.length === 0 && (
           <div className="ai-chat-empty">
             <strong>Ask about {boardName}</strong>
-            <p>Dramallama reads this board at the start of each turn, so answers and edits stay grounded in the canvas.</p>
+            <p>Merlin reads this board at the start of each turn, so answers and edits stay grounded in the canvas.</p>
           </div>
         )}
         {messages.map((message, index) => (
           <div key={index} className={`ai-message ${message.role}`}>
             <div className="ai-message-meta">
-              <span>{message.role === 'user' ? 'You' : 'AI'}</span>
+              <span>{message.role === 'user' ? 'You' : 'Merlin'}</span>
               {message.role === 'assistant' && (
-                <CopyButton text={message.content} className="ai-message-copy" label="AI response" />
+                <CopyButton text={message.content} className="ai-message-copy" label="Merlin response" />
               )}
             </div>
             {message.role === 'assistant' && message.thinking && <AIThinking text={message.thinking} />}
@@ -1048,13 +1054,13 @@ function AIChatOverlay({
         {busy && (streamedAnswer || streamedThinking) && (
           <div className="ai-message assistant streaming">
             <div className="ai-message-meta">
-              <span>AI</span>
+              <span>Merlin</span>
             </div>
             {streamedThinking && <AIThinking text={streamedThinking} streaming={!streamedAnswer} />}
             {streamedAnswer && <p>{streamedAnswer}</p>}
           </div>
         )}
-        {busy && !streamedAnswer && !streamedThinking && <div className="ai-chat-status">Dramallama is thinking…</div>}
+        {busy && !streamedAnswer && !streamedThinking && <div className="ai-chat-status">Merlin is thinking…</div>}
         {queue.map((request, index) => (
           <div key={request.id} className="ai-message user queued">
             <span>Queued {index + 1}</span>
@@ -1082,18 +1088,12 @@ function AIChatOverlay({
         ))}
         <div ref={endRef} />
       </div>
-      <form
-        className="ai-chat-form"
-        onSubmit={(event) => {
-          event.preventDefault()
-          send()
-        }}
-      >
+      <div className="ai-chat-form">
         <textarea
           ref={inputRef}
           value={draft}
           rows={2}
-          placeholder={busy ? 'Add another message to the queue…' : 'Ask Dramallama…'}
+          placeholder="Ask Merlin (press enter to send)"
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
@@ -1102,14 +1102,7 @@ function AIChatOverlay({
             }
           }}
         />
-        <button
-          className="primary"
-          type="submit"
-          disabled={!draft.trim() || modelsLoading || !models.some((available) => available.model === selectedModel)}
-        >
-          {busy || queue.length > 0 ? 'Queue' : 'Send'}
-        </button>
-      </form>
+      </div>
     </section>
   )
 }
@@ -1607,8 +1600,8 @@ const SETTINGS_TABS: { id: SettingsTab; title: string; description: string; Icon
   },
   {
     id: 'ai',
-    title: 'AI Assistant',
-    description: 'Chat with Dramallama about the open board, using any OpenAI-compatible API.',
+    title: 'Merlin',
+    description: 'Chat with Merlin about the open board, using any OpenAI-compatible API.',
     Icon: SparklesIcon,
   },
   { id: 'about', title: 'About', description: 'Version and credits.', Icon: InfoIcon },
@@ -2088,7 +2081,7 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
   return (
     <>
       <div className="settings-group">
-        <SettingsField label="Enable AI assistant" help="Adds a chat panel to the canvas." htmlFor="settings-ai-enabled">
+        <SettingsField label="Enable Merlin" help="Adds an expandable assistant panel beside the canvas." htmlFor="settings-ai-enabled">
           <input
             id="settings-ai-enabled"
             className="switch"
@@ -2163,7 +2156,7 @@ function AISettingsPane({ snapshot }: { snapshot: StoreSnapshot }) {
         </SettingsField>
       </div>
       <p className={error ? 'settings-footnote problem' : 'settings-footnote'}>
-        {error ?? 'The board is only sent to the API when the assistant asks to read it.'}
+        {error ?? 'The board is only sent to the API when Merlin asks to read it.'}
       </p>
       <div className="settings-pane-actions">
         <button className="primary" disabled={saving || saved || (enabled && !modelChosen)} onClick={() => void save()}>

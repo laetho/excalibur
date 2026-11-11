@@ -1660,10 +1660,10 @@ export default function Canvas({
 	            repairBindings: true,
 	          })
 	          instance.updateScene({ elements: restored.elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY })
-	          instance.setToast({ message: 'AI updated the canvas — use Undo to revert', duration: 5000, closable: true })
+	          instance.setToast({ message: 'Merlin updated the canvas — use Undo to revert', duration: 5000, closable: true })
 	        } catch (err) {
-	          log('error', `Could not apply AI canvas operations: ${String(err)}`)
-	          instance.setToast({ message: 'Could not apply the AI canvas update', duration: 5000, closable: true })
+	          log('error', `Could not apply Merlin canvas operations: ${String(err)}`)
+	          instance.setToast({ message: 'Could not apply Merlin’s canvas update', duration: 5000, closable: true })
 	        }
 	      }),
     ]

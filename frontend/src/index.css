@@ -140,8 +140,43 @@ select,
 
 .main {
   flex: 1;
+  display: flex;
   position: relative;
   min-width: 0;
+}
+
+.canvas-stage {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  /* Match Excalidraw's sidebar-trigger tokens. The canvas appearance can be
+     configured independently from the surrounding shell. */
+  --merlin-trigger-bg: #ececf4;
+  --merlin-trigger-hover-bg: #ffffff;
+  --merlin-trigger-outline: #ffffff;
+  --merlin-trigger-color: #1b1b1f;
+  --merlin-trigger-selected-bg: #e0dfff;
+  --merlin-trigger-selected-color: #030064;
+}
+
+.canvas-stage[data-canvas-appearance='dark'] {
+  --merlin-trigger-bg: hsl(240, 8%, 15%);
+  --merlin-trigger-hover-bg: #232329;
+  --merlin-trigger-outline: hsl(0, 0%, 7%);
+  --merlin-trigger-color: #e3e3e8;
+  --merlin-trigger-selected-bg: #403e6a;
+  --merlin-trigger-selected-color: #e0dfff;
+}
+
+@media (prefers-color-scheme: dark) {
+  .canvas-stage[data-canvas-appearance='system'] {
+    --merlin-trigger-bg: hsl(240, 8%, 15%);
+    --merlin-trigger-hover-bg: #232329;
+    --merlin-trigger-outline: hsl(0, 0%, 7%);
+    --merlin-trigger-color: #e3e3e8;
+    --merlin-trigger-selected-bg: #403e6a;
+    --merlin-trigger-selected-color: #e0dfff;
+  }
 }
 
 .loading {
@@ -1299,51 +1334,91 @@ button.link-button:hover {
   margin: 5px 6px;
 }
 
-/* MARK: - AI canvas overlay */
+/* MARK: - Merlin side panel */
 
-.ai-launcher {
+.merlin-sidebar {
+  width: 0;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: var(--modal-bg);
+  transition: width 180ms ease;
+}
+
+.merlin-sidebar.open {
+  width: clamp(300px, 30vw, 400px);
+  border-left: 1px solid var(--divider);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.06);
+}
+
+.merlin-canvas-toggle {
   position: absolute;
-  right: 16px;
-  bottom: 16px;
+  /* Sit immediately to the left of Excalidraw's Library control instead of
+     covering it. */
+  right: 116px;
+  top: 16px;
   z-index: 70;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  color: var(--accent-text);
-  background: var(--accent-strong);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-  font-weight: 700;
+  min-height: 36px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: var(--merlin-trigger-color);
+  background: var(--merlin-trigger-bg);
+  border: none;
+  box-shadow: 0 0 0 1px var(--merlin-trigger-outline);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.4px;
+  transition: right 180ms ease, background 120ms ease;
 }
 
-.ai-launcher:hover,
-.ai-launcher.open {
-  background: var(--accent);
+/* Excalidraw's default sidebar is 302px wide. Keep Merlin immediately to its
+   left while the Library (or another default sidebar tab) is open. */
+/* Excalidraw may portal the sidebar outside the canvas wrapper, so detect the
+   mounted sidebar at the document level rather than requiring it to remain a
+   descendant of `.canvas-stage`. */
+body:has(.default-sidebar) .merlin-canvas-toggle {
+  right: min(318px, calc(100% - 116px));
 }
 
-.ai-chat-panel {
-  position: absolute;
-  z-index: 69;
-  right: 16px;
-  bottom: 68px;
-  width: min(390px, calc(100% - 32px));
-  height: min(620px, calc(100% - 92px));
+.merlin-canvas-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.merlin-canvas-toggle:hover:not(:disabled),
+.merlin-canvas-toggle.open {
+  color: var(--merlin-trigger-selected-color);
+  background: var(--merlin-trigger-selected-bg);
+}
+
+.merlin-canvas-toggle:hover:not(:disabled):not(.open) {
+  color: var(--merlin-trigger-color);
+  background: var(--merlin-trigger-hover-bg);
+}
+
+.merlin-canvas-toggle:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.merlin-panel {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: color-mix(in srgb, var(--modal-bg) 94%, transparent);
-  border: 1px solid var(--input-border);
-  border-radius: 14px;
-  box-shadow: var(--modal-shadow);
-  backdrop-filter: blur(18px);
+  background: var(--modal-bg);
 }
 
 .ai-chat-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 11px 12px;
-  border-bottom: 1px solid var(--divider);
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px 20px 16px;
 }
 
 .ai-chat-header > div {
@@ -1352,10 +1427,24 @@ button.link-button:hover {
   min-width: 0;
 }
 
+.ai-chat-header strong {
+  display: block;
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat-header .icon-button {
+  flex-shrink: 0;
+  margin: -4px -8px 0 0;
+}
+
 .ai-chat-header span,
 .ai-chat-header select {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1363,6 +1452,7 @@ button.link-button:hover {
 
 .ai-chat-header select {
   max-width: 220px;
+  margin-top: 4px;
   border: 0;
   padding: 0;
   background: transparent;
@@ -1372,15 +1462,18 @@ button.link-button:hover {
 .ai-chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 0 16px 16px;
   user-select: text;
   -webkit-user-select: text;
 }
 
 .ai-chat-empty {
-  margin: 20px 10px;
-  text-align: center;
+  margin: 0;
+  padding: 14px;
+  text-align: left;
   color: var(--text-secondary);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
 }
 
 .ai-chat-empty p {
@@ -1389,7 +1482,11 @@ button.link-button:hover {
 }
 
 .ai-message {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: var(--modal-bg);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
 }
 
 .ai-message-meta {
@@ -1397,7 +1494,7 @@ button.link-button:hover {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 0 4px 3px;
+  margin: 0 0 6px;
 }
 
 .ai-message-meta > span {
@@ -1424,12 +1521,11 @@ button.link-button:hover {
 }
 
 .ai-message p {
-  display: inline-block;
-  max-width: 92%;
+  display: block;
+  max-width: none;
   margin: 0;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: var(--input-bg);
+  padding: 0;
+  background: transparent;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.42;
@@ -1461,13 +1557,21 @@ button.link-button:hover {
 }
 
 .ai-message.user {
-  text-align: right;
+  color: var(--row-selected-text);
+  background: var(--row-selected);
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--divider));
+  text-align: left;
 }
 
 .ai-message.user p {
-  color: var(--accent-text);
-  background: var(--accent-strong);
+  color: inherit;
+  background: transparent;
   text-align: left;
+}
+
+.ai-message.user .ai-message-meta > span {
+  color: inherit;
+  opacity: 0.72;
 }
 
 .ai-message.queued {
@@ -1541,15 +1645,13 @@ button.link-button:hover {
 }
 
 .ai-chat-form {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 10px;
+  padding: 12px 16px 16px;
   border-top: 1px solid var(--divider);
 }
 
 .ai-chat-form textarea {
-  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   min-height: 38px;
   max-height: 120px;
   resize: vertical;
@@ -1568,13 +1670,9 @@ button.link-button:hover {
   border-color: var(--accent);
 }
 
-@media (max-width: 700px) {
-  .ai-chat-panel {
-    left: 10px;
-    right: 10px;
-    bottom: 66px;
-    width: auto;
-    height: min(62%, 520px);
+@media (max-width: 800px) {
+  .merlin-sidebar.open {
+    width: clamp(260px, 42vw, 320px);
   }
 }
 
