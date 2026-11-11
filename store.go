@@ -554,6 +554,8 @@ func (s *Store) saveViewport(name string, view Viewport) {
 	s.savePrefs()
 }
 
+// library returns the active library: a file in the boards folder for local
+// boards, or the one library shared by every bucket on the active NATS server.
 func (s *Store) library() (*string, error) {
 	var data []byte
 	var err error
@@ -567,7 +569,16 @@ func (s *Store) library() (*string, error) {
 		if e != nil {
 			return nil, e
 		}
-		data, err = client.readObject(s.activeGroup, libraryName)
+		data, err = client.readSharedLibrary()
+		if err == nil && data == nil {
+			// Libraries used to be stored per bucket. Adopt the first one found as the
+			// server-wide library so existing shapes aren't lost.
+			if legacy, legacyErr := client.readObject(s.activeGroup, libraryName); legacyErr == nil && legacy != nil {
+				if client.writeSharedLibrary(legacy) == nil {
+					data = legacy
+				}
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -587,7 +598,7 @@ func (s *Store) saveLibrary(text string) error {
 	if err != nil {
 		return err
 	}
-	return client.writeObject(s.activeGroup, libraryName, []byte(text))
+	return client.writeSharedLibrary([]byte(text))
 }
 
 func searchableTexts(data []byte) []string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +31,10 @@ type natsClient struct {
 	jsm      jetstream.JetStream
 	streamMu sync.RWMutex
 	streams  map[string]struct{}
+
+	libraryMu      sync.Mutex
+	libraryWatcher nats.ObjectWatcher
+	libraryOwn     map[string]struct{} // digests of library versions this client wrote
 }
 
 func connectNATS(config NatsServerConfig) (*natsClient, error) {
@@ -92,7 +98,15 @@ func normalizeNatsServerConfig(config NatsServerConfig) (NatsServerConfig, error
 	return config, nil
 }
 
-func (c *natsClient) close() { c.conn.Close() }
+func (c *natsClient) close() {
+	c.libraryMu.Lock()
+	if c.libraryWatcher != nil {
+		_ = c.libraryWatcher.Stop()
+		c.libraryWatcher = nil
+	}
+	c.libraryMu.Unlock()
+	c.conn.Close()
+}
 
 func (c *natsClient) objectStore(bucket string) (nats.ObjectStore, error) {
 	store, err := c.js.ObjectStore(bucket)
@@ -120,6 +134,7 @@ func (c *natsClient) listBuckets() ([]string, error) {
 	if err := lister.Error(); err != nil {
 		return nil, fmt.Errorf("could not list buckets on %q: %w", c.config.Name, err)
 	}
+	names = slices.DeleteFunc(names, func(name string) bool { return name == libraryBucket })
 	sort.Strings(names)
 	return names, nil
 }
@@ -629,6 +644,86 @@ func (c *natsClient) previousCollabSnapshotSequence(bucket, documentID string) (
 	return ordered[1], nil
 }
 
+// Shared shape library. Every board on a NATS server uses one library, stored
+// as a single .excalidrawlib object in a dedicated Object Store bucket. The
+// bucket is hidden from the board bucket list.
+
+const libraryBucket = "excalibur-library"
+
+func (c *natsClient) readSharedLibrary() ([]byte, error) {
+	return c.readObject(libraryBucket, libraryName)
+}
+
+func (c *natsClient) writeSharedLibrary(data []byte) error {
+	store, err := c.objectStore(libraryBucket)
+	if err != nil {
+		return err
+	}
+	// Register the digest before publishing so the watcher can never see our own
+	// update first and echo it back to the renderer.
+	digest := objectDigest(data)
+	c.libraryMu.Lock()
+	if c.libraryOwn == nil || len(c.libraryOwn) > 64 {
+		c.libraryOwn = map[string]struct{}{}
+	}
+	c.libraryOwn[digest] = struct{}{}
+	c.libraryMu.Unlock()
+	if _, err = store.PutBytes(libraryName, data); err != nil {
+		c.libraryMu.Lock()
+		delete(c.libraryOwn, digest)
+		c.libraryMu.Unlock()
+	}
+	return err
+}
+
+// objectDigest matches the digest format NATS Object Store records in ObjectInfo.
+func objectDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "SHA-256=" + base64.URLEncoding.EncodeToString(sum[:])
+}
+
+// watchLibrary calls onChange with the new content whenever another client
+// replaces the shared library. It is idempotent and stops when the client closes.
+func (c *natsClient) watchLibrary(onChange func([]byte)) error {
+	c.libraryMu.Lock()
+	defer c.libraryMu.Unlock()
+	if c.libraryWatcher != nil {
+		return nil
+	}
+	store, err := c.objectStore(libraryBucket)
+	if err != nil {
+		return err
+	}
+	watcher, err := store.Watch(nats.IgnoreDeletes())
+	if err != nil {
+		return err
+	}
+	c.libraryWatcher = watcher
+	go func() {
+		initial := true
+		for info := range watcher.Updates() {
+			if info == nil {
+				initial = false // end of the initial replay; only live changes follow
+				continue
+			}
+			if initial || info.Name != libraryName {
+				continue
+			}
+			c.libraryMu.Lock()
+			_, own := c.libraryOwn[info.Digest]
+			delete(c.libraryOwn, info.Digest)
+			c.libraryMu.Unlock()
+			if own {
+				continue
+			}
+			if data, err := c.readObject(libraryBucket, libraryName); err == nil && data != nil {
+				onChange(data)
+			}
+		}
+	}()
+	return nil
+}
+
 // Collaboration compaction lease, stored as a JetStream KV entry per document.
 // Live updates are multi-writer and commutatively reconciled; CAS elects exactly
 // one client to materialize immutable snapshots. A crashed compactor is replaced
@@ -785,6 +880,8 @@ func bucketNameProblem(name string) string {
 		return "Enter a bucket name."
 	case len(name) > 64:
 		return "That bucket name is too long."
+	case name == libraryBucket:
+		return "That bucket name is reserved."
 	case strings.ContainsAny(name, ". ") || subjectUnsafe.MatchString(name):
 		return "Bucket names can only contain letters, digits, ‘-’ and ‘_’."
 	default:

@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -387,34 +388,105 @@ func TestServiceShutdownDoesNotWaitForDestroyedRenderer(t *testing.T) {
 	}
 }
 
+// resolveTestNATS starts a throwaway JetStream server when url is "spawn".
+func resolveTestNATS(t *testing.T, url string) string {
+	t.Helper()
+	if url != "spawn" {
+		return url
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "nats-server.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("nats-server", "--jetstream", "--addr", "127.0.0.1", "--port", strconv.Itoa(port), "--store_dir", t.TempDir())
+	command.Stdout, command.Stderr = logFile, logFile
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		_ = logFile.Close()
+	})
+	return fmt.Sprintf("nats://127.0.0.1:%d", port)
+}
+
+func TestSharedLibrarySyncsAcrossBuckets(t *testing.T) {
+	serverURL := os.Getenv("EXCALIBUR_TEST_NATS_URL")
+	if serverURL == "" {
+		t.Skip("set EXCALIBUR_TEST_NATS_URL to a server URL or 'spawn' to run the JetStream integration test")
+	}
+	serverURL = resolveTestNATS(t, serverURL)
+	var clients [2]*natsClient
+	for i := range clients {
+		id := fmt.Sprintf("lib-%d", i)
+		var err error
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if clients[i], err = connectNATS(NatsServerConfig{ID: id, Name: id, URL: serverURL}); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(clients[i].close)
+	}
+	changes := make(chan string, 4)
+	if err := clients[1].watchLibrary(func(data []byte) { changes <- string(data) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := clients[0].watchLibrary(func(data []byte) { changes <- "own:" + string(data) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := clients[0].writeObject("bucket-a", libraryName, []byte("legacy")); err != nil {
+		t.Fatal(err)
+	}
+	store := testStore(t)
+	store.natsClients["lib-0"] = clients[0]
+	store.activeSource, store.activeGroup = "nats:lib-0", "bucket-a"
+	library, err := store.library()
+	if err != nil || library == nil || *library != "legacy" {
+		t.Fatalf("legacy library not adopted: %v, %v", library, err)
+	}
+	if err := store.saveLibrary("shared"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"legacy", "shared"} {
+		select {
+		case got := <-changes:
+			if got != want {
+				t.Fatalf("watcher saw %q, want %q", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("library change %q did not reach the other client", want)
+		}
+	}
+	store.activeGroup = "bucket-b"
+	if library, err = store.library(); err != nil || library == nil || *library != "shared" {
+		t.Fatalf("library in another bucket = %v, %v", library, err)
+	}
+	select {
+	case got := <-changes:
+		t.Fatalf("unexpected library change %q (own writes must not be echoed)", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if buckets, err := clients[0].listBuckets(); err != nil || slices.Contains(buckets, libraryBucket) {
+		t.Fatalf("library bucket leaked into bucket list: %v, %v", buckets, err)
+	}
+}
+
 func TestCollaborationJetStreamDurability(t *testing.T) {
 	serverURL := os.Getenv("EXCALIBUR_TEST_NATS_URL")
 	if serverURL == "" {
 		t.Skip("set EXCALIBUR_TEST_NATS_URL to a server URL or 'spawn' to run the JetStream integration test")
 	}
-	if serverURL == "spawn" {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := listener.Addr().(*net.TCPAddr).Port
-		listener.Close()
-		logFile, err := os.Create(filepath.Join(t.TempDir(), "nats-server.log"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		command := exec.Command("nats-server", "--jetstream", "--addr", "127.0.0.1", "--port", strconv.Itoa(port), "--store_dir", t.TempDir())
-		command.Stdout, command.Stderr = logFile, logFile
-		if err := command.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-			_ = logFile.Close()
-		})
-		serverURL = fmt.Sprintf("nats://127.0.0.1:%d", port)
-	}
+	serverURL = resolveTestNATS(t, serverURL)
 	var client *natsClient
 	var err error
 	deadline := time.Now().Add(5 * time.Second)

@@ -340,8 +340,34 @@ func (a *App) openSelectedLocked() error {
 	library, err := a.store.library()
 	if err == nil {
 		a.emit("canvas:set-library", map[string]any{"json": library})
+		a.watchSharedLibraryLocked()
 	}
 	return err
+}
+
+// watchSharedLibraryLocked pushes library changes made by other clients to the
+// renderer while a board of the active NATS server is open.
+func (a *App) watchSharedLibraryLocked() {
+	if a.store.isLocal() {
+		return
+	}
+	client, err := a.store.clientFor(a.store.activeSource)
+	if err != nil {
+		return
+	}
+	sourceID := a.store.activeSource
+	err = client.watchLibrary(func(data []byte) {
+		a.mu.Lock()
+		active := a.store != nil && a.store.activeSource == sourceID
+		a.mu.Unlock()
+		if active {
+			text := string(data)
+			a.emit("canvas:set-library", map[string]any{"json": &text})
+		}
+	})
+	if err != nil {
+		log.Printf("watch shared library: %v", err)
+	}
 }
 
 func (a *App) SelectBoard(id string) error {

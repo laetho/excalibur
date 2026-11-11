@@ -16,6 +16,8 @@ without a separate collaboration server:
 - JetStream Object Store holds immutable snapshots, images, oversized updates,
   and an ordinary `.excalidraw` materialization;
 - JetStream KV elects one snapshot compactor and indexes the active snapshot;
+- one shape library is shared by all boards and buckets on the same server and
+  syncs live between clients;
 - Core NATS carries only ephemeral pointer presence; and
 - a persistent local outbox makes edits durable before remote replication, so
   drawing and board navigation remain safe while the server is unavailable.

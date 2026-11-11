@@ -84,6 +84,18 @@ from SHA-256(`B`) and uses these resources:
 | Immutable blob | `.crdt.<document-id>.file.<blob-hash>` | Images and oversized scene messages |
 | Deletion marker | `.crdt.<document-id>.deleted` | Prevents a stale compactor from recreating a deleted board |
 | JetStream KV bucket | `excalibur-locks` | Snapshot lease and CAS-protected snapshot index |
+| Object Store bucket | `excalibur-library` | Shape library shared by every board on the server (hidden from the bucket list) |
+
+### Shared library
+
+The Excalidraw shape library is per server, not per bucket. Clients keep it as
+one `library.excalidrawlib` object in `excalibur-library` and watch that bucket,
+so a change made in one board appears live in every other open client on the
+same server. A client does not echo its own writes (matched by object digest).
+Concurrent edits are last-writer-wins on the whole library. The first time a
+bucket is opened and no shared library exists, its legacy per-bucket
+`library.excalidrawlib` is adopted as the shared library. Local boards keep a
+`library.excalidrawlib` file in their folder.
 
 The update stream uses file storage with no age or byte limit. Updates are
 removed only by snapshot-aware compaction. NATS message IDs deduplicate retries
