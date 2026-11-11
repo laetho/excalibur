@@ -113,6 +113,8 @@ type CollabMessage =
   | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser'; button?: 'up' | 'down' }
   /** The scene rectangle a peer currently sees; lets others follow them. */
   | { type: 'view'; peerId: string; nickname?: string; bounds: Bounds }
+  /** `peerId` started or stopped following `target`; re-sent as a heartbeat while following. */
+  | { type: 'follow'; peerId: string; nickname?: string; target: string; action: 'FOLLOW' | 'UNFOLLOW' }
 
 type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems; snapshotSequence: string }
 
@@ -408,6 +410,9 @@ export default function Canvas({
   const peerLastSeen = useRef<Map<string, number>>(new Map())
   /** Latest visible scene rectangle per peer, applied when one of them is followed. */
   const peerViews = useRef<Map<string, Bounds>>(new Map())
+  /** Peers currently following this user (expire without a heartbeat). */
+  const followers = useRef<Map<string, { name: string; lastSeen: number }>>(new Map())
+  const [followerNames, setFollowerNames] = useState<string[]>([])
   const pendingBounds = useRef<Bounds | null>(null)
   const lastSentBounds = useRef('')
   const nicknameRef = useRef('')
@@ -706,6 +711,13 @@ export default function Canvas({
     )
   }, [publishCollabScene])
 
+  const sendFollow = useCallback((target: string, action: 'FOLLOW' | 'UNFOLLOW') => {
+    const session = collabSession.current
+    if (!session) return
+    const message: CollabMessage = { type: 'follow', peerId, nickname: nicknameRef.current || undefined, target, action }
+    collabSend(session.sourceId, session.bucket, session.documentId, JSON.stringify(message))
+  }, [])
+
   /** Send only the newest cursor position in each bandwidth window. */
   const flushPointer = useCallback(() => {
     clearTimeout(pointerTimer.current)
@@ -962,6 +974,8 @@ export default function Canvas({
     presenceTimer.current = undefined
     peerLastSeen.current.clear()
     peerViews.current.clear()
+    followers.current.clear()
+    setFollowerNames([])
     collabScene.current = null
     collabDirty.current = false
     collabRevision.current = 0
@@ -1171,6 +1185,24 @@ export default function Canvas({
         } catch {
           return
         }
+      } else if (message.type === 'follow') {
+        if (
+          typeof message.peerId !== 'string' ||
+          message.peerId === peerId ||
+          message.target !== peerId ||
+          (message.action !== 'FOLLOW' && message.action !== 'UNFOLLOW')
+        ) return
+        if (message.action === 'FOLLOW') {
+          const known = followers.current.has(message.peerId)
+          followers.current.set(message.peerId, {
+            name: collaborationDisplayName(message.peerId, message.nickname),
+            lastSeen: Date.now(),
+          })
+          if (!known) setFollowerNames([...followers.current.values()].map((f) => f.name))
+        } else if (followers.current.delete(message.peerId)) {
+          setFollowerNames([...followers.current.values()].map((f) => f.name))
+        }
+        return
       } else if (message.type === 'view') {
         if (typeof message.peerId !== 'string' || message.peerId === peerId || !isBounds(message.bounds)) return
         peerLastSeen.current.set(message.peerId, Date.now())
@@ -1483,6 +1515,15 @@ export default function Canvas({
           pendingBounds.current = own
           flushPointer()
           const cutoff = Date.now() - PRESENCE_TTL_MS
+          const followed = instance.getAppState().userToFollow
+          if (followed) sendFollow(followed.socketId, 'FOLLOW')
+          let followersChanged = false
+          for (const [followerId, follower] of followers.current) {
+            if (follower.lastSeen >= cutoff) continue
+            followers.current.delete(followerId)
+            followersChanged = true
+          }
+          if (followersChanged) setFollowerNames([...followers.current.values()].map((f) => f.name))
           const collaborators = new Map(instance.getAppState().collaborators)
           let changed = false
           for (const [remotePeerId, lastSeen] of peerLastSeen.current) {
@@ -1523,6 +1564,7 @@ export default function Canvas({
     enqueueCollabEvent,
     lockLoop,
     markCollabSyncedIfComplete,
+    sendFollow,
     sendFullScene,
     showCollabRepairing,
     teardownCollab,
@@ -1678,6 +1720,7 @@ export default function Canvas({
         onChange={onChange}
         isCollaborating={Boolean(collabDocumentId)}
         onUserFollow={({ userToFollow, action }) => {
+          sendFollow(userToFollow.socketId, action)
           if (action !== 'FOLLOW') return
           // Jump to the followed user's last known view right away instead of
           // waiting for their next scroll.
@@ -1754,6 +1797,14 @@ export default function Canvas({
           <WelcomeScreen.Hints.HelpHint />
         </WelcomeScreen>
       </Excalidraw>
+      {followerNames.length > 0 && (
+        <div className="canvas-followed-status" role="status" aria-live="polite">
+          <span className="canvas-persistence-dot" aria-hidden="true" />
+          <span>
+            {followerNames.length <= 2 ? `Followed by ${followerNames.join(' and ')}` : `Followed by ${followerNames.length} people`}
+          </span>
+        </div>
+      )}
       {showCollabSync && (
         <div className="canvas-syncing" role="status" aria-live="polite" aria-busy="true">
           <div className="canvas-syncing-card">

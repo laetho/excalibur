@@ -223,6 +223,12 @@ follower fits the peer's last known rectangle into its own viewport and tracks
 every later `view` message until the follower scrolls or zooms. A followed view
 is not saved as the board's remembered viewport.
 
+`follow` messages tell the followed peer who is following it. The follower
+sends one when it starts or stops following and repeats it with the heartbeat;
+the followed peer shows a "Followed by …" badge and drops followers whose
+heartbeat has expired, so a follower that leaves without unfollowing disappears
+after the presence TTL.
+
 ## Meaning of the synchronization indicator
 
 The status beside Excalidraw's menu distinguishes local durability from remote
