@@ -3,7 +3,7 @@
 Excalibur uses NATS directly for shared remote boards. There is no Excalibur
 collaboration server between the desktop applications and NATS. JetStream
 provides the durable update log, snapshots, blobs, and coordination; Core NATS
-is reserved for ephemeral pointer presence.
+is reserved for ephemeral pointer presence and live scene previews.
 
 Local filesystem boards do not use this protocol. They continue to persist as
 ordinary `.excalidraw` JSON files.
@@ -77,7 +77,7 @@ from SHA-256(`B`) and uses these resources:
 | --- | --- | --- |
 | JetStream stream | `EXCALIBUR_CRDT_<BUCKET_TOKEN>` | Retains durable updates for every document in the bucket |
 | Update subject | `wb.crdt.v2.<bucket-token>.<document-id>.updates` | Versioned scene batches and large-scene references |
-| Presence subject | `wb.crdt.v2.<bucket-token>.<document-id>.presence` | Ephemeral pointer/laser positions over Core NATS |
+| Presence subject | `wb.crdt.v2.<bucket-token>.<document-id>.presence` | Ephemeral pointer/laser positions and live element previews over Core NATS |
 | Object Store board | `<board>.excalidraw` | Compatibility materialization for browsing and export |
 | Document sidecar | `.crdt-document.<board-hash>` | Stable document identity |
 | Immutable snapshot | `.crdt.<document-id>.snapshot.<sequence>.<content-hash>` | Tombstone-preserving replay baseline |
@@ -106,7 +106,14 @@ idempotent if an older update is redelivered later.
 
 Excalidraw renders edits immediately. Collaboration publication is bounded to
 avoid sending pointer-frame updates and normally includes only elements whose
-`version`/`versionNonce` changed. Each durable message has a stable message ID.
+`version`/`versionNonce` changed. Elements already observed in the durable log
+from another client are not echoed back by the next local delta. Each durable
+message has a stable message ID.
+While an element is being dragged, resized, rotated, or drawn, durable
+checkpoints are reduced to roughly one per second and the gap is filled with
+ephemeral `scene-live` previews. Pointer-up sends one final preview and an
+immediate durable delta, so the committed state still uses the normal outbox
+path.
 
 Before a collaboration API reports local success, the native backend appends
 the update to `collab-outbox.json` and fsyncs it. The outbox is an append-only
@@ -206,7 +213,7 @@ Excalibur retains a small immutable snapshot rollback window. After activating a
 new snapshot it purges updates only through the *previous* snapshot sequence,
 leaving one complete interval for a client that raced snapshot discovery.
 
-## Presence
+## Presence and live previews
 
 Pointer and laser positions are sent over the document's Core NATS presence
 subject. They are intentionally ephemeral: they never enter JetStream, Object
@@ -228,6 +235,20 @@ sends one when it starts or stops following and repeats it with the heartbeat;
 the followed peer shows a "Followed by …" badge and drops followers whose
 heartbeat has expired, so a follower that leaves without unfollowing disappears
 after the presence TTL.
+
+The same subject carries `scene-live` messages: best-effort element previews sent
+at most about ten times per second during an active drag. They contain only
+elements that already have a durable version, are skipped when a message would
+exceed the normal collaboration payload bound, and are never acknowledged,
+retried, chunked, or written to the outbox. Receivers apply them with
+`CaptureUpdateAction.NEVER` and keep them out of the durable scene baseline, so
+snapshots can never capture a live-only position.
+
+If the sender disappears mid-gesture, receivers keep the preview for a short
+three-second TTL and then roll those elements back to their last durable
+version. A late joiner may briefly miss a preview until the next durable
+checkpoint; the worst-case durable crash-loss window is approximately one
+second.
 
 ## Meaning of the synchronization indicator
 

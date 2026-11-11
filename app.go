@@ -826,8 +826,9 @@ func (a *App) CopyBoardToSource(boardID, targetSource, targetGroup string) error
 	return nil
 }
 
-// CollabSend sends ephemeral presence over Core NATS. Durable drawing updates
-// use CollabPublish, so cursor traffic never enters the replay log.
+// CollabSend sends ephemeral presence and live scene previews over Core NATS.
+// Durable drawing updates use CollabPublish, so this traffic never enters the
+// replay log or local outbox.
 func (a *App) CollabSend(sourceID, bucket, documentID, data string) error {
 	a.mu.Lock()
 	if sourceID == localSourceID {

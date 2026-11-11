@@ -61,6 +61,15 @@ const SAVE_DEBOUNCE_MS = 300
  * The latest trailing state is always retained behind an in-flight publish.
  */
 const COLLAB_UPDATE_INTERVAL_MS = 150
+/** Active drags/resizes publish durable checkpoints less often; live deltas mask the gap. */
+const COLLAB_ACTIVE_UPDATE_INTERVAL_MS = 1_000
+/** Ephemeral scene deltas sent over Core NATS while an element interaction is active. */
+const LIVE_COLLAB_UPDATE_INTERVAL_MS = 100
+/** Revert live-only element state if its sender disappears before a durable checkpoint. */
+const LIVE_COLLAB_TTL_MS = 3_000
+const LIVE_COLLAB_EXPIRY_SWEEP_MS = 500
+/** Force a durable checkpoint if an Excalidraw interaction flag gets stuck. */
+const LIVE_COLLAB_INTERACTION_TIMEOUT_MS = 1_500
 /** Compaction is less frequent than live repair; JetStream retains updates between snapshots. */
 const COLLAB_SNAPSHOT_INTERVAL_MS = 60_000
 const COLLAB_INITIAL_SNAPSHOT_DELAY_MS = 2_000
@@ -110,6 +119,8 @@ type CollabMessage =
       fileIds?: string[]
     }
   | { type: 'scene-ref'; from: string; ref: string; messageId?: string }
+  /** Best-effort Core NATS preview; never enters the durable log or snapshots. */
+  | { type: 'scene-live'; from: string; elements: readonly ExcalidrawElement[] }
   | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser'; button?: 'up' | 'down' }
   /** The scene rectangle a peer currently sees; lets others follow them. */
   | { type: 'view'; peerId: string; nickname?: string; bounds: Bounds }
@@ -165,6 +176,62 @@ function fileVersionSignature(files: BinaryFiles): string {
     .map(([id, file]) => `${id}:${file.version ?? 0}`)
     .sort()
     .join('|')
+}
+
+function elementVersionKey(element: ExcalidrawElement): string {
+  return `${element.version}:${element.versionNonce}`
+}
+
+/** Excalidraw conflict precedence: version first, then versionNonce. */
+function compareElementVersions(a: ExcalidrawElement, b: ExcalidrawElement): number {
+  if (a.version !== b.version) return a.version - b.version
+  return a.versionNonce - b.versionNonce
+}
+
+function compareElementVersionKeys(a: string, b: string): number {
+  const [aVersion, aNonce] = a.split(':').map(Number)
+  const [bVersion, bNonce] = b.split(':').map(Number)
+  if (aVersion !== bVersion) return aVersion - bVersion
+  return aNonce - bNonce
+}
+
+function isLiveAppliedElement(live: ReadonlyMap<string, { key: string }>, element: ExcalidrawElement): boolean {
+  return live.get(element.id)?.key === elementVersionKey(element)
+}
+
+/**
+ * Snapshot material must never contain live-only state. Replace a live-applied
+ * element with its last durable version, or omit it when no durable version exists.
+ */
+function materializeDurableElements(
+  elements: readonly ExcalidrawElement[],
+  live: ReadonlyMap<string, { key: string }>,
+  durable: ReadonlyMap<string, ExcalidrawElement>,
+): readonly ExcalidrawElement[] {
+  const materialized: ExcalidrawElement[] = []
+  for (const element of elements) {
+    if (!isLiveAppliedElement(live, element)) {
+      materialized.push(element)
+      continue
+    }
+    const durableElement = durable.get(element.id)
+    if (durableElement) materialized.push(durableElement)
+  }
+  return materialized
+}
+
+/** Whether Excalidraw is actively manipulating elements rather than idling. */
+function isLiveInteraction(appState: AppState): boolean {
+  return Boolean(
+    appState.selectedElementsAreBeingDragged ||
+      appState.resizingElement ||
+      appState.isResizing ||
+      appState.isRotating ||
+      appState.newElement ||
+      appState.multiElement ||
+      appState.editingLinearElement ||
+      appState.editingTextElement,
+  )
 }
 
 /** Fast content fingerprint for immutable ObjectStore blob routing. */
@@ -382,6 +449,17 @@ export default function Canvas({
   const fileRefCache = useRef<WeakMap<object, { version: number; dataURL: string; ref: string }>>(new WeakMap())
   /** Last element versions acknowledged by JetStream, for lightweight deltas. */
   const publishedElementVersions = useRef<Map<string, string>>(new Map())
+  /** Last acknowledged durable element object per id, used for live eligibility and TTL reversion. */
+  const durableElementMap = useRef<Map<string, ExcalidrawElement>>(new Map())
+  /** Remote live-only element versions currently visible on this canvas. */
+  const liveAppliedElements = useRef<Map<string, { key: string; at: number }>>(new Map())
+  /** Element versions last sent over the ephemeral live channel. */
+  const livePublishedElementVersions = useRef<Map<string, string>>(new Map())
+  const liveCollabTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const liveInteractionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const liveExpiryTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const livePublishInFlight = useRef(false)
+  const liveInteraction = useRef(false)
   /** At most one normal scene publication runs per session; newer input coalesces behind it. */
   const sessionPublishes = useRef<Map<string, number>>(new Map())
   /** Every local-durability operation for a session, including forced navigation flushes. */
@@ -532,9 +610,11 @@ export default function Canvas({
         fileRefs[id] = ref
         if (uploadedFileRefs.current.get(id) !== ref) changedFiles[ref] = file
       }
-      const changedElements = full
-        ? [...elements]
-        : elements.filter((element) => publishedElementVersions.current.get(element.id) !== `${element.version}:${element.versionNonce}`)
+      const changedElements = elements.filter((element) => {
+        // A receiver must never persist another peer's live-only preview.
+        if (isLiveAppliedElement(liveAppliedElements.current, element)) return false
+        return full || publishedElementVersions.current.get(element.id) !== elementVersionKey(element)
+      })
       const batches: ExcalidrawElement[][] = []
       let batch: ExcalidrawElement[] = []
       const encoder = new TextEncoder()
@@ -605,7 +685,13 @@ export default function Canvas({
         }
         if (collabSession.current?.generation === session.generation) {
           for (const element of changedElements) {
-            publishedElementVersions.current.set(element.id, `${element.version}:${element.versionNonce}`)
+            publishedElementVersions.current.set(element.id, elementVersionKey(element))
+            // Forced final deltas can run beside an older checkpoint. Never let
+            // the older publication move the durable baseline backwards.
+            const durable = durableElementMap.current.get(element.id)
+            if (!durable || compareElementVersions(element, durable) >= 0) {
+              durableElementMap.current.set(element.id, element)
+            }
           }
           if (advertiseAppState && compareAppStateVersion(advertisedAppStateVersion, publishedAppStateVersion.current) > 0) {
             publishedAppStateVersion.current = advertisedAppStateVersion
@@ -674,7 +760,7 @@ export default function Canvas({
 
   /** Publish the latest local scene at a bounded rate. Excalidraw elements carry
    * their own version/versionNonce conflict metadata and are reconciled by peers. */
-  const flushPendingCollab = useCallback((force = false) => {
+  const flushPendingCollab = useCallback((force = false, full = false) => {
     clearTimeout(collabSyncTimer.current)
     collabSyncTimer.current = undefined
     const scene = pendingCollab.current
@@ -689,9 +775,10 @@ export default function Canvas({
       return null
     }
     pendingCollab.current = null
+    const durableElements = materializeDurableElements(scene.elements, liveAppliedElements.current, durableElementMap.current)
     collabScene.current = {
       name: boardNameRef.current,
-      elements: scene.elements,
+      elements: durableElements,
       appState: scene.appState,
       files: scene.files,
     }
@@ -700,14 +787,15 @@ export default function Canvas({
     // A forced navigation flush is a self-contained repair scene. It may run
     // beside an older retry, so include every element and let Excalidraw's
     // element versions deterministically keep the newest state on any arrival
-    // order.
+    // order. A full scene uses the durable materialization so a live-only
+    // preview can never replace its committed version.
     return publishCollabScene(
       scene.session,
-      scene.elements,
+      full ? durableElements : scene.elements,
       scene.appState,
       scene.files,
       'Could not publish a collaboration update',
-      force,
+      full,
     )
   }, [publishCollabScene])
 
@@ -734,6 +822,56 @@ export default function Canvas({
     }
     if (message) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
   }, [])
+
+  /**
+   * Send changed elements over Core NATS without touching the durable outbox.
+   * Restricted to elements that already have a durable baseline so a crashed
+   * sender can always be rolled back to known state by receivers.
+   */
+  const flushLiveCollab = useCallback(() => {
+    const target = collabSession.current
+    if (!target || !collabJoinReady.current || livePublishInFlight.current) return
+    const elements = pendingCollab.current?.elements ?? api.current?.getSceneElementsIncludingDeleted()
+    if (!elements) return
+    const changed = elements.filter((element) => {
+      if (!durableElementMap.current.has(element.id)) return false
+      if (isLiveAppliedElement(liveAppliedElements.current, element)) return false
+      const key = elementVersionKey(element)
+      // Already durable state needs no preview; only changes newer than the
+      // last durable version are live-only.
+      if (publishedElementVersions.current.get(element.id) === key) return false
+      return livePublishedElementVersions.current.get(element.id) !== key
+    })
+    if (changed.length === 0) return
+    const message: CollabMessage = { type: 'scene-live', from: peerId, elements: changed }
+    const encoded = JSON.stringify(message)
+    if (new TextEncoder().encode(encoded).byteLength > MAX_COLLAB_MESSAGE_BYTES) {
+      // Do not rebuild the same oversized batch every interval. A later element
+      // edit changes its version and becomes eligible again.
+      for (const element of changed) livePublishedElementVersions.current.set(element.id, elementVersionKey(element))
+      return
+    }
+    const sent = collabSend(target.sourceId, target.bucket, target.documentId, encoded)
+    if (!sent) return
+    livePublishInFlight.current = true
+    void sent
+      .then(() => {
+        if (collabSession.current?.generation !== target.generation) return
+        for (const element of changed) livePublishedElementVersions.current.set(element.id, elementVersionKey(element))
+      })
+      .catch((err: unknown) => log('error', `Could not send a live collaboration update: ${String(err)}`))
+      .finally(() => {
+        livePublishInFlight.current = false
+      })
+  }, [])
+
+  const scheduleLiveCollab = useCallback(() => {
+    if (liveCollabTimer.current) return
+    liveCollabTimer.current = setTimeout(() => {
+      liveCollabTimer.current = undefined
+      flushLiveCollab()
+    }, LIVE_COLLAB_UPDATE_INTERVAL_MS)
+  }, [flushLiveCollab])
 
   const savePendingLocal = useCallback((): Promise<void> => {
     const operation = localSaveInFlight.current.then(async () => {
@@ -775,9 +913,25 @@ export default function Canvas({
       if (!flushPendingCollab()) return
       clearTimeout(timer.current)
       timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
-    }, COLLAB_UPDATE_INTERVAL_MS)
+    }, liveInteraction.current ? COLLAB_ACTIVE_UPDATE_INTERVAL_MS : COLLAB_UPDATE_INTERVAL_MS)
   }, [flush, flushPendingCollab])
   resumeCollabSync.current = scheduleCollabSync
+
+  /**
+   * Excalidraw normally clears interaction flags on pointer-up. If a flag gets
+   * stuck, force a durable checkpoint so the crash-loss window stays bounded.
+   */
+  const scheduleLiveInteractionTimeout = useCallback(() => {
+    clearTimeout(liveInteractionTimer.current)
+    liveInteractionTimer.current = setTimeout(() => {
+      liveInteractionTimer.current = undefined
+      if (!liveInteraction.current) return
+      liveInteraction.current = false
+      clearTimeout(liveCollabTimer.current)
+      liveCollabTimer.current = undefined
+      flushPendingCollab(true)
+    }, LIVE_COLLAB_INTERACTION_TIMEOUT_MS)
+  }, [flushPendingCollab])
 
   /**
    * Reconcile a remote scene using Excalidraw's own collaboration semantics.
@@ -799,6 +953,26 @@ export default function Canvas({
       restored,
       instance.getAppState(),
     )
+    // Track the newest durable version independently of any live preview that
+    // concurrently won reconciliation on the canvas. A durable checkpoint that
+    // matches the live key must still replace the older durable baseline.
+    const reconciledById = new Map(reconciled.map((element) => [element.id, element]))
+    for (const element of restored) {
+      const existing = durableElementMap.current.get(element.id)
+      if (!existing || compareElementVersions(element, existing) >= 0) {
+        durableElementMap.current.set(element.id, element)
+      }
+      // Only mark a remote durable version as published when it is the exact
+      // object reflected in the scene. A distinct local edit that happens to
+      // share a version:nonce key must remain publishable, so never bump the
+      // map from observed remote state alone.
+      if ((reconciledById.get(element.id) as unknown) !== (element as unknown)) continue
+      const key = elementVersionKey(element)
+      const publishedKey = publishedElementVersions.current.get(element.id)
+      if (!publishedKey || compareElementVersionKeys(key, publishedKey) >= 0) {
+        publishedElementVersions.current.set(element.id, key)
+      }
+    }
     const files = instance.getFiles()
     const currentAppState = instance.getAppState()
     const messageSequence = sequenceMax(0n, sequence)
@@ -836,7 +1010,7 @@ export default function Canvas({
     lastBackground.current = reconciledAppState.viewBackgroundColor
     collabScene.current = {
       name: boardNameRef.current,
-      elements: reconciled,
+      elements: materializeDurableElements(reconciled, liveAppliedElements.current, durableElementMap.current),
       appState: reconciledAppState,
       files,
     }
@@ -901,6 +1075,50 @@ export default function Canvas({
     timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS)
   }, [flush, flushPendingCollab, requestCollabReplay])
 
+  /**
+   * Apply an ephemeral live delta. This deliberately never touches durable
+   * bookkeeping: no snapshot baseline, dirty flag, file fetch, or local save.
+   */
+  const applyLiveScene = useCallback((message: Extract<CollabMessage, { type: 'scene-live' }>): void => {
+    const instance = api.current
+    if (!instance) return
+    // Only elements with a durable baseline may be previewed. This guarantees a
+    // receiver always has a version to revert to if the sender dies.
+    const incoming = message.elements.filter((element) => durableElementMap.current.has(element.id))
+    if (incoming.length === 0) return
+    const local = instance.getSceneElementsIncludingDeleted()
+    const restored = restoreElements(incoming, local) as unknown as readonly RemoteExcalidrawElement[]
+    const reconciled = reconcileElements(
+      local as readonly OrderedExcalidrawElement[],
+      restored,
+      instance.getAppState(),
+    )
+    const files = instance.getFiles()
+    const currentAppState = instance.getAppState()
+    lastVersion.current = hashElementsVersion(reconciled)
+    lastFileSignature.current = fileVersionSignature(files)
+    lastBackground.current = currentAppState.viewBackgroundColor
+    instance.updateScene({ elements: reconciled, captureUpdate: CaptureUpdateAction.NEVER })
+    const reconciledById = new Map(reconciled.map((element) => [element.id, element]))
+    const restoredById = new Map(restored.map((element) => [element.id, element]))
+    const now = Date.now()
+    for (const element of incoming) {
+      const current = reconciledById.get(element.id)
+      const incomingKey = elementVersionKey(element)
+      const restoredElement = restoredById.get(element.id)
+      // restoreElements can normalize some fields and bump versionNonce. Track
+      // the version actually reconciled onto the canvas, not only the wire one.
+      const appliedKey = restoredElement ? elementVersionKey(restoredElement) : incomingKey
+      const entry = liveAppliedElements.current.get(element.id)
+      if (current && elementVersionKey(current) === appliedKey) {
+        // Refresh each id independently so long drags never expire mid-motion.
+        liveAppliedElements.current.set(element.id, { key: appliedKey, at: now })
+      } else if (entry && (entry.key === incomingKey || entry.key === appliedKey)) {
+        liveAppliedElements.current.delete(element.id)
+      }
+    }
+  }, [])
+
   const sendFullScene = useCallback(() => {
     const session = collabSession.current
     const instance = api.current
@@ -908,10 +1126,16 @@ export default function Canvas({
     const appState = instance.getAppState()
     const elements = instance.getSceneElementsIncludingDeleted()
     const files = instance.getFiles()
-    collabScene.current = { name: boardNameRef.current, elements, appState, files }
+    const durableElements = materializeDurableElements(elements, liveAppliedElements.current, durableElementMap.current)
+    collabScene.current = {
+      name: boardNameRef.current,
+      elements: durableElements,
+      appState,
+      files,
+    }
     collabDirty.current = true
     collabRevision.current++
-    publishCollabScene(session, elements, appState, files, 'Could not publish a full collaboration scene', true)
+    publishCollabScene(session, durableElements, appState, files, 'Could not publish a full collaboration scene', true)
   }, [publishCollabScene])
 
   /** Compact the reconciled scene into an immutable sequence-addressed snapshot. */
@@ -944,13 +1168,48 @@ export default function Canvas({
       })
   }, [])
 
+  /** Roll back live-only state whose sender vanished before a durable checkpoint. */
+  const expireLiveAppliedElements = useCallback(() => {
+    const live = liveAppliedElements.current
+    if (live.size === 0) return
+    const instance = api.current
+    if (!instance) {
+      live.clear()
+      return
+    }
+    const now = Date.now()
+    const elements = instance.getSceneElementsIncludingDeleted()
+    const currentById = new Map(elements.map((element) => [element.id, element]))
+    const replacements = new Map<string, ExcalidrawElement>()
+    for (const [id, entry] of live) {
+      const current = currentById.get(id)
+      if (!current || elementVersionKey(current) !== entry.key) {
+        // A local edit or a durable update already superseded the preview.
+        live.delete(id)
+        continue
+      }
+      const durable = durableElementMap.current.get(id)
+      if (!durable || elementVersionKey(durable) === entry.key) {
+        live.delete(id)
+        continue
+      }
+      if (now - entry.at < LIVE_COLLAB_TTL_MS) continue
+      replacements.set(id, durable)
+      live.delete(id)
+    }
+    if (replacements.size === 0) return
+    const next = elements.map((element) => replacements.get(element.id) ?? element)
+    lastVersion.current = hashElementsVersion(next)
+    instance.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.NEVER })
+  }, [])
+
   const teardownCollab = useCallback(() => {
     // A normal bounded-rate flush coalesces behind an in-flight publish. During
     // navigation there will be no next timer to drain that trailing scene, so
     // force it into its own immutable-session publication before clearing the
     // refs. The backend outbox makes the initiated publish durable and its retry
     // remains routed to the board being left.
-    flushPendingCollab(true)
+    flushPendingCollab(true, true)
     const session = collabSession.current
     collabSession.current = null
     collabJoinReady.current = false
@@ -972,6 +1231,17 @@ export default function Canvas({
     lastSentBounds.current = ''
     clearInterval(presenceTimer.current)
     presenceTimer.current = undefined
+    clearInterval(liveExpiryTimer.current)
+    liveExpiryTimer.current = undefined
+    clearTimeout(liveCollabTimer.current)
+    liveCollabTimer.current = undefined
+    clearTimeout(liveInteractionTimer.current)
+    liveInteractionTimer.current = undefined
+    liveInteraction.current = false
+    livePublishInFlight.current = false
+    liveAppliedElements.current.clear()
+    livePublishedElementVersions.current.clear()
+    durableElementMap.current.clear()
     peerLastSeen.current.clear()
     peerViews.current.clear()
     followers.current.clear()
@@ -1185,6 +1455,15 @@ export default function Canvas({
         } catch {
           return
         }
+      } else if (message.type === 'scene-live') {
+        if (event.sequence !== '0' || typeof message.from !== 'string' || !Array.isArray(message.elements)) return
+        if (message.from === peerId) return
+        try {
+          applyLiveScene(message)
+        } catch (err) {
+          log('error', `Could not apply a live collaboration preview: ${String(err)}`)
+        }
+        return
       } else if (message.type === 'follow') {
         if (
           typeof message.peerId !== 'string' ||
@@ -1254,7 +1533,7 @@ export default function Canvas({
         log('error', `Could not acknowledge collaboration update: ${String(err)}`)
       }
     },
-    [acknowledgeCollabEvent, applyRemoteScene, applySceneReference, requestCollabReplay],
+    [acknowledgeCollabEvent, applyLiveScene, applyRemoteScene, applySceneReference, requestCollabReplay],
   )
 
   const enqueueCollabEvent = useCallback((session: CollabSession, event: BufferedCollabEvent): Promise<void> => {
@@ -1337,7 +1616,7 @@ export default function Canvas({
       onTakePending((requestId) => {
         clearTimeout(timer.current)
         const session = collabSession.current
-        const publication = flushPendingCollab(true)
+        const publication = flushPendingCollab(true, true)
         flushView()
         // Durable collaboration updates/snapshots own remote-board persistence;
         // returning a full JSON scene here would restore the old multi-writer
@@ -1427,7 +1706,7 @@ export default function Canvas({
       }
       collabSession.current = session
       const instance = api.current
-      collabScene.current = instance
+      const initialScene = instance
         ? {
             name: boardNameRef.current,
             elements: instance.getSceneElementsIncludingDeleted(),
@@ -1440,6 +1719,8 @@ export default function Canvas({
             appState: (currentBoard.data.appState ?? {}) as AppState,
             files: currentBoard.data.files ?? {},
           }
+      collabScene.current = initialScene
+      durableElementMap.current = new Map(initialScene.elements.map((element) => [element.id, element]))
     }
     let cancelled = false
     collabJoinReady.current = false
@@ -1533,6 +1814,8 @@ export default function Canvas({
           }
           if (changed) instance.updateScene({ collaborators })
         }, PRESENCE_TTL_MS / 3)
+        clearInterval(liveExpiryTimer.current)
+        liveExpiryTimer.current = setInterval(expireLiveAppliedElements, LIVE_COLLAB_EXPIRY_SWEEP_MS)
         lockLoop()
         lockTimer.current = setInterval(lockLoop, LOCK_RENEW_MS)
         initialSnapshotTimer.current = setTimeout(writeSnapshot, COLLAB_INITIAL_SNAPSHOT_DELAY_MS)
@@ -1559,6 +1842,7 @@ export default function Canvas({
     collabBoardId,
     collabDocumentId,
     collabRestart,
+    expireLiveAppliedElements,
     flushPendingCollab,
     finishCollabRepair,
     enqueueCollabEvent,
@@ -1685,7 +1969,24 @@ export default function Canvas({
       // rate. Peers reconcile Excalidraw's element versions and tombstones.
       setPersistenceStatus('unwritten')
       pendingCollab.current = { session, elements, appState, files }
-      scheduleCollabSync()
+      if (isLiveInteraction(appState)) {
+        liveInteraction.current = true
+        scheduleLiveInteractionTimeout()
+        scheduleLiveCollab()
+        scheduleCollabSync()
+      } else if (liveInteraction.current) {
+        // Pointer-up/gesture end: send one last preview, then commit the final
+        // delta immediately instead of waiting for the reduced durable interval.
+        liveInteraction.current = false
+        clearTimeout(liveInteractionTimer.current)
+        liveInteractionTimer.current = undefined
+        clearTimeout(liveCollabTimer.current)
+        liveCollabTimer.current = undefined
+        flushLiveCollab()
+        flushPendingCollab(true)
+      } else {
+        scheduleCollabSync()
+      }
     } else {
       pending.current = { name: board.name, elements, appState, files }
       clearTimeout(timer.current)

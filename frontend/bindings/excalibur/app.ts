@@ -150,8 +150,9 @@ export function CollabRenewLock(sourceID: string, bucket: string, documentID: st
 }
 
 /**
- * CollabSend sends ephemeral presence over Core NATS. Durable drawing updates
- * use CollabPublish, so cursor traffic never enters the replay log.
+ * CollabSend sends ephemeral presence and live scene previews over Core NATS.
+ * Durable drawing updates use CollabPublish, so this traffic never enters the
+ * replay log or local outbox.
  */
 export function CollabSend(sourceID: string, bucket: string, documentID: string, data: string): $CancellablePromise<void> {
     return $Call.ByID(4089177030, sourceID, bucket, documentID, data);
