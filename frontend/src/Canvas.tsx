@@ -3,6 +3,7 @@ import {
   Excalidraw,
   exportToCanvas,
   getCommonBounds,
+  getVisibleSceneBounds,
   hashElementsVersion,
   MainMenu,
   reconcileElements,
@@ -12,6 +13,7 @@ import {
   serializeAsJSON,
   serializeLibraryAsJSON,
   WelcomeScreen,
+  zoomToFitBounds,
 } from '@excalidraw/excalidraw'
 import '@excalidraw/excalidraw/index.css'
 import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
@@ -64,6 +66,8 @@ const COLLAB_SNAPSHOT_INTERVAL_MS = 60_000
 const COLLAB_INITIAL_SNAPSHOT_DELAY_MS = 2_000
 /** Cursor presence is best-effort; 10fps is enough while keeping constrained links usable. */
 const POINTER_UPDATE_INTERVAL_MS = 100
+/** Laser trails need a denser stream than a cursor to look smooth. */
+const LASER_UPDATE_INTERVAL_MS = 33
 const PRESENCE_TTL_MS = 30_000
 /** Leader lease TTL and how often it is renewed/contested while collaborating. */
 const LOCK_TTL_SECONDS = 30
@@ -106,7 +110,9 @@ type CollabMessage =
       fileIds?: string[]
     }
   | { type: 'scene-ref'; from: string; ref: string; messageId?: string }
-  | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser' }
+  | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser'; button?: 'up' | 'down' }
+  /** The scene rectangle a peer currently sees; lets others follow them. */
+  | { type: 'view'; peerId: string; nickname?: string; bounds: Bounds }
 
 type OpenBoard = { name: string; data: ImportedDataState; key: number; library: LibraryItems; snapshotSequence: string }
 
@@ -266,6 +272,21 @@ function zoomToFit(api: ExcalidrawImperativeAPI, elements: readonly ExcalidrawEl
   return view
 }
 
+/** Show the scene rectangle another peer is looking at (Excalidraw's "follow user" behaviour). */
+type Bounds = readonly [number, number, number, number]
+
+function applyFollowedBounds(api: ExcalidrawImperativeAPI, bounds: Bounds) {
+  const { appState } = zoomToFitBounds({ appState: api.getAppState(), bounds, fitToViewport: true, viewportZoomFactor: 1 })
+  api.updateScene({
+    appState: { scrollX: appState.scrollX, scrollY: appState.scrollY, zoom: appState.zoom },
+    captureUpdate: CaptureUpdateAction.NEVER,
+  })
+}
+
+function isBounds(value: unknown): value is Bounds {
+  return Array.isArray(value) && value.length === 4 && value.every((n) => typeof n === 'number' && Number.isFinite(n))
+}
+
 function applyView(api: ExcalidrawImperativeAPI, { scrollX, scrollY, zoom }: Viewport) {
   api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoom as AppState['zoom']['value'] } } })
 }
@@ -385,6 +406,12 @@ export default function Canvas({
   const pointerTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const presenceTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const peerLastSeen = useRef<Map<string, number>>(new Map())
+  /** Latest visible scene rectangle per peer, applied when one of them is followed. */
+  const peerViews = useRef<Map<string, Bounds>>(new Map())
+  const pendingBounds = useRef<Bounds | null>(null)
+  const lastSentBounds = useRef('')
+  const nicknameRef = useRef('')
+  nicknameRef.current = collaborationNickname.trim()
   const lastVersion = useRef<number | null>(null)
   const lastFileSignature = useRef('')
   const lastBackground = useRef<AppState['viewBackgroundColor'] | undefined>(undefined)
@@ -685,8 +712,15 @@ export default function Canvas({
     pointerTimer.current = undefined
     const message = pendingPointer.current
     pendingPointer.current = null
+    const bounds = pendingBounds.current
+    pendingBounds.current = null
     const target = collabSession.current
-    if (message && target) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
+    if (!target) return
+    if (bounds) {
+      const view: CollabMessage = { type: 'view', peerId, nickname: nicknameRef.current || undefined, bounds }
+      collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(view))
+    }
+    if (message) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
   }, [])
 
   const savePendingLocal = useCallback((): Promise<void> => {
@@ -796,11 +830,23 @@ export default function Canvas({
     }
     collabDirty.current = true
     collabRevision.current++
-    instance.updateScene({
-      elements: reconciled,
-      appState: remoteBackground !== undefined ? ({ viewBackgroundColor: remoteBackground } as AppState) : undefined,
-      captureUpdate: CaptureUpdateAction.NEVER,
-    })
+    // Our own updates come back through the log, usually while the local scene is
+    // already ahead of them (e.g. mid-drag). A NEVER update re-baselines
+    // Excalidraw's history snapshot to the current scene, which would swallow the
+    // undo entry for the move in progress. Only touch the scene if it changed.
+    const sceneChanged =
+      remoteBackground !== undefined ||
+      reconciled.length !== local.length ||
+      reconciled.some((element, i) =>
+        element.id !== local[i].id || element.version !== local[i].version || element.versionNonce !== local[i].versionNonce,
+      )
+    if (sceneChanged) {
+      instance.updateScene({
+        elements: reconciled,
+        appState: remoteBackground !== undefined ? ({ viewBackgroundColor: remoteBackground } as AppState) : undefined,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      })
+    }
     const target = collabSession.current
     const remoteFileVersions = message.fileVersions ?? Object.fromEntries((message.fileIds ?? []).map((id) => [id, 0]))
     const missingFiles = Object.entries(remoteFileVersions)
@@ -910,9 +956,12 @@ export default function Canvas({
     clearTimeout(pointerTimer.current)
     pointerTimer.current = undefined
     pendingPointer.current = null
+    pendingBounds.current = null
+    lastSentBounds.current = ''
     clearInterval(presenceTimer.current)
     presenceTimer.current = undefined
     peerLastSeen.current.clear()
+    peerViews.current.clear()
     collabScene.current = null
     collabDirty.current = false
     collabRevision.current = 0
@@ -1122,6 +1171,21 @@ export default function Canvas({
         } catch {
           return
         }
+      } else if (message.type === 'view') {
+        if (typeof message.peerId !== 'string' || message.peerId === peerId || !isBounds(message.bounds)) return
+        peerLastSeen.current.set(message.peerId, Date.now())
+        peerViews.current.set(message.peerId, message.bounds)
+        const instance = api.current
+        if (!instance) return
+        const collaborators = new Map(instance.getAppState().collaborators)
+        collaborators.set(message.peerId as SocketId, {
+          ...collaborators.get(message.peerId as SocketId),
+          username: collaborationDisplayName(message.peerId, message.nickname),
+          color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
+        })
+        instance.updateScene({ collaborators, captureUpdate: CaptureUpdateAction.NEVER })
+        if (instance.getAppState().userToFollow?.socketId === message.peerId) applyFollowedBounds(instance, message.bounds)
+        return
       } else if (
         message.type !== 'pointer' ||
         typeof message.peerId !== 'string' ||
@@ -1135,7 +1199,9 @@ export default function Canvas({
         peerLastSeen.current.set(message.peerId, Date.now())
         const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
         collaborators.set(message.peerId as SocketId, {
+          ...collaborators.get(message.peerId as SocketId),
           pointer: { x: message.x, y: message.y, tool: message.tool },
+          button: message.button === 'down' ? 'down' : 'up',
           username: collaborationDisplayName(message.peerId, message.nickname),
           color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
         })
@@ -1404,9 +1470,18 @@ export default function Canvas({
         // scene on every join wastes bandwidth and reconciliation time.
         if (collabReplayThrough.current === 0n && collabSequence.current === 0n) sendFullScene()
         snapshotTimer.current = setInterval(writeSnapshot, COLLAB_SNAPSHOT_INTERVAL_MS)
+        if (api.current) {
+          pendingBounds.current = getVisibleSceneBounds(api.current.getAppState())
+          flushPointer()
+        }
         presenceTimer.current = setInterval(() => {
           const instance = api.current
           if (!instance) return
+          // Heartbeat: keeps this peer listed (and followable) while idle.
+          const own = getVisibleSceneBounds(instance.getAppState())
+          lastSentBounds.current = own.join(',')
+          pendingBounds.current = own
+          flushPointer()
           const cutoff = Date.now() - PRESENCE_TTL_MS
           const collaborators = new Map(instance.getAppState().collaborators)
           let changed = false
@@ -1517,7 +1592,17 @@ export default function Canvas({
       })
     }
     // Remember scrolling and zooming (reported to Rust, debounced; never written into the board file).
-    if (trackingView.current) {
+    if (collabSession.current) {
+      const bounds = getVisibleSceneBounds(appState)
+      const key = bounds.join(',')
+      if (key !== lastSentBounds.current) {
+        lastSentBounds.current = key
+        pendingBounds.current = bounds
+        if (!pointerTimer.current) pointerTimer.current = setTimeout(flushPointer, POINTER_UPDATE_INTERVAL_MS)
+      }
+    }
+    // A view borrowed from the followed user is not the user's own place on the board.
+    if (trackingView.current && !appState.userToFollow) {
       const view: Viewport = { scrollX: appState.scrollX, scrollY: appState.scrollY, zoom: appState.zoom.value }
       if (!sameView(lastView.current, view)) {
         lastView.current = view
@@ -1591,12 +1676,40 @@ export default function Canvas({
           api.current = instance
         }}
         onChange={onChange}
+        isCollaborating={Boolean(collabDocumentId)}
+        onUserFollow={({ userToFollow, action }) => {
+          if (action !== 'FOLLOW') return
+          // Jump to the followed user's last known view right away instead of
+          // waiting for their next scroll.
+          const bounds = peerViews.current.get(userToFollow.socketId)
+          if (bounds && api.current) applyFollowedBounds(api.current, bounds)
+        }}
         onPointerUpdate={(payload) => {
           const target = collabSession.current
           if (!target) return
           const nickname = collaborationNickname.trim() || undefined
-          pendingPointer.current = { type: 'pointer', peerId, nickname, x: payload.pointer.x, y: payload.pointer.y, tool: 'pointer' }
-          if (!pointerTimer.current) {
+          const message: Extract<CollabMessage, { type: 'pointer' }> = {
+            type: 'pointer',
+            peerId,
+            nickname,
+            x: payload.pointer.x,
+            y: payload.pointer.y,
+            tool: payload.pointer.tool,
+            button: payload.button,
+          }
+          // Laser strokes are defined by press/release; never let a coalesced
+          // message swallow either edge.
+          const previous = pendingPointer.current
+          if (previous && (previous.button !== message.button || previous.tool !== message.tool)) {
+            flushPointer()
+          }
+          pendingPointer.current = message
+          if (message.tool === 'laser') {
+            if (!pointerTimer.current || previous?.button !== message.button) {
+              clearTimeout(pointerTimer.current)
+              pointerTimer.current = setTimeout(flushPointer, LASER_UPDATE_INTERVAL_MS)
+            }
+          } else if (!pointerTimer.current) {
             pointerTimer.current = setTimeout(flushPointer, POINTER_UPDATE_INTERVAL_MS)
           }
         }}

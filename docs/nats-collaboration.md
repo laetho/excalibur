@@ -213,6 +213,16 @@ subject. They are intentionally ephemeral: they never enter JetStream, Object
 Store, snapshots, or the local outbox. A client removes a collaborator after the
 presence TTL expires and clears presence state when switching boards.
 
+`pointer` messages carry the tool (`pointer` or `laser`) and the button state;
+the laser trail is drawn from the press/release edges, so those are never
+coalesced away, and laser positions are sent at a higher rate than cursors.
+`view` messages carry the scene rectangle a peer currently sees. They are sent
+on scroll/zoom, on join, and as a heartbeat, so an idle peer stays listed and
+can be followed. When a user follows a peer from Excalidraw's user list, the
+follower fits the peer's last known rectangle into its own viewport and tracks
+every later `view` message until the follower scrolls or zooms. A followed view
+is not saved as the board's remembered viewport.
+
 ## Meaning of the synchronization indicator
 
 The status beside Excalidraw's menu distinguishes local durability from remote
