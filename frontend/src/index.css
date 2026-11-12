@@ -1319,21 +1319,31 @@ button.link-button:hover {
   margin: 5px 6px;
 }
 
-/* MARK: - Merlin side panel */
+/* MARK: - Merlin side panel
+ *
+ * Built from the same parts as Settings and the sidebar: an 18px title with a
+ * secondary subtitle, hairline dividers, rounded 10px groups, the accent
+ * purple for Merlin's own marks, and the selected-row tint for your messages. */
 
 .merlin-sidebar {
+  --merlin-width: clamp(300px, 30vw, 400px);
   width: 0;
   flex: 0 0 auto;
   overflow: hidden;
-  background: var(--modal-bg);
+  background: var(--sidebar-bg);
   /* Same timing as the width transition Excalidraw gives its docked Library sidebar. */
   transition: width 0.1s ease-in-out;
 }
 
 .merlin-sidebar.open {
-  width: clamp(300px, 30vw, 400px);
-  border-left: 1px solid var(--divider);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.06);
+  width: var(--merlin-width);
+  border-left: 1px solid var(--sidebar-border);
+}
+
+@media (max-width: 800px) {
+  .merlin-sidebar {
+    --merlin-width: clamp(260px, 42vw, 320px);
+  }
 }
 
 .merlin-canvas-toggle {
@@ -1365,6 +1375,7 @@ button.link-button:hover {
   line-height: 0;
   letter-spacing: 0.4px;
   white-space: nowrap;
+  overflow: hidden; /* clips the periodic sheen */
   transition: right 0.1s ease-in-out, background 120ms ease;
 }
 
@@ -1398,276 +1409,541 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
   opacity: 0.45;
 }
 
+/* Every ~10s the sparkles twinkle and a sheen crosses the button, to hint that
+   Merlin is there. The motion is the first ~1.2s of each 10s cycle. */
+.merlin-canvas-toggle:not(:disabled) svg path {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: merlin-twinkle 10s ease-in-out 2s infinite;
+}
+
+.merlin-canvas-toggle:not(:disabled) svg path:nth-child(2) {
+  animation-name: merlin-twinkle-small;
+}
+
+.merlin-canvas-toggle:not(:disabled)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.45) 50%, transparent 65%);
+  transform: translateX(-100%);
+  animation: merlin-sheen 10s ease-in-out 2s infinite;
+  pointer-events: none;
+}
+
+@keyframes merlin-twinkle {
+  0%, 12%, 100% { transform: none; }
+  4% { transform: scale(1.25) rotate(18deg); }
+  8% { transform: scale(0.92) rotate(-6deg); }
+}
+
+@keyframes merlin-twinkle-small {
+  0%, 3%, 14%, 100% { transform: none; opacity: 1; }
+  6% { transform: scale(0.4); opacity: 0.3; }
+  10% { transform: scale(1.4) rotate(45deg); opacity: 1; }
+}
+
+@keyframes merlin-sheen {
+  0% { transform: translateX(-100%); }
+  10%, 100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .merlin-canvas-toggle svg path,
+  .merlin-canvas-toggle::after {
+    animation: none !important;
+  }
+}
+
+/* The panel keeps its full width while the sidebar animates open, so it slides
+   in instead of reflowing at every step. */
 .merlin-panel {
-  width: 100%;
+  width: var(--merlin-width);
   height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--modal-bg);
+  background: var(--sidebar-bg);
 }
 
-.ai-chat-header {
+/* Header: badge, title and board name, close; like the Settings pane header. */
+.merlin-header {
+  position: relative;
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 20px 20px 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 16px 14px 20px;
 }
 
-.ai-chat-header > div {
+/* Hairline inset to the gutter, like the sidebar's section dividers. */
+.merlin-header::after {
+  content: '';
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 0;
+  height: 1px;
+  background: var(--divider);
+}
+
+.merlin-badge {
+  flex-shrink: 0;
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--accent-text);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.merlin-badge svg {
+  width: 18px;
+  height: 18px;
+}
+
+.merlin-badge.large {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+}
+
+.merlin-badge.large svg {
+  width: 24px;
+  height: 24px;
+}
+
+.merlin-title {
+  flex: 1;
   min-width: 0;
 }
 
-.ai-chat-header strong {
-  display: block;
-  overflow: hidden;
+.merlin-title h2 {
+  margin: 0;
   font-size: 18px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.2;
 }
 
-.ai-chat-header .icon-button {
-  flex-shrink: 0;
-  margin: -4px -8px 0 0;
-}
-
-.ai-chat-header span,
-.ai-chat-header select {
+.merlin-title p {
+  margin: 2px 0 0;
+  overflow: hidden;
   color: var(--text-secondary);
   font-size: 12px;
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ai-chat-header select {
-  max-width: 220px;
-  margin-top: 4px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  outline: none;
+.merlin-close {
+  flex-shrink: 0;
+  margin-right: -4px;
 }
 
-.ai-chat-messages {
+/* Conversation */
+
+.merlin-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 16px 12px;
   user-select: text;
   -webkit-user-select: text;
 }
 
-.ai-chat-empty {
-  margin: 0;
-  padding: 14px;
-  text-align: left;
-  color: var(--text-secondary);
-  border: 1px solid var(--divider);
-  border-radius: 10px;
+.merlin-welcome {
+  margin: auto 0;
+  padding: 8px 8px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
 }
 
-.ai-chat-empty p {
+.merlin-welcome h3 {
+  margin: 14px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.merlin-welcome p {
+  max-width: 280px;
   margin: 6px 0 0;
-  line-height: 1.4;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
-.ai-message {
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  background: var(--modal-bg);
+.merlin-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.merlin-suggestions button {
+  padding: 6px 11px;
   border: 1px solid var(--divider);
-  border-radius: 10px;
+  border-radius: 999px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.ai-message-meta {
+.merlin-suggestions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.merlin-suggestions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--divider));
+  background: var(--card-hover);
+}
+
+.merlin-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+/* Your messages: right-aligned bubbles in the selected-row tint. */
+.merlin-message.user {
+  position: relative;
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+  color: var(--row-selected-text);
+  background: var(--row-selected);
+}
+
+/* Merlin's answers: full width, plain text under a small byline. */
+.merlin-message.assistant {
+  align-self: stretch;
+}
+
+.merlin-message-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin: 0 0 6px;
+  gap: 7px;
+  height: 22px;
+  margin-bottom: 4px;
 }
 
-.ai-message-meta > span {
-  color: var(--text-secondary);
-  font-size: 10px;
+.merlin-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--accent-text);
+  background: var(--accent-strong);
+}
+
+.merlin-avatar svg {
+  width: 12px;
+  height: 12px;
+}
+
+.merlin-byline {
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
 }
 
-.ai-message.user .ai-message-meta {
-  justify-content: flex-end;
-}
-
-.ai-message-copy {
-  padding: 2px 6px;
-  border-radius: 5px;
+/* Copy shows on hover, like row actions in the sidebar. */
+.merlin-copy {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
 }
 
-.ai-message-copy:hover {
+.merlin-message:hover .merlin-copy,
+.merlin-copy:focus-visible {
+  opacity: 1;
+}
+
+.merlin-copy:hover {
   color: var(--text);
   background: var(--row-hover);
 }
 
-.ai-message p {
-  display: block;
-  max-width: none;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.42;
+.merlin-message.streaming p::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  animation: merlin-caret 1s steps(1) infinite;
 }
 
-.ai-thinking {
-  max-width: 92%;
-  margin: 0 0 6px;
-  padding: 7px 9px;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--input-bg) 72%, transparent);
+@keyframes merlin-caret {
+  50% { opacity: 0; }
+}
+
+.merlin-typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 6px 0 2px;
+}
+
+.merlin-typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: merlin-typing 1.2s ease-in-out infinite;
+}
+
+.merlin-typing i:nth-child(2) { animation-delay: 0.15s; }
+.merlin-typing i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes merlin-typing {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.merlin-thinking {
+  margin: 0 0 8px;
   border: 1px solid var(--divider);
-  border-radius: 8px;
-  font-size: 11px;
-  text-align: left;
-}
-
-.ai-thinking summary {
-  cursor: pointer;
-  font-weight: 600;
-  user-select: none;
-}
-
-.ai-thinking > div {
-  margin-top: 6px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.4;
-}
-
-.ai-message.user {
-  color: var(--row-selected-text);
-  background: var(--row-selected);
-  border-color: color-mix(in srgb, var(--accent) 25%, var(--divider));
-  text-align: left;
-}
-
-.ai-message.user p {
-  color: inherit;
-  background: transparent;
-  text-align: left;
-}
-
-.ai-message.user .ai-message-meta > span {
-  color: inherit;
-  opacity: 0.72;
-}
-
-.ai-message.queued {
-  opacity: 0.72;
-}
-
-.ai-message.queued > div {
-  display: flex;
-  justify-content: flex-end;
-  align-items: flex-start;
-  gap: 5px;
-}
-
-.ai-queue-remove {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  font-size: 17px;
-  line-height: 1;
-}
-
-.ai-queue-remove:hover {
-  color: var(--text);
-  background: var(--hover);
-}
-
-.ai-chat-status,
-.ai-chat-error {
-  padding: 6px 4px;
+  border-radius: 10px;
   color: var(--text-secondary);
   font-size: 12px;
 }
 
-.ai-chat-error {
+.merlin-thinking summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 500;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.merlin-thinking > div {
+  padding: 0 10px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.merlin-message.queued {
+  padding-right: 32px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
+  background: transparent;
+}
+
+.merlin-queued-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.merlin-queue-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.merlin-queue-remove svg {
+  width: 14px;
+  height: 14px;
+}
+
+.merlin-queue-remove:hover {
+  color: var(--text);
+  background: var(--row-hover);
+}
+
+.merlin-error {
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
   color: var(--danger);
   background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
-  border-radius: 7px;
-  margin: 4px 0;
-  padding: 8px 10px;
-  line-height: 1.4;
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-.ai-chat-error > span {
+.merlin-error > span {
   display: block;
 }
 
-.ai-error-actions {
+.merlin-error-actions {
   display: flex;
   gap: 6px;
-  margin-top: 7px;
+  margin-top: 8px;
 }
 
-.ai-error-actions button {
-  padding: 3px 8px;
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger-bg) 60%, var(--button-bg));
+.merlin-error-actions button {
+  padding: 3px 9px;
   border: 1px solid var(--danger-border);
-  border-radius: 5px;
-  font: inherit;
+  border-radius: 6px;
+  color: var(--danger);
   font-size: 11px;
 }
 
-.ai-error-actions button:hover {
-  background: var(--danger-bg);
+.merlin-error-actions button:hover {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
-.ai-chat-form {
-  padding: 12px 16px 16px;
-  border-top: 1px solid var(--divider);
-}
-
-.ai-chat-form textarea {
-  width: 100%;
-  box-sizing: border-box;
-  min-height: 38px;
-  max-height: 120px;
-  resize: vertical;
-  padding: 8px 10px;
-  color: var(--text);
-  background: var(--input-bg);
+/* Composer: one rounded group holding the text field and its toolbar. */
+.merlin-composer {
+  margin: 4px 16px 16px;
   border: 1px solid var(--input-border);
-  border-radius: 9px;
-  outline: none;
-  font: inherit;
-  user-select: text;
-  -webkit-user-select: text;
+  border-radius: 12px;
+  background: var(--modal-bg);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
-.ai-chat-form textarea:focus {
+.merlin-composer:focus-within {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-@media (max-width: 800px) {
-  .merlin-sidebar.open {
-    width: clamp(260px, 42vw, 320px);
-  }
+.merlin-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  max-height: 160px;
+  padding: 11px 12px 4px;
+  border: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  outline: none;
+}
+
+.merlin-composer textarea::placeholder {
+  color: var(--text-secondary);
+}
+
+.merlin-composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 8px;
+}
+
+/* Model picker: a pill showing the chosen model, with the native select
+   stretched invisibly over all of it so the whole pill is the click target. */
+.merlin-model {
+  position: relative;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--card-bg);
+  font-size: 12px;
+}
+
+.merlin-model:hover:not(:has(select:disabled)) {
+  color: var(--text);
+  background: var(--card-hover);
+}
+
+.merlin-model:has(select:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.merlin-model svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+
+.merlin-model-name {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merlin-model select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.merlin-model select:disabled {
+  cursor: default;
+}
+
+.merlin-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.merlin-send {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  color: var(--accent-text);
+  background: var(--accent-strong);
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.merlin-send svg {
+  width: 16px;
+  height: 16px;
+}
+
+.merlin-send:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.merlin-send:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* MARK: - Canvas placeholder */

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
 import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
 import { RemoteCursor } from './RemoteCursors'
 import {
   AppearanceIcon,
+  ArrowUpIcon,
+  ChevronDownIcon,
   CloseIcon,
   DatabaseIcon,
   FilterIcon,
@@ -977,13 +979,20 @@ function MerlinPanel({
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, queue, busy, errors, modelsError, streamedAnswer, streamedThinking])
 
-  const send = () => {
-    const content = draft.trim()
-    const selected = models.find((available) => available.model === selectedModel)
-    if (!content || modelsLoading || !selected) return
+  const selected = models.find((available) => available.model === selectedModel)
+  const ready = !modelsLoading && Boolean(selected)
+
+  /** Queue a message for the selected model; returns whether it was accepted. */
+  const submit = (text: string) => {
+    const content = text.trim()
+    if (!content || modelsLoading || !selected) return false
     setQueue((current) => [...current, { id: ++requestId.current, content, model: selected.model, thinking: selected.thinking }])
-    setDraft('')
     requestAnimationFrame(() => inputRef.current?.focus())
+    return true
+  }
+
+  const send = () => {
+    if (submit(draft)) setDraft('')
   }
 
   useEffect(() => {
@@ -1022,73 +1031,100 @@ function MerlinPanel({
       })
   }, [boardId, busy, queue])
 
+  const canSend = draft.trim() !== '' && ready
+  const conversationEmpty = messages.length === 0 && queue.length === 0 && !busy
+
+  // Grow the composer with its text, up to the CSS max-height; then it scrolls.
+  useLayoutEffect(() => {
+    const input = inputRef.current
+    if (!input) return
+    input.style.height = 'auto'
+    input.style.height = `${input.scrollHeight}px`
+  }, [draft])
+
   return (
     <section id="merlin-panel" className="merlin-panel" aria-label="Merlin assistant">
-      <header className="ai-chat-header">
-        <div>
-          <strong>Merlin @ {boardName}</strong>
-          <select
-            aria-label="AI model"
-            value={selectedModel}
-            disabled={busy || modelsLoading || models.length === 0}
-            title={modelsError ?? 'Choose the model for this chat'}
-            onChange={(event) => setSelectedModel(event.target.value)}
-          >
-            {models.map((available) => (
-              <option key={available.model} value={available.model} title={available.model}>
-                {available.id}
-              </option>
-            ))}
-          </select>
+      <header className="merlin-header">
+        <span className="merlin-badge" aria-hidden="true">
+          <SparklesIcon />
+        </span>
+        <div className="merlin-title">
+          <h2>Merlin</h2>
+          <p title={boardName}>{boardName}</p>
         </div>
-        <button className="icon-button" onClick={onClose} title="Collapse Merlin" aria-label="Collapse Merlin">
+        <button className="icon-button merlin-close" onClick={onClose} title="Close Merlin" aria-label="Close Merlin">
           <CloseIcon />
         </button>
       </header>
-      <div className="ai-chat-messages" aria-live="polite">
-        {messages.length === 0 && (
-          <div className="ai-chat-empty">
-            <strong>Ask about {boardName}</strong>
-            <p>Merlin reads this board at the start of each turn, so answers and edits stay grounded in the canvas.</p>
+
+      <div className="merlin-messages" aria-live="polite">
+        {conversationEmpty && (
+          <div className="merlin-welcome">
+            <span className="merlin-badge large" aria-hidden="true">
+              <SparklesIcon />
+            </span>
+            <h3>How can I help with this board?</h3>
+            <p>Merlin reads the canvas at the start of each turn, so answers and edits stay grounded in what’s on it.</p>
+            <div className="merlin-suggestions">
+              {MERLIN_SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  disabled={!ready}
+                  title={ready ? undefined : 'Waiting for the model list'}
+                  onClick={() => submit(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           </div>
         )}
-        {messages.map((message, index) => (
-          <div key={index} className={`ai-message ${message.role}`}>
-            <div className="ai-message-meta">
-              <span>{message.role === 'user' ? 'You' : 'Merlin'}</span>
-              {message.role === 'assistant' && (
-                <CopyButton text={message.content} className="ai-message-copy" label="Merlin response" />
-              )}
+        {messages.map((message, index) =>
+          message.role === 'user' ? (
+            <div key={index} className="merlin-message user">
+              <p>{message.content}</p>
             </div>
-            {message.role === 'assistant' && message.thinking && <AIThinking text={message.thinking} />}
-            <p>{message.content}</p>
-          </div>
-        ))}
-        {busy && (streamedAnswer || streamedThinking) && (
-          <div className="ai-message assistant streaming">
-            <div className="ai-message-meta">
-              <span>Merlin</span>
+          ) : (
+            <div key={index} className="merlin-message assistant">
+              <MerlinMessageHead>
+                <CopyButton text={message.content} className="merlin-copy" label="Merlin response" />
+              </MerlinMessageHead>
+              {message.thinking && <AIThinking text={message.thinking} />}
+              <p>{message.content}</p>
             </div>
+          ),
+        )}
+        {busy && (
+          <div className="merlin-message assistant streaming">
+            <MerlinMessageHead />
             {streamedThinking && <AIThinking text={streamedThinking} streaming={!streamedAnswer} />}
-            {streamedAnswer && <p>{streamedAnswer}</p>}
+            {streamedAnswer ? (
+              <p>{streamedAnswer}</p>
+            ) : (
+              !streamedThinking && (
+                <span className="merlin-typing" role="status" aria-label="Merlin is thinking">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              )
+            )}
           </div>
         )}
-        {busy && !streamedAnswer && !streamedThinking && <div className="ai-chat-status">Merlin is thinking…</div>}
         {queue.map((request, index) => (
-          <div key={request.id} className="ai-message user queued">
-            <span>Queued {index + 1}</span>
-            <div>
-              <p>{request.content}</p>
-              <button
-                className="ai-queue-remove"
-                type="button"
-                aria-label="Remove queued message"
-                title="Remove from queue"
-                onClick={() => setQueue((current) => current.filter((item) => item.id !== request.id))}
-              >
-                ×
-              </button>
-            </div>
+          <div key={request.id} className="merlin-message user queued">
+            <span className="merlin-queued-label">Queued {index + 1}</span>
+            <p>{request.content}</p>
+            <button
+              className="merlin-queue-remove"
+              type="button"
+              aria-label="Remove queued message"
+              title="Remove from queue"
+              onClick={() => setQueue((current) => current.filter((item) => item.id !== request.id))}
+            >
+              <CloseIcon />
+            </button>
           </div>
         ))}
         {modelsError && <CopyableAIError message={`Could not refresh models: ${modelsError}`} />}
@@ -1101,12 +1137,20 @@ function MerlinPanel({
         ))}
         <div ref={endRef} />
       </div>
-      <div className="ai-chat-form">
+
+      <form
+        className="merlin-composer"
+        onSubmit={(event) => {
+          event.preventDefault()
+          send()
+        }}
+      >
         <textarea
           ref={inputRef}
           value={draft}
-          rows={2}
-          placeholder="Ask Merlin (press enter to send)"
+          rows={1}
+          aria-label="Message Merlin"
+          placeholder={busy ? 'Ask a follow-up — it will be queued' : 'Ask Merlin anything…'}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
@@ -1115,14 +1159,60 @@ function MerlinPanel({
             }
           }}
         />
-      </div>
+        <div className="merlin-composer-bar">
+          {/* The native select covers the whole pill (invisibly), so a click anywhere on it opens the menu. */}
+          <label className="merlin-model" title={modelsError ?? selected?.model ?? 'Choose the model for this chat'}>
+            <SparklesIcon aria-hidden="true" />
+            <span className="merlin-model-name">
+              {selected?.id ?? (modelsLoading ? 'Loading models…' : 'No models')}
+            </span>
+            <ChevronDownIcon aria-hidden="true" />
+            <select
+              aria-label="AI model"
+              value={selectedModel}
+              disabled={busy || modelsLoading || models.length === 0}
+              onChange={(event) => setSelectedModel(event.target.value)}
+            >
+              {models.map((available) => (
+                <option key={available.model} value={available.model} title={available.model}>
+                  {available.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="merlin-hint">⇧⏎ new line</span>
+          <button type="submit" className="merlin-send" disabled={!canSend} title="Send" aria-label="Send">
+            <ArrowUpIcon />
+          </button>
+        </div>
+      </form>
     </section>
+  )
+}
+
+/** Starters for an empty conversation; picking one sends it right away. */
+const MERLIN_SUGGESTIONS = [
+  'Summarize this board',
+  'Tidy up the layout',
+  'Suggest what’s missing',
+]
+
+/** The "Merlin" byline above each assistant message, with optional actions on the right. */
+function MerlinMessageHead({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="merlin-message-head">
+      <span className="merlin-avatar" aria-hidden="true">
+        <SparklesIcon />
+      </span>
+      <span className="merlin-byline">Merlin</span>
+      {children}
+    </div>
   )
 }
 
 function AIThinking({ text, streaming = false }: { text: string; streaming?: boolean }) {
   return (
-    <details className="ai-thinking" open={streaming}>
+    <details className="merlin-thinking" open={streaming}>
       <summary>{streaming ? 'Thinking…' : 'Thinking'}</summary>
       <div>{text}</div>
     </details>
@@ -1173,9 +1263,9 @@ function CopyButton({ text, className, label }: { text: string; className?: stri
 
 function CopyableAIError({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
-    <div className="ai-chat-error" role="alert">
+    <div className="merlin-error" role="alert">
       <span>{message}</span>
-      <div className="ai-error-actions">
+      <div className="merlin-error-actions">
         <CopyButton text={message} label="error" />
         {onDismiss && (
           <button type="button" onClick={onDismiss}>

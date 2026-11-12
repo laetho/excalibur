@@ -131,3 +131,20 @@ export function MinusIcon(props: IconProps) {
     </Icon>
   )
 }
+
+export function ArrowUpIcon(props: IconProps) {
+  return (
+    <Icon data-icon="arrow-up" strokeWidth={2.2} {...props}>
+      <line x1="12" y1="19" x2="12" y2="5" />
+      <polyline points="6 11 12 5 18 11" />
+    </Icon>
+  )
+}
+
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <Icon data-icon="chevron-down" {...props}>
+      <polyline points="6 9 12 15 18 9" />
+    </Icon>
+  )
+}
