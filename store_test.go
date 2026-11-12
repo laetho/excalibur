@@ -767,6 +767,31 @@ func TestCollaborationJetStreamDurability(t *testing.T) {
 	}
 }
 
+func TestNormalizeCollaborationAppearance(t *testing.T) {
+	for _, avatar := range []string{"🦊", "🧑‍🚀", "🗡️", "🇳🇴", ""} {
+		if color, got, err := normalizeCollaborationAppearance(" #AABBCC ", avatar); err != nil || color != "#aabbcc" || got != avatar {
+			t.Fatalf("appearance with %q = %q, %q, %v", avatar, color, got, err)
+		}
+	}
+	if color, got, err := normalizeCollaborationAppearance("", ""); err != nil || color != "" || got != "" {
+		t.Fatalf("empty appearance = %q, %q, %v", color, got, err)
+	}
+	for _, bad := range [][2]string{
+		{"red", ""},
+		{"#abc", ""},
+		{"", "A"},
+		{"", "7"},
+		{"", "🦊🦊 🦊"},
+		{"", "<svg>"},
+		{"", "é"},
+		{"", strings.Repeat("🦊", maxCollaborationAvatarRunes+1)},
+	} {
+		if _, _, err := normalizeCollaborationAppearance(bad[0], bad[1]); err == nil {
+			t.Fatalf("appearance %q / %q should be rejected", bad[0], bad[1])
+		}
+	}
+}
+
 func TestNormalizeCollaborationNickname(t *testing.T) {
 	if got, err := normalizeCollaborationNickname("  Merlin  "); err != nil || got != "Merlin" {
 		t.Fatalf("normalized nickname = %q, %v", got, err)

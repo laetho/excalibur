@@ -137,6 +137,9 @@ export interface StoreSnapshot {
     "canvasAppearance": string;
     "applicationZoom": number;
     "collaborationNickname": string;
+    "collaborationColor": string;
+    "collaborationAvatar": string;
+    "collaborationAvatarOnly": boolean;
     "alerts": Notice[] | null;
     "isAlertPresented": boolean;
     "sources": SourceInfo[] | null;

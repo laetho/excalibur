@@ -1805,6 +1805,80 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
   background: #f59f00;
 }
 
+/* Avatars of other collaborators, floating beside their cursors. Below Excalidraw's own UI (z-index 4). */
+.canvas .remote-cursors {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* One remote cursor (arrow + name tag with avatar, or arrow + avatar circle); its origin is the cursor tip. */
+.remote-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* Follow the cursor smoothly between the 10 Hz position updates. */
+  transition: transform 90ms linear;
+  will-change: transform;
+}
+
+.remote-cursor-arrow {
+  position: absolute;
+  left: -2px; /* the arrow's tip is 2px inside its viewBox */
+  top: -2px;
+}
+
+.remote-cursor-press {
+  position: absolute;
+  left: -15px;
+  top: -15px;
+  box-sizing: border-box;
+  width: 30px;
+  height: 30px;
+  border: 1px solid;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.53);
+}
+
+/* Hangs below and to the right of the tip: avatar and name, or just the avatar as a circle. */
+.remote-cursor-label {
+  position: absolute;
+  left: 5px;
+  top: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 7px 0 4px;
+  border: 1px solid;
+  border-radius: 11px;
+  color: #1b1b1f; /* Excalidraw's charcoal; the tint behind it is always light */
+  font-family: sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.remote-cursor-label.icon-only {
+  width: 22px;
+  padding: 0;
+}
+
+/* No avatar: balance the padding the avatar would have taken. */
+.remote-cursor-label:not(:has(.remote-cursor-emoji)) {
+  padding-left: 7px;
+}
+
+.remote-cursor-emoji {
+  font-size: 14px;
+  line-height: 1;
+}
+
 .canvas[data-canvas-theme] .canvas-followed-status {
   position: absolute;
   bottom: 16px;
@@ -1856,4 +1930,101 @@ body {
 /* The native app has its own way of opening links; hide Excalidraw's "share"/collab affordances. */
 .excalidraw .collab-button {
   display: none;
+}
+
+/* Settings → Collaboration: cursor color and avatar. */
+.collab-color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.collab-color-swatch {
+  position: relative;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  outline: 1px solid var(--input-border);
+  outline-offset: 0;
+}
+
+.collab-color-swatch.selected {
+  border-color: var(--bg);
+  outline: 2px solid var(--accent);
+}
+
+.collab-color-custom {
+  overflow: hidden;
+  background: conic-gradient(#e03131, #f08c00, #2f9e44, #1971c2, #6741d9, #e03131);
+}
+
+.collab-color-custom input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.collab-color-auto {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+}
+
+.collab-color-auto.selected {
+  outline: 2px solid var(--accent);
+}
+
+.collab-avatar-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: 4px;
+}
+
+.collab-avatar-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.collab-avatar-option.selected {
+  outline: 2px solid var(--accent);
+}
+
+.collab-avatar-none {
+  font-size: 12px;
+}
+
+/* A mock canvas with a remote cursor the way Excalidraw and the avatar overlay draw it. */
+.collab-preview {
+  position: relative;
+  height: 96px;
+  border-radius: 8px;
+  background: #ffffff;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.18) 1px, transparent 1px);
+  background-size: 16px 16px;
+  box-shadow: inset 0 0 0 1px var(--input-border);
+}
+
+/* The cursor tip sits here; the name tag or avatar circle hangs below and to the right of it. */
+.collab-preview-stage {
+  position: absolute;
+  left: 40%;
+  top: 28px;
+}
+
+.collab-preview .remote-cursor {
+  transition: none;
 }

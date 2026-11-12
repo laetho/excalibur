@@ -681,7 +681,7 @@ func (s *Store) snapshot() StoreSnapshot {
 		folder = displayPath(s.activeGroup)
 	}
 	ai := AISettings{Enabled: s.prefs.AI.Enabled, BaseURL: s.prefs.AI.BaseURL, Model: s.prefs.AI.Model, HasAPIKey: s.prefs.AI.APIKey != ""}
-	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, AI: ai}
+	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, AI: ai}
 }
 
 func displayPath(path string) string {

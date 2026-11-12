@@ -280,6 +280,15 @@ export function SetCanvasAppearance(appearance: string): $CancellablePromise<voi
 }
 
 /**
+ * SetCollaborationAppearance sets the cursor color and the emoji avatar other
+ * people see for this client. Empty values mean an automatic color and no avatar.
+ * With avatarOnly, others see just the avatar instead of the avatar and name.
+ */
+export function SetCollaborationAppearance(color: string, avatar: string, avatarOnly: boolean): $CancellablePromise<void> {
+    return $Call.ByID(2301498294, color, avatar, avatarOnly);
+}
+
+/**
  * SetCollaborationNickname sets the name shown beside this client's cursor in
  * NATS collaboration sessions. An empty value keeps the anonymous peer label.
  */

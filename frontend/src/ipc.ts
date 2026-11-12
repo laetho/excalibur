@@ -64,6 +64,12 @@ export type StoreSnapshot = {
   canvasAppearance: CanvasAppearance
   applicationZoom: number
   collaborationNickname: string
+  /** "#rrggbb" or empty for an automatic color. */
+  collaborationColor: string
+  /** Small image data URL, or empty. */
+  collaborationAvatar: string
+  /** Others see only the avatar, not the name, beside this client's cursor. */
+  collaborationAvatarOnly: boolean
   alerts: Notice[]
   isAlertPresented: boolean
   /** The navigation tree: local folder + NATS servers with their buckets. */
@@ -117,6 +123,8 @@ export const setApplicationZoom = (zoom: number) => app().SetApplicationZoom(zoo
 export type AppVersionInfo = { version: string; development: boolean }
 export const appVersion = () => app().AppVersion() as Promise<AppVersionInfo>
 export const setCollaborationNickname = (nickname: string) => app().SetCollaborationNickname(nickname)
+export const setCollaborationAppearance = (color: string, avatar: string, avatarOnly: boolean) =>
+  app().SetCollaborationAppearance(color, avatar, avatarOnly)
 export const discoverAIModels = (baseUrl: string, apiKey: string, clearApiKey: boolean) =>
   app().DiscoverAIModels(baseUrl, apiKey, clearApiKey) as Promise<AIModel[]>
 export const setAISettings = (settings: AISettingsUpdate) => app().SetAISettings(settings)

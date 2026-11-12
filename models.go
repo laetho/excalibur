@@ -92,6 +92,9 @@ type Preferences struct {
 	ApplicationZoom  float64             `json:"applicationZoom"`
 	ShowThumbnails   *bool               `json:"showThumbnails,omitempty"`
 	CollabNickname   string              `json:"collaborationNickname,omitempty"`
+	CollabColor      string              `json:"collaborationColor,omitempty"`
+	CollabAvatar     string              `json:"collaborationAvatar,omitempty"`
+	CollabAvatarOnly bool                `json:"collaborationAvatarOnly,omitempty"`
 	NatsServers      []NatsServerConfig  `json:"natsServers"`
 	ActiveSource     string              `json:"activeSource,omitempty"`
 	ActiveGroup      string              `json:"activeGroup,omitempty"`
@@ -165,6 +168,9 @@ type StoreSnapshot struct {
 	CanvasAppearance string               `json:"canvasAppearance"`
 	ApplicationZoom  float64              `json:"applicationZoom"`
 	CollabNickname   string               `json:"collaborationNickname"`
+	CollabColor      string               `json:"collaborationColor"`
+	CollabAvatar     string               `json:"collaborationAvatar"`
+	CollabAvatarOnly bool                 `json:"collaborationAvatarOnly"`
 	Alerts           []Notice             `json:"alerts"`
 	IsAlertPresented bool                 `json:"isAlertPresented"`
 	Sources          []SourceInfo         `json:"sources"`

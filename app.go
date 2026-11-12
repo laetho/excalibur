@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -633,6 +634,48 @@ func (a *App) SetCollaborationNickname(nickname string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.store.prefs.CollabNickname = nickname
+	a.store.savePrefs()
+	a.emitSnapshotLocked()
+	return nil
+}
+
+// maxCollaborationAvatarRunes bounds the avatar emoji. A single emoji can be
+// several code points (skin tone, ZWJ sequences, flags), so allow a few.
+const maxCollaborationAvatarRunes = 12
+
+var collaborationColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+func normalizeCollaborationAppearance(color, avatar string) (string, string, error) {
+	color = strings.ToLower(strings.TrimSpace(color))
+	if color != "" && !collaborationColorPattern.MatchString(color) {
+		return "", "", errors.New("color must be a #rrggbb value")
+	}
+	avatar = strings.TrimSpace(avatar)
+	if utf8.RuneCountInString(avatar) > maxCollaborationAvatarRunes {
+		return "", "", errors.New("avatar must be a single emoji")
+	}
+	for _, r := range avatar {
+		// Emoji are never ASCII, letters, digits, whitespace or control characters.
+		if r < 0x80 || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", "", errors.New("avatar must be a single emoji")
+		}
+	}
+	return color, avatar, nil
+}
+
+// SetCollaborationAppearance sets the cursor color and the emoji avatar other
+// people see for this client. Empty values mean an automatic color and no avatar.
+// With avatarOnly, others see just the avatar instead of the avatar and name.
+func (a *App) SetCollaborationAppearance(color, avatar string, avatarOnly bool) error {
+	color, avatar, err := normalizeCollaborationAppearance(color, avatar)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store.prefs.CollabColor = color
+	a.store.prefs.CollabAvatar = avatar
+	a.store.prefs.CollabAvatarOnly = avatarOnly
 	a.store.savePrefs()
 	a.emitSnapshotLocked()
 	return nil

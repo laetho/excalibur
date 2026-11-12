@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './Canvas'
+import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
+import { RemoteCursor } from './RemoteCursors'
 import {
   AppearanceIcon,
   CloseIcon,
@@ -47,6 +49,7 @@ import {
   appVersion,
   type AppVersionInfo,
   setCollaborationNickname,
+  setCollaborationAppearance,
   setAISettings,
   setShowThumbnails,
   setSort,
@@ -509,6 +512,9 @@ export default function Shell() {
           <Canvas
             canvasAppearance={snapshot.canvasAppearance}
             collaborationNickname={snapshot.collaborationNickname}
+            collaborationColor={snapshot.collaborationColor}
+            collaborationAvatar={snapshot.collaborationAvatar}
+            collaborationAvatarOnly={snapshot.collaborationAvatarOnly}
             boardId={snapshot.selection}
             collab={collab}
           />
@@ -1727,7 +1733,12 @@ function SettingsModal({ snapshot, onClose }: { snapshot: StoreSnapshot; onClose
             >
               {id === 'appearance' && <AppearanceSettings snapshot={snapshot} />}
               {id === 'boards' && <BoardsSettings snapshot={snapshot} />}
-              {id === 'collaboration' && <CollaborationSettings snapshot={snapshot} />}
+              {id === 'collaboration' && (
+                <>
+                  <CollaborationSettings snapshot={snapshot} />
+                  <CollaborationAppearanceSettings snapshot={snapshot} />
+                </>
+              )}
               {id === 'servers' && (
                 <ServersSettings
                   snapshot={snapshot}
@@ -1853,6 +1864,140 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
         </p>
       )}
     </>
+  )
+}
+
+function CollaborationAppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
+  const { collaborationColor: color, collaborationAvatar: avatar, collaborationAvatarOnly: avatarOnly } = snapshot
+  const [error, setError] = useState<string | null>(null)
+
+  const apply = async (nextColor: string, nextAvatar: string, nextAvatarOnly = avatarOnly) => {
+    setError(null)
+    try {
+      await setCollaborationAppearance(nextColor, nextAvatar, nextAvatarOnly)
+    } catch (err) {
+      setError(String(err))
+    }
+  }
+
+  return (
+    <div className="settings-group">
+      <SettingsField
+        label="Preview"
+        help={error ? <span className="problem">{error}</span> : 'How other people see your cursor on a shared board.'}
+        stacked
+      >
+        <CollaboratorPreview name={snapshot.collaborationNickname} color={color} avatar={avatar} avatarOnly={avatarOnly} />
+      </SettingsField>
+      <SettingsField
+        label="Color"
+        help="The color of your cursor and name. Automatic gives you a different color each session."
+        stacked
+      >
+        <div className="collab-color-picker" role="radiogroup" aria-label="Cursor color">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={color === ''}
+            className={`collab-color-auto${color === '' ? ' selected' : ''}`}
+            onClick={() => void apply('', avatar)}
+          >
+            Automatic
+          </button>
+          {COLOR_PRESETS.map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              role="radio"
+              aria-checked={color === preset}
+              aria-label={preset}
+              className={`collab-color-swatch${color === preset ? ' selected' : ''}`}
+              style={{ background: preset }}
+              onClick={() => void apply(preset, avatar)}
+            />
+          ))}
+          <label className={`collab-color-swatch collab-color-custom${color !== '' && !COLOR_PRESETS.includes(color) ? ' selected' : ''}`} title="Custom color">
+            <input
+              type="color"
+              value={color || '#6965db'}
+              aria-label="Custom color"
+              onChange={(event) => void apply(event.target.value, avatar)}
+            />
+          </label>
+        </div>
+      </SettingsField>
+      <SettingsField label="Avatar" help="An emoji that floats next to your cursor for the other people on a board." stacked>
+        <div className="collab-avatar-picker" role="radiogroup" aria-label="Avatar">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={avatar === ''}
+            className={`collab-avatar-option collab-avatar-none${avatar === '' ? ' selected' : ''}`}
+            title="No avatar"
+            onClick={() => void apply(color, '')}
+          >
+            None
+          </button>
+          {AVATAR_EMOJIS.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              role="radio"
+              aria-checked={avatar === emoji}
+              aria-label={emoji}
+              className={`collab-avatar-option${avatar === emoji ? ' selected' : ''}`}
+              onClick={() => void apply(color, emoji)}
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      </SettingsField>
+      <SettingsField
+        label="Show"
+        help={avatar ? 'What others see beside your cursor.' : 'Choose an avatar first. Without one, others see just your name.'}
+      >
+        <div className="segmented" role="radiogroup" aria-label="What others see beside your cursor">
+          {([[false, 'Avatar and name'], [true, 'Avatar only']] as const).map(([only, title]) => (
+            <button
+              key={title}
+              role="radio"
+              aria-checked={avatarOnly === only}
+              className={avatarOnly === only ? 'active' : ''}
+              disabled={avatar === ''}
+              onClick={() => void apply(color, avatar, only)}
+            >
+              {title}
+            </button>
+          ))}
+        </div>
+      </SettingsField>
+    </div>
+  )
+}
+
+/** A mock of a remote cursor, drawn with the same component the canvas uses for peers with an avatar. */
+function CollaboratorPreview({ name, color, avatar, avatarOnly }: { name: string; color: string; avatar: string; avatarOnly: boolean }) {
+  const shown = peerColor('preview', color || undefined)
+  const label = name || 'Anonymous'
+  return (
+    <div className="collab-preview" aria-label="Preview of how others see you">
+      <div className="collab-preview-stage">
+        <RemoteCursor
+          item={{
+            id: 'preview',
+            x: 0,
+            y: 0,
+            emoji: avatar,
+            // Without an avatar the name is all there is to show.
+            name: avatar && avatarOnly ? '' : label,
+            stroke: shown.stroke,
+            background: shown.background,
+            down: false,
+          }}
+        />
+      </div>
+    </div>
   )
 }
 

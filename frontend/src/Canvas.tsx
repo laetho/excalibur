@@ -19,7 +19,7 @@ import '@excalidraw/excalidraw/index.css'
 import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
 import type { ExcalidrawElement, OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { RemoteExcalidrawElement } from '@excalidraw/excalidraw/data/reconcile'
-import type { AppState, BinaryFiles, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
+import type { AppState, BinaryFiles, Collaborator, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   canvasChange,
@@ -53,6 +53,8 @@ import {
   type Viewport,
 } from './backend'
 import { FILE_CHOSEN_EVENT } from './shims/browser-fs-access'
+import { avatarImageUrl, isAvatarEmoji, peerColor } from './collabIdentity'
+import { RemoteCursors, type RemoteCursorData } from './RemoteCursors'
 
 const SAVE_DEBOUNCE_MS = 300
 /**
@@ -95,14 +97,6 @@ type CollabSession = CollabInfo & { generation: number; subscriberId: string }
 
 /** One anonymous peer per browser session, so several collaborators get distinct cursors. */
 const peerId = Math.random().toString(36).slice(2)
-const PEER_COLORS = [
-  { background: '#ffc9c9', stroke: '#e03131' },
-  { background: '#a5d8ff', stroke: '#1971c2' },
-  { background: '#b2f2bb', stroke: '#2f9e44' },
-  { background: '#ffec99', stroke: '#f08c00' },
-  { background: '#d0bfff', stroke: '#6741d9' },
-  { background: '#ffdeeb', stroke: '#e64980' },
-]
 
 type CollabMessage =
   | {
@@ -121,9 +115,9 @@ type CollabMessage =
   | { type: 'scene-ref'; from: string; ref: string; messageId?: string }
   /** Best-effort Core NATS preview; never enters the durable log or snapshots. */
   | { type: 'scene-live'; from: string; elements: readonly ExcalidrawElement[] }
-  | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser'; button?: 'up' | 'down' }
+  | { type: 'pointer'; peerId: string; nickname?: string; x: number; y: number; tool: 'pointer' | 'laser'; button?: 'up' | 'down'; color?: string; avatar?: string; avatarOnly?: boolean }
   /** The scene rectangle a peer currently sees; lets others follow them. */
-  | { type: 'view'; peerId: string; nickname?: string; bounds: Bounds }
+  | { type: 'view'; peerId: string; nickname?: string; color?: string; avatar?: string; avatarOnly?: boolean; bounds: Bounds }
   /** `peerId` started or stopped following `target`; re-sent as a heartbeat while following. */
   | { type: 'follow'; peerId: string; nickname?: string; target: string; action: 'FOLLOW' | 'UNFOLLOW' }
 
@@ -142,6 +136,20 @@ function collaborationDisplayName(remotePeerId: string, nickname?: string): stri
   })
   const limited = cleaned.slice(0, 40).join('')
   return limited || `Peer ${remotePeerId.slice(0, 4)}`
+}
+
+/** What Excalidraw needs to draw a remote peer: name, cursor color, and (if they have one) avatar. */
+function remoteIdentity(
+  remotePeerId: string,
+  nickname: string | undefined,
+  color: unknown,
+  avatar: unknown,
+): Pick<Collaborator, 'username' | 'color' | 'avatarUrl'> {
+  return {
+    username: collaborationDisplayName(remotePeerId, nickname),
+    color: peerColor(remotePeerId, typeof color === 'string' ? color : undefined),
+    avatarUrl: isAvatarEmoji(avatar) ? avatarImageUrl(avatar) : undefined,
+  }
 }
 
 /** The latest unsaved scene. Serialized only when it's actually sent, not on every change (which can be every mouse move). */
@@ -374,6 +382,9 @@ export default function Canvas({
   collab = null,
   boardId = null,
   collaborationNickname = '',
+  collaborationColor = '',
+  collaborationAvatar = '',
+  collaborationAvatarOnly = false,
 }: {
   canvasAppearance: CanvasAppearance
   showEmptyPlaceholder?: boolean
@@ -383,6 +394,12 @@ export default function Canvas({
   boardId?: string | null
   /** Name advertised beside this client's cursor during NATS collaboration. */
   collaborationNickname?: string
+  /** Cursor color other people see for this client ("#rrggbb"); empty picks one automatically. */
+  collaborationColor?: string
+  /** Emoji shown beside this client's cursor for other people; may be empty. */
+  collaborationAvatar?: string
+  /** Show only the avatar (not the name) beside this client's cursor for other people. */
+  collaborationAvatarOnly?: boolean
 }) {
   const [board, setBoard] = useState<OpenBoard | null>(null)
   const [collabRestart, setCollabRestart] = useState(0)
@@ -495,6 +512,25 @@ export default function Canvas({
   const lastSentBounds = useRef('')
   const nicknameRef = useRef('')
   nicknameRef.current = collaborationNickname.trim()
+  const colorRef = useRef('')
+  colorRef.current = collaborationColor
+  const avatarRef = useRef('')
+  avatarRef.current = collaborationAvatar
+  const avatarOnlyRef = useRef(false)
+  avatarOnlyRef.current = collaborationAvatarOnly
+  /** Peers with an avatar are drawn by the avatar overlay instead of Excalidraw's own cursor. */
+  const peerLooks = useRef<Map<string, { emoji: string; avatarOnly: boolean }>>(new Map())
+  const rememberPeerLook = (remotePeerId: string, avatar: unknown, avatarOnly: unknown) => {
+    if (isAvatarEmoji(avatar)) peerLooks.current.set(remotePeerId, { emoji: avatar, avatarOnly: avatarOnly === true })
+    else peerLooks.current.delete(remotePeerId)
+  }
+  /** Setter of the remote cursor overlay, and a cheap key to skip no-op updates. */
+  const cursorOverlay = useRef<((items: RemoteCursorData[]) => void) | null>(null)
+  const cursorOverlayKey = useRef('')
+  const registerCursorOverlay = useCallback((update: ((items: RemoteCursorData[]) => void) | null) => {
+    cursorOverlay.current = update
+    cursorOverlayKey.current = ''
+  }, [])
   const lastVersion = useRef<number | null>(null)
   const lastFileSignature = useRef('')
   const lastBackground = useRef<AppState['viewBackgroundColor'] | undefined>(undefined)
@@ -817,11 +853,19 @@ export default function Canvas({
     const target = collabSession.current
     if (!target) return
     if (bounds) {
-      const view: CollabMessage = { type: 'view', peerId, nickname: nicknameRef.current || undefined, bounds }
+      const view: CollabMessage = { type: 'view', peerId, nickname: nicknameRef.current || undefined, color: colorRef.current || undefined, avatar: avatarRef.current || undefined, avatarOnly: avatarRef.current ? avatarOnlyRef.current || undefined : undefined, bounds }
       collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(view))
     }
     if (message) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
   }, [])
+
+  // Let everyone see a changed name, color or avatar right away instead of at the next heartbeat.
+  useEffect(() => {
+    const instance = api.current
+    if (!collabSession.current || !collabJoinReady.current || !instance) return
+    pendingBounds.current = getVisibleSceneBounds(instance.getAppState())
+    flushPointer()
+  }, [collaborationNickname, collaborationColor, collaborationAvatar, collaborationAvatarOnly, flushPointer])
 
   /**
    * Send changed elements over Core NATS without touching the durable outbox.
@@ -1244,6 +1288,7 @@ export default function Canvas({
     durableElementMap.current.clear()
     peerLastSeen.current.clear()
     peerViews.current.clear()
+    peerLooks.current.clear()
     followers.current.clear()
     setFollowerNames([])
     collabScene.current = null
@@ -1486,13 +1531,15 @@ export default function Canvas({
         if (typeof message.peerId !== 'string' || message.peerId === peerId || !isBounds(message.bounds)) return
         peerLastSeen.current.set(message.peerId, Date.now())
         peerViews.current.set(message.peerId, message.bounds)
+        rememberPeerLook(message.peerId, message.avatar, message.avatarOnly)
         const instance = api.current
         if (!instance) return
         const collaborators = new Map(instance.getAppState().collaborators)
+        const existing = collaborators.get(message.peerId as SocketId)
         collaborators.set(message.peerId as SocketId, {
-          ...collaborators.get(message.peerId as SocketId),
-          username: collaborationDisplayName(message.peerId, message.nickname),
-          color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
+          ...existing,
+          pointer: existing?.pointer && { ...existing.pointer, renderCursor: !peerLooks.current.has(message.peerId) },
+          ...remoteIdentity(message.peerId, message.nickname, message.color, message.avatar),
         })
         instance.updateScene({ collaborators, captureUpdate: CaptureUpdateAction.NEVER })
         if (instance.getAppState().userToFollow?.socketId === message.peerId) applyFollowedBounds(instance, message.bounds)
@@ -1508,13 +1555,13 @@ export default function Canvas({
       } else {
         if (message.peerId === peerId) return
         peerLastSeen.current.set(message.peerId, Date.now())
+        rememberPeerLook(message.peerId, message.avatar, message.avatarOnly)
         const collaborators = new Map(api.current?.getAppState().collaborators ?? [])
         collaborators.set(message.peerId as SocketId, {
           ...collaborators.get(message.peerId as SocketId),
-          pointer: { x: message.x, y: message.y, tool: message.tool },
+          pointer: { x: message.x, y: message.y, tool: message.tool, renderCursor: !peerLooks.current.has(message.peerId) },
           button: message.button === 'down' ? 'down' : 'up',
-          username: collaborationDisplayName(message.peerId, message.nickname),
-          color: PEER_COLORS[message.peerId.charCodeAt(0) % PEER_COLORS.length],
+          ...remoteIdentity(message.peerId, message.nickname, message.color, message.avatar),
         })
         api.current?.updateScene({ collaborators })
         return
@@ -1810,6 +1857,7 @@ export default function Canvas({
           for (const [remotePeerId, lastSeen] of peerLastSeen.current) {
             if (lastSeen >= cutoff) continue
             peerLastSeen.current.delete(remotePeerId)
+            peerLooks.current.delete(remotePeerId)
             changed = collaborators.delete(remotePeerId as SocketId) || changed
           }
           if (changed) instance.updateScene({ collaborators })
@@ -1901,8 +1949,37 @@ export default function Canvas({
     }
   }, [markCollabSyncedIfComplete])
 
+  /** Place the cursor of each peer with an avatar, in canvas pixels. */
+  const updateRemoteCursors = (appState: AppState) => {
+    const update = cursorOverlay.current
+    if (!update) return
+    const items: RemoteCursorData[] = []
+    for (const [id, collaborator] of appState.collaborators) {
+      const look = peerLooks.current.get(id)
+      if (!look || !collaborator.pointer) continue
+      const x = Math.round((collaborator.pointer.x + appState.scrollX) * appState.zoom.value)
+      const y = Math.round((collaborator.pointer.y + appState.scrollY) * appState.zoom.value)
+      if (x < 0 || y < 0 || x > appState.width || y > appState.height) continue
+      items.push({
+        id,
+        x,
+        y,
+        emoji: look.emoji,
+        name: look.avatarOnly ? '' : (collaborator.username ?? ''),
+        stroke: collaborator.color?.stroke ?? '#868e96',
+        background: collaborator.color?.background ?? '#e9ecef',
+        down: collaborator.button === 'down',
+      })
+    }
+    const key = items.map((item) => `${item.id}|${item.x}|${item.y}|${item.emoji}|${item.name}|${item.stroke}|${item.down}`).join(';')
+    if (key === cursorOverlayKey.current) return
+    cursorOverlayKey.current = key
+    update(items)
+  }
+
   const onChange = (elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     if (!board) return
+    updateRemoteCursors(appState)
     // Place the view once the board has loaded: where the user left it, or zoomed to fit.
     const initial = initialView.current
     if (initial && api.current && (!initial.hasContent || elements.length > 0)) {
@@ -2036,6 +2113,9 @@ export default function Canvas({
             type: 'pointer',
             peerId,
             nickname,
+            color: collaborationColor || undefined,
+            avatar: collaborationAvatar || undefined,
+            avatarOnly: collaborationAvatar && collaborationAvatarOnly ? true : undefined,
             x: payload.pointer.x,
             y: payload.pointer.y,
             tool: payload.pointer.tool,
@@ -2098,6 +2178,7 @@ export default function Canvas({
           <WelcomeScreen.Hints.HelpHint />
         </WelcomeScreen>
       </Excalidraw>
+      <RemoteCursors register={registerCursorOverlay} />
       {followerNames.length > 0 && (
         <div className="canvas-followed-status" role="status" aria-live="polite">
           <span className="canvas-persistence-dot" aria-hidden="true" />

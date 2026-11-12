@@ -230,6 +230,21 @@ follower fits the peer's last known rectangle into its own viewport and tracks
 every later `view` message until the follower scrolls or zooms. A followed view
 is not saved as the board's remembered viewport.
 
+`pointer` and `view` messages also carry the sender's cursor color (`#rrggbb`)
+and emoji avatar, both a few bytes, so a changed name, color, or avatar shows up
+immediately (a settings change publishes a `view` message at once) and idle
+peers keep it via the heartbeat. Receivers color the remote cursor, draw the
+emoji in a floating circle beside it, and show it in Excalidraw's user list. A
+client never draws its own avatar. Peers are untrusted: only a short run of
+non-ASCII characters is accepted as an avatar.
+
+A peer with an avatar chooses between showing the avatar and name or the avatar
+only (`avatarOnly` in the same messages). Excalidraw cannot put an image in its
+canvas name tag, so for such peers `pointer.renderCursor` is turned off and an
+overlay draws the whole cursor: the arrow, then either a name tag with the
+avatar inside it or just the avatar in a circle. Peers without an avatar keep
+Excalidraw's own cursor and tag.
+
 `follow` messages tell the followed peer who is following it. The follower
 sends one when it starts or stops following and repeats it with the heartbeat;
 the followed peer shows a "Followed by …" badge and drops followers whose
