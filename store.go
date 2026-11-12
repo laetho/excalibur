@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +19,7 @@ import (
 type Store struct {
 	prefsPath    string
 	prefs        Preferences
-	localFolder  string
+	localFolders []string // never empty; the first is the default
 	activeSource string
 	activeGroup  string
 	boards       []Board
@@ -84,19 +85,28 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	if s.prefs.ShowThumbnails == nil {
 		s.prefs.ShowThumbnails = &show
 	}
-	if s.prefs.BoardsFolder == "" {
-		s.prefs.BoardsFolder = defaultFolder
+	// Older preferences only have BoardsFolder.
+	for _, folder := range append([]string{s.prefs.BoardsFolder}, s.prefs.LocalFolders...) {
+		if folder != "" && !slices.Contains(s.localFolders, folder) {
+			s.localFolders = append(s.localFolders, folder)
+		}
 	}
-	s.localFolder = s.prefs.BoardsFolder
-	s.activeSource, s.activeGroup = localSourceID, s.localFolder
-	if err := os.MkdirAll(s.localFolder, 0o755); err != nil {
+	if len(s.localFolders) == 0 {
+		s.localFolders = []string{defaultFolder}
+	}
+	s.syncLocalFolderPrefs()
+	s.activeSource, s.activeGroup = localSourceID, s.localFolders[0]
+	if err := os.MkdirAll(s.localFolders[0], 0o755); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(s.prefs.ActiveSource, "nats:") && s.prefs.ActiveGroup != "" {
+	switch {
+	case strings.HasPrefix(s.prefs.ActiveSource, "nats:") && s.prefs.ActiveGroup != "":
 		s.activeSource, s.activeGroup = s.prefs.ActiveSource, s.prefs.ActiveGroup
+	case s.prefs.ActiveSource == localSourceID && slices.Contains(s.localFolders, s.prefs.ActiveGroup):
+		s.activeGroup = s.prefs.ActiveGroup
 	}
 	if err := s.scan(); err != nil {
-		s.activeSource, s.activeGroup = localSourceID, s.localFolder
+		s.activeSource, s.activeGroup = localSourceID, s.localFolders[0]
 		if localErr := s.scan(); localErr != nil {
 			return nil, localErr
 		}
@@ -666,7 +676,11 @@ func (s *Store) snapshot() StoreSnapshot {
 		value := s.selection
 		selection = &value
 	}
-	sources := []SourceInfo{{ID: localSourceID, Name: "Local", Kind: "local", Groups: []GroupInfo{{ID: s.localFolder, Name: displayPath(s.localFolder), Kind: "folder"}}}}
+	localGroups := make([]GroupInfo, 0, len(s.localFolders))
+	for _, folder := range s.localFolders {
+		localGroups = append(localGroups, GroupInfo{ID: folder, Name: displayPath(folder), Kind: "folder"})
+	}
+	sources := []SourceInfo{{ID: localSourceID, Name: "Local", Kind: "local", Groups: localGroups}}
 	natsServers := make([]NatsServerSettings, 0, len(s.prefs.NatsServers))
 	for _, server := range s.prefs.NatsServers {
 		groups := make([]GroupInfo, 0, len(server.Buckets))

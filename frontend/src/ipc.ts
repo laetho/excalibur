@@ -112,10 +112,11 @@ export const trashBoard = (id: string) => app().TrashBoard(id)
 export const importPaths = (paths: string[]) => app().ImportPaths(paths)
 export const importBoardData = (name: string, json: string) => app().ImportBoardData(name, json)
 export const chooseImport = () => app().ChooseImport()
-export const chooseFolder = () => app().ChooseFolder()
+export const addLocalFolder = () => app().AddLocalFolder()
+export const removeLocalFolder = (folder: string) => app().RemoveLocalFolder(folder)
 export const reveal = (id: string | null) => app().Reveal(id)
 /** Opens the boards folder in the file manager (Settings → Show in Finder). */
-export const revealFolder = () => app().RevealFolder()
+export const revealFolder = (folder: string) => app().RevealFolder(folder)
 export const setSort = (order: BoardSortOrder) => app().SetSort(order)
 export const setShowThumbnails = (show: boolean) => app().SetShowThumbnails(show)
 export const setCanvasAppearance = (appearance: CanvasAppearance) => app().SetCanvasAppearance(appearance)
@@ -247,7 +248,7 @@ const MENU_IDS = [
   'redo',
   'new-board',
   'import',
-  'choose-folder',
+  'add-folder',
   'reveal',
   'rename',
   'duplicate',

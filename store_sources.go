@@ -110,7 +110,7 @@ func (s *Store) updateNatsServer(config NatsServerConfig, keepPassword bool) err
 			if len(buckets) > 0 {
 				s.activeGroup = buckets[0]
 			} else {
-				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+				s.activeSource, s.activeGroup = localSourceID, s.localFolders[0]
 			}
 			s.selection = ""
 		}
@@ -153,8 +153,8 @@ func (s *Store) removeNatsServer(id string) error {
 	s.prefs.NatsServers = append(s.prefs.NatsServers[:index], s.prefs.NatsServers[index+1:]...)
 	s.removeImportedCredentials(removed.CredentialsFile)
 	if s.activeSource == "nats:"+id {
-		s.activeSource, s.activeGroup, s.selection = localSourceID, s.localFolder, ""
-		s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = localSourceID, s.localFolder, ""
+		s.activeSource, s.activeGroup, s.selection = localSourceID, s.localFolders[0], ""
+		s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = localSourceID, s.localFolders[0], ""
 		if err := s.scan(); err != nil {
 			return err
 		}
@@ -219,7 +219,7 @@ func (s *Store) deleteBucket(sourceID, bucket string) error {
 			if len(server.Buckets) > 0 {
 				s.activeGroup = server.Buckets[0]
 			} else {
-				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+				s.activeSource, s.activeGroup = localSourceID, s.localFolders[0]
 			}
 			s.selection = ""
 			s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = s.activeSource, s.activeGroup, ""
@@ -262,7 +262,7 @@ func (s *Store) refreshBuckets() error {
 			if len(buckets) > 0 {
 				s.activeGroup = buckets[0]
 			} else {
-				s.activeSource, s.activeGroup = localSourceID, s.localFolder
+				s.activeSource, s.activeGroup = localSourceID, s.localFolders[0]
 			}
 			s.selection = ""
 			s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = s.activeSource, s.activeGroup, s.selection
@@ -278,9 +278,9 @@ func (s *Store) refreshBuckets() error {
 func (s *Store) activateSource(sourceID, groupID string) error {
 	if sourceID == localSourceID {
 		if groupID == "" {
-			groupID = s.localFolder
+			groupID = s.localFolders[0]
 		}
-		if groupID != s.localFolder {
+		if !slices.Contains(s.localFolders, groupID) {
 			return errors.New("unknown local folder")
 		}
 	} else {
@@ -361,15 +361,52 @@ func (s *Store) copyBoardToSource(boardID, targetSource, targetGroup string) err
 	return s.activateSource(targetSource, targetGroup)
 }
 
-func (s *Store) changeFolder(folder string) error {
+// syncLocalFolderPrefs mirrors the folder list into the preferences; the first
+// folder is also written as BoardsFolder so older versions still find it.
+func (s *Store) syncLocalFolderPrefs() {
+	s.prefs.LocalFolders = append([]string(nil), s.localFolders...)
+	s.prefs.BoardsFolder = s.localFolders[0]
+}
+
+// addLocalFolder adds a boards folder to the sidebar (if it isn't there yet)
+// and switches to it.
+func (s *Store) addLocalFolder(folder string) error {
+	folder = filepath.Clean(folder)
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		return err
 	}
-	s.localFolder, s.prefs.BoardsFolder = folder, folder
-	s.activeSource, s.activeGroup, s.selection = localSourceID, folder, ""
-	s.prefs.ActiveSource, s.prefs.ActiveGroup, s.prefs.LastBoard = localSourceID, folder, ""
+	if slices.Contains(s.localFolders, folder) {
+		return s.activateSource(localSourceID, folder)
+	}
+	s.localFolders = append(s.localFolders, folder)
+	s.syncLocalFolderPrefs()
+	if err := s.activateSource(localSourceID, folder); err != nil {
+		// Don't leave a folder in the sidebar that couldn't be opened.
+		s.localFolders = s.localFolders[:len(s.localFolders)-1]
+		s.syncLocalFolderPrefs()
+		s.savePrefs()
+		return err
+	}
+	return nil
+}
+
+// removeLocalFolder removes a boards folder from the sidebar. Its files are
+// left untouched. The last folder can't be removed.
+func (s *Store) removeLocalFolder(folder string) error {
+	index := slices.Index(s.localFolders, folder)
+	if index < 0 {
+		return errors.New("unknown local folder")
+	}
+	if len(s.localFolders) == 1 {
+		return errors.New("the last local folder can't be removed")
+	}
+	s.localFolders = slices.Delete(s.localFolders, index, index+1)
+	s.syncLocalFolderPrefs()
+	if s.activeSource == localSourceID && s.activeGroup == folder {
+		return s.activateSource(localSourceID, s.localFolders[0])
+	}
 	s.savePrefs()
-	return s.scan()
+	return nil
 }
 
 // removeImportedCredentials deletes an app-owned credentials copy once no

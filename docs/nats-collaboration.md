@@ -281,6 +281,11 @@ convergence:
 `Synced` describes durable update replication and application. Snapshot
 materialization and old-log compaction may occur later in the background.
 
+The badge is shown only while the canvas has room for it beside the shape
+toolbar. On narrower canvases (and in Excalidraw's small-screen layout) the
+status moves to the sidebar as a colored dot on the open board's thumbnail, or
+below the logo when the sidebar is collapsed; its label is the dot's tooltip.
+
 ## Consistency model
 
 NATS supplies durable ordered transport, not document merge semantics.

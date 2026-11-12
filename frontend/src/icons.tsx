@@ -22,14 +22,6 @@ function Icon({ children, ...props }: IconProps) {
   )
 }
 
-export function FilterIcon(props: IconProps) {
-  return (
-    <Icon data-icon="filter" {...props}>
-      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-    </Icon>
-  )
-}
-
 export function SearchIcon(props: IconProps) {
   return (
     <Icon data-icon="search" {...props}>
@@ -146,5 +138,45 @@ export function ChevronDownIcon(props: IconProps) {
     <Icon data-icon="chevron-down" {...props}>
       <polyline points="6 9 12 15 18 9" />
     </Icon>
+  )
+}
+
+/** A window with its sidebar marked off: the collapse/expand sidebar control. */
+export function SidebarIcon(props: IconProps) {
+  return (
+    <Icon data-icon="sidebar" {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+      <line x1="9.5" y1="4" x2="9.5" y2="20" />
+    </Icon>
+  )
+}
+
+/**
+ * The Excalibur mark (excalibur.svg) redrawn for small sizes: heavier strokes, and the finest details (grip
+ * wrap, inner frame, crossguard gem) left out so it stays legible at 20–24px. Drawn in `currentColor`.
+ */
+export function LogoMark(props: IconProps) {
+  return (
+    <svg
+      viewBox="270 0 660 990"
+      width="1em"
+      height="1em"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={40}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <circle cx="600" cy="70" r="46" />
+      <path d="M574 118 L564 270 M626 118 L636 270" />
+      <path d="M561 270 C514 294 453 291 414 260 C383 281 359 326 369 358 C409 319 482 301 538 321 C565 331 586 352 600 370 C614 352 635 331 662 321 C718 301 791 319 831 358 C841 326 817 281 786 260 C747 291 686 294 639 270" />
+      <path d="M557 400 L560 344 M643 400 L640 344" />
+      <rect x="310" y="401" width="580" height="350" rx="28" fill="currentColor" fillOpacity={0.16} />
+      <path d="M720 751 V724 Q720 709 735 709 H806 Q821 709 821 724 V751" />
+      <rect x="292" y="751" width="616" height="40" rx="20" fill="currentColor" />
+      <path d="M560 812 L560 876 Q560 885 565 895 L600 955 L635 895 Q640 885 640 876 L640 812" />
+    </svg>
   )
 }

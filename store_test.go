@@ -88,7 +88,7 @@ func TestLocalBoardLifecycle(t *testing.T) {
 	if err := store.saveBoard("Plan", scene); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(store.localFolder, "Plan.excalidraw")); err != nil || string(got) != scene {
+	if got, err := os.ReadFile(filepath.Join(store.localFolders[0], "Plan.excalidraw")); err != nil || string(got) != scene {
 		t.Fatalf("read = %q, %v", got, err)
 	}
 	if err := store.renameBoard("Plan.excalidraw", "Roadmap"); err != nil {
@@ -102,6 +102,85 @@ func TestLocalBoardLifecycle(t *testing.T) {
 	}
 	if store.board("Roadmap copy.excalidraw") == nil {
 		t.Fatal("duplicate missing")
+	}
+}
+
+func TestMultipleLocalFolders(t *testing.T) {
+	store := testStore(t)
+	first := store.localFolders[0]
+	if err := store.createBoard("First"); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(t.TempDir(), "more boards")
+	if err := store.addLocalFolder(second); err != nil {
+		t.Fatal(err)
+	}
+	if store.activeSource != localSourceID || store.activeGroup != second || len(store.boards) != 0 {
+		t.Fatalf("after add: active %s/%s with %d boards", store.activeSource, store.activeGroup, len(store.boards))
+	}
+	if err := store.addLocalFolder(second + string(filepath.Separator)); err != nil || len(store.localFolders) != 2 {
+		t.Fatalf("re-adding a folder = %v, folders %v", err, store.localFolders)
+	}
+	if err := store.createBoard("Second"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(second, "Second.excalidraw")); err != nil {
+		t.Fatalf("board not written to the active folder: %v", err)
+	}
+	if err := store.activateSource(localSourceID, first); err != nil || store.board("First.excalidraw") == nil {
+		t.Fatalf("switching back = %v, boards %v", err, store.boards)
+	}
+	if err := store.activateSource(localSourceID, filepath.Join(t.TempDir(), "unknown")); err == nil {
+		t.Fatal("an unknown folder was activated")
+	}
+	snapshot := store.snapshot()
+	if groups := snapshot.Sources[0].Groups; len(groups) != 2 || groups[1].ID != second {
+		t.Fatalf("local groups = %#v", groups)
+	}
+
+	// The list survives a restart, along with the active folder; BoardsFolder stays the first one.
+	if err := store.activateSource(localSourceID, second); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newStore(store.prefsPath, filepath.Join(t.TempDir(), "default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reopened.localFolders, []string{first, second}) || reopened.activeGroup != second || reopened.prefs.BoardsFolder != first {
+		t.Fatalf("reopened folders %v, active %s, boardsFolder %s", reopened.localFolders, reopened.activeGroup, reopened.prefs.BoardsFolder)
+	}
+
+	// Removing the active folder falls back to the first; the last one can't go.
+	if err := store.removeLocalFolder(second); err != nil {
+		t.Fatal(err)
+	}
+	if store.activeGroup != first || len(store.localFolders) != 1 {
+		t.Fatalf("after remove: active %s, folders %v", store.activeGroup, store.localFolders)
+	}
+	if _, err := os.Stat(filepath.Join(second, "Second.excalidraw")); err != nil {
+		t.Fatalf("removing a folder must not delete its boards: %v", err)
+	}
+	if err := store.removeLocalFolder(first); err == nil {
+		t.Fatal("the last folder was removed")
+	}
+}
+
+func TestLegacyBoardsFolderMigrates(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "legacy")
+	prefsPath := filepath.Join(root, "config", "prefs.json")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(prefsPath, []byte(`{"boardsFolder":`+strconv.Quote(legacy)+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newStore(prefsPath, filepath.Join(root, "default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(store.localFolders, []string{legacy}) || store.activeGroup != legacy {
+		t.Fatalf("folders %v, active %s", store.localFolders, store.activeGroup)
 	}
 }
 

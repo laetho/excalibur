@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,7 +124,7 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	if a.window != nil {
 		a.window.SetZoom(applicationZoom)
 	}
-	a.startWatcher(folder)
+	a.startWatcher(store.localFolders)
 	go a.remoteRefreshLoop()
 	go a.refreshBucketsOnStartup()
 	a.outboxWorkers.Add(1)
@@ -501,8 +502,10 @@ func (a *App) ChooseImport() error {
 	return a.ImportPaths(paths)
 }
 
-func (a *App) ChooseFolder() error {
-	folder, err := a.wailsApp.Dialog.OpenFile().SetTitle("Choose Boards Folder").CanChooseFiles(false).CanChooseDirectories(true).PromptForSingleSelection()
+// AddLocalFolder lets the user pick a folder of .excalidraw boards, adds it to
+// the sidebar and opens it.
+func (a *App) AddLocalFolder() error {
+	folder, err := a.wailsApp.Dialog.OpenFile().SetTitle("Add Boards Folder").CanChooseFiles(false).CanChooseDirectories(true).CanCreateDirectories(true).PromptForSingleSelection()
 	if err != nil || folder == "" {
 		return err
 	}
@@ -510,14 +513,30 @@ func (a *App) ChooseFolder() error {
 		return err
 	}
 	a.mu.Lock()
-	if err = a.store.changeFolder(folder); err != nil {
+	if err = a.store.addLocalFolder(folder); err != nil {
 		a.mu.Unlock()
 		return err
 	}
+	folders := append([]string(nil), a.store.localFolders...)
 	a.emitSnapshotLocked()
 	a.mu.Unlock()
-	a.startWatcher(folder)
+	a.startWatcher(folders)
 	return nil
+}
+
+// RemoveLocalFolder removes a folder from the sidebar. Its boards stay on disk.
+func (a *App) RemoveLocalFolder(folder string) error {
+	if err := a.savePending(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	err := a.store.removeLocalFolder(folder)
+	folders := append([]string(nil), a.store.localFolders...)
+	// Even when switching to the remaining folder fails, the folder is gone from the list.
+	a.emitSnapshotLocked()
+	a.mu.Unlock()
+	a.startWatcher(folders)
+	return err
 }
 
 // ChooseNatsCredentialsFile lets the user pick a .creds file and imports a
@@ -569,10 +588,15 @@ func (a *App) Reveal(id *string) error {
 	}
 	return revealPath(board.Path)
 }
-func (a *App) RevealFolder() error {
+
+// RevealFolder shows a local boards folder in the file manager.
+func (a *App) RevealFolder(folder string) error {
 	a.mu.Lock()
-	folder := a.store.localFolder
+	known := slices.Contains(a.store.localFolders, folder)
 	a.mu.Unlock()
+	if !known {
+		return errors.New("unknown local folder")
+	}
 	return revealPath(filepath.Join(folder, "."))
 }
 
@@ -1801,16 +1825,18 @@ func boardsFolderUsable(folder string) bool {
 	return w.Add(folder) == nil
 }
 
-func (a *App) startWatcher(folder string) {
+// startWatcher watches every local boards folder, replacing any previous
+// watcher. A change rescans the active folder; changes elsewhere are cheap no-ops.
+func (a *App) startWatcher(folders []string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Printf("watch boards folder: %v", err)
+		log.Printf("watch boards folders: %v", err)
 		return
 	}
-	if err = watcher.Add(folder); err != nil {
-		_ = watcher.Close()
-		log.Printf("watch boards folder: %v", err)
-		return
+	for _, folder := range folders {
+		if err = watcher.Add(folder); err != nil {
+			log.Printf("watch boards folder %s: %v", folder, err)
+		}
 	}
 	a.watcherMu.Lock()
 	old := a.watcher

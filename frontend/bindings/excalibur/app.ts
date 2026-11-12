@@ -25,6 +25,14 @@ export function AddBucket(sourceID: string, bucket: string): $CancellablePromise
     return $Call.ByID(1989134082, sourceID, bucket);
 }
 
+/**
+ * AddLocalFolder lets the user pick a folder of .excalidraw boards, adds it to
+ * the sidebar and opens it.
+ */
+export function AddLocalFolder(): $CancellablePromise<void> {
+    return $Call.ByID(3691058851);
+}
+
 export function AddNatsServer(config: $models.NatsServerConfig): $CancellablePromise<void> {
     return $Call.ByID(734037083, config);
 }
@@ -56,10 +64,6 @@ export function CanvasView(name: string, scrollX: number, scrollY: number, zoom:
 
 export function ChangeApplicationZoom(delta: number): $CancellablePromise<void> {
     return $Call.ByID(3490820114, delta);
-}
-
-export function ChooseFolder(): $CancellablePromise<void> {
-    return $Call.ByID(3880522108);
 }
 
 export function ChooseImport(): $CancellablePromise<void> {
@@ -236,6 +240,13 @@ export function RefreshBuckets(): $CancellablePromise<void> {
     return $Call.ByID(112819539);
 }
 
+/**
+ * RemoveLocalFolder removes a folder from the sidebar. Its boards stay on disk.
+ */
+export function RemoveLocalFolder(folder: string): $CancellablePromise<void> {
+    return $Call.ByID(2145633548, folder);
+}
+
 export function RemoveNatsServer(id: string): $CancellablePromise<void> {
     return $Call.ByID(1840923514, id);
 }
@@ -252,8 +263,11 @@ export function Reveal(id: string | null): $CancellablePromise<void> {
     return $Call.ByID(3771047464, id);
 }
 
-export function RevealFolder(): $CancellablePromise<void> {
-    return $Call.ByID(2478921548);
+/**
+ * RevealFolder shows a local boards folder in the file manager.
+ */
+export function RevealFolder(folder: string): $CancellablePromise<void> {
+    return $Call.ByID(2478921548, folder);
 }
 
 export function SaveFile(fileName: string, dataURL: string): $CancellablePromise<void> {

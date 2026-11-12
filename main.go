@@ -120,7 +120,7 @@ func nativeMenu(app *App) *application.Menu {
 	file := root.AddSubmenu("File")
 	add(file, "New Board…", "CmdOrCtrl+N", "new-board")
 	add(file, "Import Boards…", "CmdOrCtrl+O", "import")
-	add(file, "Choose Boards Folder…", "", "choose-folder")
+	add(file, "Add Boards Folder…", "", "add-folder")
 	add(file, "Add NATS Server…", "", "add-server")
 	add(file, "Show in File Manager", "CmdOrCtrl+Shift+R", "reveal")
 	file.AddSeparator()

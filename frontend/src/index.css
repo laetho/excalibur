@@ -127,6 +127,8 @@ select,
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
   position: relative;
+  overflow: hidden;
+  transition: width 0.12s ease-in-out, min-width 0.12s ease-in-out;
 }
 
 .sidebar.drop-target::after {
@@ -178,36 +180,6 @@ select,
  * header, board rows) so all left and right edges line up. Source cards sit on
  * a slightly raised surface, mirroring Excalidraw's islands. */
 
-.search-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 16px 0;
-}
-
-/* Hairline between the sidebar's sections, inset to the 16px gutter. */
-.sidebar-divider {
-  flex-shrink: 0;
-  height: 1px;
-  margin: 8px 16px;
-  background: var(--divider);
-}
-
-/* MARK: - Sidebar section headers (Boards) */
-
-.boards-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px 16px 6px;
-}
-
-.boards-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
 .icon-button {
   width: 32px;
   height: 32px;
@@ -226,44 +198,6 @@ select,
 .icon-button:hover {
   background: var(--row-hover);
   color: var(--text);
-}
-
-.view-options {
-  position: relative;
-}
-
-.popover {
-  position: absolute;
-  top: 38px;
-  right: 0;
-  z-index: 30;
-  min-width: 180px;
-  background: var(--modal-bg);
-  border: 1px solid var(--input-border);
-  border-radius: 8px;
-  box-shadow: var(--modal-shadow);
-  padding: 5px;
-}
-
-.popover-group {
-  display: flex;
-  flex-direction: column;
-}
-
-.popover-group button {
-  text-align: left;
-  padding: 8px 12px;
-  border-radius: 5px;
-  color: var(--text);
-}
-
-.popover-group button:hover {
-  background: var(--row-hover);
-}
-
-.popover-group button.active {
-  color: var(--accent);
-  font-weight: 500;
 }
 
 /* MARK: - Row actions
@@ -285,8 +219,7 @@ select,
   background: transparent;
 }
 
-.row-actions .row-action:last-child,
-.boards-header .row-action {
+.row-actions .row-action:last-child {
   margin-right: -7px;
 }
 
@@ -306,9 +239,11 @@ select,
   height: 18px;
 }
 
+/* A translucent wash of the text colour, so the hover reads on any row:
+   plain, hovered or tinted active. */
 .icon-button.row-action:hover {
-  background: var(--card-bg);
-  color: var(--text);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  color: inherit;
 }
 
 .icon-button.row-action:disabled {
@@ -317,7 +252,7 @@ select,
 }
 
 .icon-button.row-action.refreshing svg {
-  animation: sources-spin 0.8s linear infinite;
+  animation: sources-spin 0.8s ease-in-out infinite;
 }
 
 @keyframes sources-spin {
@@ -332,31 +267,201 @@ select,
   }
 }
 
-/* MARK: - Search */
+/* MARK: - Sync dot
+ *
+ * The open board's sync status, shown in the sidebar when the canvas is too
+ * narrow for its badge: on the board's thumbnail, or below the logo when the
+ * sidebar is collapsed. Same colors as the canvas badge's dot; the ring of
+ * sidebar color lifts it off the thumbnail. */
+
+:root {
+  --sync-ok: #2b8a3e;
+  --sync-busy: #b45309;
+  --sync-error: #c92a2a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sync-ok: #2f9e44;
+    --sync-busy: #f59f00;
+    --sync-error: #e03131;
+  }
+}
+
+.sync-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sync-ok);
+  box-shadow: 0 0 0 2px var(--sidebar-bg);
+}
+
+.sync-dot.writing,
+.sync-dot.queued {
+  background: var(--sync-busy);
+  animation: canvas-persistence-pulse 1s ease-in-out infinite alternate;
+}
+
+.sync-dot.unwritten,
+.sync-dot.retrying {
+  background: var(--sync-error);
+}
+
+.thumbnail-frame {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.thumbnail-frame .sync-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+}
+
+.board-row.selected .sync-dot {
+  box-shadow: 0 0 0 2px var(--row-selected);
+}
+
+/* Collapsed sidebar: centered under the logo. */
+.rail-sync {
+  display: flex;
+  justify-content: center;
+  width: 60px;
+  padding-top: 14px;
+}
+
+/* MARK: - Sidebar top row
+ *
+ * The logo on the left; search and hide-sidebar on the right. Search opens
+ * into a field that fills the row. Collapsed, the sidebar is a rail just wide
+ * enough for the logo, which then becomes the button that brings it back. */
+
+.sidebar.collapsed {
+  width: 60px;
+  min-width: 60px;
+}
+
+/* Keep the content at full width while the sidebar animates, so it's
+   revealed rather than squeezed. */
+.sidebar > .source-tree {
+  min-width: 272px;
+}
+
+.sidebar-top {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px; /* a 36px row below 12px of top padding */
+  padding: 12px 16px 0 12px;
+}
+
+.sidebar-top > .row-actions {
+  margin-left: auto;
+}
+
+/* The app mark on a gradient tile: Excalidraw's violet, deepening to indigo,
+   with a pink glow from the top left. */
+.app-logo {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 10px;
+  color: #ffffff;
+  background:
+    radial-gradient(circle at 22% 18%, rgba(255, 176, 228, 0.8), transparent 58%),
+    linear-gradient(140deg, #9a94ff 0%, #6965db 48%, #3a2b9e 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 2px 8px rgba(76, 64, 196, 0.35);
+}
+
+.app-logo svg {
+  transition:
+    opacity 160ms ease,
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1); /* a small overshoot */
+}
+
+.app-logo-mark {
+  width: 24px;
+  height: 24px;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.22));
+}
+
+.app-logo-expand {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transform: scale(0.5) rotate(-90deg);
+}
+
+/* On hover the mark shrinks and turns away as the expand icon turns in. */
+.app-logo.expandable:hover .app-logo-mark,
+.app-logo.expandable:focus-visible .app-logo-mark {
+  opacity: 0;
+  transform: scale(0.5) rotate(90deg);
+}
+
+.app-logo.expandable:hover .app-logo-expand,
+.app-logo.expandable:focus-visible .app-logo-expand {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-logo svg {
+    transition: opacity 160ms ease;
+  }
+
+  .app-logo-expand,
+  .app-logo.expandable:hover .app-logo-mark,
+  .app-logo.expandable:focus-visible .app-logo-mark {
+    transform: none;
+  }
+}
+
+.app-logo.expandable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .search {
-  position: relative;
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding-left: 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+
+.search:focus-within {
+  border-color: var(--accent);
 }
 
 .search .search-icon {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 17px;
-  height: 17px;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
   color: var(--text-secondary);
-  pointer-events: none;
 }
 
 .search input {
-  width: 100%;
-  height: 36px;
-  padding: 0 4px 0 26px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
   border: none;
-  border-radius: 0;
   background: transparent;
   outline: none;
 }
@@ -365,64 +470,66 @@ select,
   color: var(--text-secondary);
 }
 
-.search-row .view-options .icon-button {
-  width: 32px;
-  height: 32px;
-  margin-right: -7px; /* optically align the funnel with the cards' right edge */
+/* Hide WebKit's own clear button; the X closes search instead. */
+.search input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
 }
 
-.search-row .view-options .icon-button svg {
-  width: 16px;
-  height: 16px;
+/* A smaller X, 4px from the top, bottom and right of the field (34px inside). */
+.search .icon-button.row-action {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
 }
 
-/* MARK: - Sources
+.search .icon-button.row-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* MARK: - Source tree
  *
- * Source headers (the local folder, each NATS server) are flat rows aligned
- * with the search row. Only the buckets sit on a subtle pill; the active one
- * is tinted with the primary container colour and marked with a dot. */
+ * One scrolling tree under the search row. Sources (this computer, each NATS
+ * server) are flat headings; their folders or buckets are rows with a chevron
+ * that only take a pill on hover. The active one is tinted and its boards are
+ * listed beneath it, at the same width. */
 
-.sources {
-  /* Its natural height, up to half of the sidebar; then it scrolls (the boards get the rest). */
-  flex: 0 1 auto;
-  max-height: 50%;
+.source-tree {
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  padding: 0 16px;
+  padding: 12px 16px; /* the space the old divider under the top row took */
 }
 
-.source-server {
+.tree-source {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding-bottom: 6px;
+  padding-bottom: 8px;
 }
 
-.source-row {
+.tree-source-row {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
   height: 38px;
-  text-align: left;
   color: var(--text);
 }
 
-/* The local folder row is itself the clickable group. Give it the same pill
-   treatment as a bucket on hover/active, bleeding into the gutter so its icon
-   stays aligned with the server rows. */
-.source-row.local {
-  margin: 0 -8px;
-  width: calc(100% + 16px);
-  padding: 0 8px;
-  border-radius: 6px;
+.tree-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+  transition: transform 120ms ease;
 }
 
-.source-row.local:hover:not(.active) {
-  background: var(--card-bg);
+[aria-expanded='false'] > .tree-chevron {
+  transform: rotate(-90deg);
 }
 
 .source-icon {
@@ -440,26 +547,53 @@ select,
   text-overflow: ellipsis;
 }
 
-.source-badge {
+/* A folder or bucket: its pill, and its boards beneath it when open. */
+.tree-group {
   flex-shrink: 0;
-  font-size: 12px;
+}
+
+.tree-group-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding-right: 3px; /* the 30px action then sits 3px from the top, bottom and right */
+  border-radius: 8px;
   color: var(--text-secondary);
 }
 
-.source-group {
+.tree-group-row:hover {
+  background: var(--card-hover);
+  color: var(--text);
+}
+
+.tree-group.active .tree-group-row {
+  background: var(--row-selected);
+  color: var(--row-selected-text);
+}
+
+.tree-group.active .tree-chevron {
+  color: inherit;
+}
+
+.tree-group.drag-over .tree-group-row {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.tree-group-toggle {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
+  height: 100%;
+  padding: 0 4px 0 10px;
   text-align: left;
-  background: var(--card-bg);
-  color: var(--text-secondary);
+  color: inherit;
 }
 
-.source-group-name {
+.tree-group-name {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -467,17 +601,83 @@ select,
   text-overflow: ellipsis;
 }
 
-.source-group:hover:not(.active) {
-  background: var(--card-hover);
-  color: var(--text);
+.tree-group.active .tree-group-name {
+  font-weight: 500;
 }
 
-.source-active-dot {
+/* Inside the pill, keep the + clear of the rounded edge. */
+.tree-group-row .row-actions .row-action:last-child {
+  margin-right: 0;
+}
+
+/* Shown in place of the + while a group's boards load. */
+.tree-spinner {
   flex-shrink: 0;
-  width: 7px;
-  height: 7px;
+  width: 14px;
+  height: 14px;
+  margin: 0 8px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
   border-radius: 50%;
-  background: var(--accent);
+  opacity: 0.7;
+  animation: sources-spin 0.8s linear infinite;
+}
+
+.tree-boards {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 2px; /* full width, so a selected board lines up with its group's pill */
+  animation: tree-open 140ms ease-out;
+}
+
+@keyframes tree-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-boards,
+  .tree-spinner {
+    animation: none;
+  }
+}
+
+.tree-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tree-empty p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.tree-empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 7px;
+  color: var(--accent);
+  background: var(--control-bg);
+  font-weight: 500;
+}
+
+.tree-empty-action:hover {
+  background: var(--card-hover);
+}
+
+.tree-empty-action svg {
+  width: 14px;
+  height: 14px;
 }
 
 .source-empty {
@@ -492,32 +692,7 @@ select,
   text-decoration: underline;
 }
 
-.source-row.local.active,
-.source-group.active {
-  background: var(--row-selected);
-  color: var(--row-selected-text);
-}
-
-.source-row.drag-over,
-.source-group.drag-over {
-  background: var(--accent);
-  color: var(--accent-text);
-}
-
-.source-row[aria-busy='true'],
-.source-group[aria-busy='true'] {
-  opacity: 0.6;
-}
-
-/* MARK: - Board list */
-
-.board-list {
-  flex: 1 1 0;
-  min-height: 80px;
-  overflow-y: auto;
-  /* Same 16px gutter as the bucket pills, so both span the same width. */
-  padding: 0 16px 8px;
-}
+/* MARK: - Board rows */
 
 .board-row {
   display: flex;
@@ -606,7 +781,6 @@ select,
 
 /* MARK: - Empty states */
 
-.empty-state,
 .no-selection {
   display: flex;
   flex-direction: column;
@@ -615,10 +789,6 @@ select,
   gap: 6px;
   text-align: center;
   padding: 20px;
-}
-
-.empty-state {
-  height: 100%;
 }
 
 .empty-title {
@@ -1400,28 +1570,23 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
   height: var(--lg-icon-size);
 }
 
-.merlin-canvas-toggle:hover:not(:disabled) {
+.merlin-canvas-toggle:hover {
   background: var(--accent);
-}
-
-.merlin-canvas-toggle:disabled {
-  cursor: default;
-  opacity: 0.45;
 }
 
 /* Every ~10s the sparkles twinkle and a sheen crosses the button, to hint that
    Merlin is there. The motion is the first ~1.2s of each 10s cycle. */
-.merlin-canvas-toggle:not(:disabled) svg path {
+.merlin-canvas-toggle svg path {
   transform-box: fill-box;
   transform-origin: center;
   animation: merlin-twinkle 10s ease-in-out 2s infinite;
 }
 
-.merlin-canvas-toggle:not(:disabled) svg path:nth-child(2) {
+.merlin-canvas-toggle svg path:nth-child(2) {
   animation-name: merlin-twinkle-small;
 }
 
-.merlin-canvas-toggle:not(:disabled)::after {
+.merlin-canvas-toggle::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -2030,6 +2195,12 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
   line-height: 1;
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* No room beside the toolbar: kept in place for measuring, but not shown (the
+   sidebar shows the status instead). */
+.canvas[data-canvas-theme] .canvas-persistence-status.offstage {
+  visibility: hidden;
 }
 
 .canvas[data-canvas-theme='dark'] .canvas-persistence-status {

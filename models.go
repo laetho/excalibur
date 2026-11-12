@@ -84,7 +84,9 @@ type AIModel struct {
 }
 
 type Preferences struct {
+	// BoardsFolder is the first local folder, kept for older versions; LocalFolders is the full list.
 	BoardsFolder     string              `json:"boardsFolder,omitempty"`
+	LocalFolders     []string            `json:"localFolders,omitempty"`
 	LastBoard        string              `json:"lastBoard,omitempty"`
 	Viewports        map[string]Viewport `json:"viewports"`
 	SortOrder        string              `json:"sortOrder"`

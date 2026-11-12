@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import Canvas from './Canvas'
+import Canvas, { PERSISTENCE_LABELS, type SyncStatus } from './Canvas'
 import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
 import { RemoteCursor } from './RemoteCursors'
 import {
@@ -8,13 +8,14 @@ import {
   ChevronDownIcon,
   CloseIcon,
   DatabaseIcon,
-  FilterIcon,
   FolderIcon,
+  LogoMark,
   InfoIcon,
   MinusIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
+  SidebarIcon,
   SparklesIcon,
   UsersIcon,
 } from './icons'
@@ -23,7 +24,7 @@ import {
   addBucket,
   addNatsServer,
   aiChat,
-  chooseFolder,
+  addLocalFolder,
   chooseImport,
   chooseNatsCredentialsFile,
   copyBoardToSource,
@@ -44,6 +45,7 @@ import {
   refreshBuckets,
   renameBoard,
   reveal,
+  removeLocalFolder,
   revealFolder,
   selectBoard,
   setCanvasAppearance,
@@ -137,6 +139,8 @@ function validateName(name: string, boards: BoardInfo[], excludingId?: string): 
 }
 
 /** The name shown for the local boards folder, in the sidebar and in Settings. */
+const SIDEBAR_COLLAPSED_KEY = 'excalibur.sidebarCollapsed'
+
 function folderDisplayName(path: string): string {
   return lastPathComponent(path) || path
 }
@@ -174,7 +178,19 @@ export default function Shell() {
   const [creating, setCreating] = useState(false)
   const [renaming, setRenaming] = useState<BoardInfo | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [viewOptionsOpen, setViewOptionsOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  /** The open board's sync status when the canvas has no room to show it; the sidebar shows it instead. */
+  const [sidebarSyncStatus, setSidebarSyncStatus] = useState<SyncStatus | null>(null)
+  /** Collapsed to a rail with just the logo; remembered between sessions. */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true')
+  const setCollapsed = (collapsed: boolean) => {
+    setSidebarCollapsed(collapsed)
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed))
+  }
+  const closeSearch = () => {
+    setSearchOpen(false)
+    setSearch('')
+  }
   const [addServerOpen, setAddServerOpen] = useState(false)
   /** True while the sources refresh button is re-listing NATS buckets. */
   const [refreshingSources, setRefreshingSources] = useState(false)
@@ -184,6 +200,8 @@ export default function Shell() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; board: BoardInfo } | null>(null)
   /** Right-click menu on a NATS server heading in the sources list. */
   const [sourceMenu, setSourceMenu] = useState<{ x: number; y: number; source: SourceInfo } | null>(null)
+  /** Right-click menu on one local boards folder. */
+  const [folderMenu, setFolderMenu] = useState<{ x: number; y: number; folder: string } | null>(null)
   /** Right-click menu on one NATS Object Store bucket. */
   const [bucketMenu, setBucketMenu] = useState<{ x: number; y: number; source: SourceInfo; group: GroupInfo } | null>(null)
   const [deletingBucket, setDeletingBucket] = useState<{ source: SourceInfo; group: GroupInfo } | null>(null)
@@ -201,14 +219,43 @@ export default function Shell() {
     snapshotRef.current = snapshot
   }, [snapshot])
 
+  /** The switch in flight, read by click handlers without re-rendering them. */
+  const switchingRef = useRef<string | null>(null)
   const handleActivateSource = useCallback((sourceId: string, groupId: string) => {
     const current = snapshotRef.current
-    if (!current || (current.activeSource === sourceId && current.activeGroup === groupId)) return
+    // One switch at a time: further clicks are ignored until the boards have loaded.
+    if (!current || switchingRef.current || (current.activeSource === sourceId && current.activeGroup === groupId)) return
     const key = `${sourceId}\u0000${groupId}`
+    switchingRef.current = key
     setSwitchingSource(key)
+    const finish = () => {
+      if (switchingRef.current !== key) return
+      switchingRef.current = null
+      setSwitchingSource(null)
+    }
+    // On success the switch ends when the snapshot shows the new group (the effect below), not when the
+    // call returns: the two can arrive in either order, and ending early would flash the old group open.
     activateSource(sourceId, groupId)
-      .catch((err: unknown) => log('error', `Could not switch source: ${String(err)}`))
-      .finally(() => setSwitchingSource((active) => (active === key ? null : active)))
+      .then(() => setTimeout(finish, 2000)) // safety net if that snapshot never comes
+      .catch((err: unknown) => {
+        log('error', `Could not switch source: ${String(err)}`)
+        finish()
+      })
+  }, [])
+
+  useEffect(() => {
+    if (snapshot && switchingRef.current === `${snapshot.activeSource}\u0000${snapshot.activeGroup}`) {
+      switchingRef.current = null
+      setSwitchingSource(null)
+    }
+  }, [snapshot])
+
+  const handleAddFolder = useCallback(() => {
+    addLocalFolder().catch((err: unknown) => log('error', `Could not add the folder: ${String(err)}`))
+  }, [])
+
+  const handleRemoveFolder = useCallback((folder: string) => {
+    removeLocalFolder(folder).catch((err: unknown) => log('error', `Could not remove the folder: ${String(err)}`))
   }, [])
 
   const handleMenu = useCallback((id: string) => {
@@ -238,8 +285,8 @@ export default function Shell() {
       case 'import':
         chooseImport()
         break
-      case 'choose-folder':
-        chooseFolder()
+      case 'add-folder':
+        handleAddFolder()
         break
       case 'reveal':
         reveal(current.selection)
@@ -271,7 +318,7 @@ export default function Shell() {
         setAddServerOpen(true)
         break
     }
-  }, [])
+  }, [handleAddFolder])
 
   useEffect(() => {
     getState()
@@ -304,32 +351,30 @@ export default function Shell() {
     return () => clearInterval(timer)
   }, [])
 
-  // Close the menus and the view-options popover on a click outside them. Listens to `pointerdown` (capture
+  // Close the menus on a click outside them. Listens to `pointerdown` (capture
   // phase) and ignores clicks inside: React runs this effect synchronously during the click that opened the
-  // popover, so a `click` listener on window would receive that same click and close it again right away.
+  // menu, so a `click` listener on window would receive that same click and close it again right away.
   // Not `mousedown`: Excalidraw prevents the default of `pointerdown` on the canvas, which suppresses it.
   useEffect(() => {
-    if (!contextMenu && !sourceMenu && !bucketMenu && !viewOptionsOpen) return
+    if (!contextMenu && !sourceMenu && !folderMenu && !bucketMenu) return
+    const closeAll = () => {
+      setContextMenu(null)
+      setSourceMenu(null)
+      setFolderMenu(null)
+      setBucketMenu(null)
+    }
     const close = (event: Event) => {
-      if (event.target instanceof Element && event.target.closest('.view-options, .context-menu')) return
-      setContextMenu(null)
-      setSourceMenu(null)
-      setBucketMenu(null)
-      setViewOptionsOpen(false)
+      if (event.target instanceof Element && event.target.closest('.context-menu')) return
+      closeAll()
     }
-    const closeOnBlur = () => {
-      setContextMenu(null)
-      setSourceMenu(null)
-      setBucketMenu(null)
-      setViewOptionsOpen(false)
-    }
+    const closeOnBlur = closeAll
     window.addEventListener('pointerdown', close, true)
     window.addEventListener('blur', closeOnBlur)
     return () => {
       window.removeEventListener('pointerdown', close, true)
       window.removeEventListener('blur', closeOnBlur)
     }
-  }, [contextMenu, sourceMenu, bucketMenu, viewOptionsOpen])
+  }, [contextMenu, sourceMenu, folderMenu, bucketMenu])
 
   // The window title: the open board and when it was last edited (as the SwiftUI app's title and subtitle).
   const openBoard = snapshot?.boards.find((b) => b.id === snapshot.selection)
@@ -412,7 +457,7 @@ export default function Shell() {
   return (
     <div className="shell">
       <aside
-        className={`sidebar${dropTargeted ? ' drop-target' : ''}`}
+        className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}${dropTargeted ? ' drop-target' : ''}`}
         onDragOver={(event) => {
           event.preventDefault()
           setDropTargeted(true)
@@ -422,91 +467,117 @@ export default function Shell() {
         }}
         onDrop={handleDrop}
       >
-        <div className="search-row">
-          <div className="search">
-            <SearchIcon className="search-icon" />
-            <input type="search" placeholder="Search names and text" value={search} onChange={(event) => setSearch(event.target.value)} />
-          </div>
-          <div className="view-options">
-            <button className="icon-button filter-button" onClick={() => setViewOptionsOpen((open) => !open)} title="Sort boards">
-              <FilterIcon />
+        <div className="sidebar-top">
+          {sidebarCollapsed ? (
+            // Collapsed, the logo is the way back: hovering shows the expand icon, clicking opens the sidebar.
+            <button className="app-logo expandable" onClick={() => setCollapsed(false)} title="Show Sidebar" aria-label="Show Sidebar">
+              <LogoMark className="app-logo-mark" />
+              <SidebarIcon className="app-logo-expand" />
             </button>
-            {viewOptionsOpen && (
-              <div className="popover">
-                <div className="popover-group">
-                  <button className={snapshot.sortOrder === 'name' ? 'active' : ''} onClick={() => setSort('name')}>
-                    Sort by Name
-                  </button>
-                  <button className={snapshot.sortOrder === 'dateEdited' ? 'active' : ''} onClick={() => setSort('dateEdited')}>
-                    Sort by Date Edited
+          ) : (
+            <span className="app-logo" role="img" aria-label="Excalibur">
+              <LogoMark className="app-logo-mark" />
+            </span>
+          )}
+          {!sidebarCollapsed &&
+            (searchOpen ? (
+              <div className="search">
+                <SearchIcon className="search-icon" />
+                <input
+                  type="search"
+                  placeholder="Search boards"
+                  aria-label="Search boards"
+                  value={search}
+                  autoFocus
+                  onChange={(event) => setSearch(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') closeSearch()
+                  }}
+                />
+                <button className="icon-button row-action" onClick={closeSearch} title="Close Search" aria-label="Close Search">
+                  <CloseIcon />
+                </button>
+              </div>
+            ) : (
+              <span className="row-actions">
+                <button className="icon-button row-action" onClick={() => setSearchOpen(true)} title="Search" aria-label="Search">
+                  <SearchIcon />
+                </button>
+                <button className="icon-button row-action" onClick={() => setCollapsed(true)} title="Hide Sidebar" aria-label="Hide Sidebar">
+                  <SidebarIcon />
+                </button>
+              </span>
+            ))}
+        </div>
+        {sidebarCollapsed && sidebarSyncStatus && (
+          <div className="rail-sync">
+            <SyncDot status={sidebarSyncStatus} />
+          </div>
+        )}
+        {!sidebarCollapsed && (
+          <>
+            <SourceTree
+              sources={snapshot.sources}
+              activeSource={snapshot.activeSource}
+              activeGroup={snapshot.activeGroup}
+              switchingSource={switchingSource}
+              refreshing={refreshingSources}
+              forceOpen={query !== ''}
+              onRefresh={handleRefreshSources}
+              onActivateSource={handleActivateSource}
+              onDropBoard={handleDropBoard}
+              onNewBoard={() => setCreating(true)}
+              onAddFolder={handleAddFolder}
+              onFolderMenu={(event, folder) => {
+                event.preventDefault()
+                setFolderMenu({ x: event.clientX, y: event.clientY, folder })
+              }}
+              onNewBucket={setNewBucketFor}
+              onSourceMenu={(event, source) => {
+                event.preventDefault()
+                setSourceMenu({ x: event.clientX, y: event.clientY, source })
+              }}
+              onBucketMenu={(event, source, group) => {
+                event.preventDefault()
+                setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
+              }}
+            >
+              {snapshot.boards.length === 0 ? (
+                <div className="tree-empty">
+                  <p>
+                    {activeNatsSource
+                      ? `No boards yet. They’ll be stored on ${activeNatsSource.name}.`
+                      : `No boards yet. They’ll be saved as .excalidraw files in ${lastPathComponent(snapshot.folder)}.`}
+                  </p>
+                  <button className="tree-empty-action" onClick={() => setCreating(true)}>
+                    <PlusIcon /> New Board
                   </button>
                 </div>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="sidebar-divider" role="separator" />
-        <SourcesNav
-          sources={snapshot.sources}
-          activeSource={snapshot.activeSource}
-          activeGroup={snapshot.activeGroup}
-          switchingSource={switchingSource}
-          refreshing={refreshingSources}
-          onRefresh={handleRefreshSources}
-          onActivateSource={handleActivateSource}
-          onDropBoard={handleDropBoard}
-          onNewBucket={setNewBucketFor}
-          onSourceMenu={(event, source) => {
-            event.preventDefault()
-            setSourceMenu({ x: event.clientX, y: event.clientY, source })
-          }}
-          onBucketMenu={(event, source, group) => {
-            event.preventDefault()
-            setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
-          }}
-        />
-        <div className="sidebar-divider" role="separator" />
-        <div className="boards-header">
-          <span className="boards-title">Boards</span>
-          <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
-            <PlusIcon />
-          </button>
-        </div>
-        <div className="board-list">
-          {snapshot.boards.length === 0 ? (
-            <div className="empty-state">
-              <p className="empty-title">No Boards</p>
-              <p className="empty-description">
-                {activeNatsSource
-                  ? `Boards in “${snapshot.activeGroup}” are stored on ${activeNatsSource.name}.`
-                  : `Boards are saved as .excalidraw files in ${lastPathComponent(snapshot.folder)}.`}
-              </p>
-              <button className="primary" onClick={() => setCreating(true)}>
-                New Board
-              </button>
-            </div>
-          ) : visibleBoards.length === 0 ? (
-            <div className="empty-state">
-              <p className="empty-title">No Results for “{query}”</p>
-            </div>
-          ) : (
-            visibleBoards.map(({ board, match }) => (
-              <BoardRow
-                key={board.id}
-                board={board}
-                match={match}
-                showThumbnail={snapshot.showThumbnails}
-                selected={snapshot.selection === board.id}
-                now={now}
-                onSelect={() => selectBoard(board.id)}
-                onContextMenu={(event) => {
-                  event.preventDefault()
-                  setContextMenu({ x: event.clientX, y: event.clientY, board })
-                }}
-              />
-            ))
-          )}
-        </div>
+              ) : visibleBoards.length === 0 ? (
+                <div className="tree-empty">
+                  <p>No results for “{query}”</p>
+                </div>
+              ) : (
+                visibleBoards.map(({ board, match }) => (
+                  <BoardRow
+                    key={board.id}
+                    board={board}
+                    match={match}
+                    showThumbnail={snapshot.showThumbnails}
+                    selected={snapshot.selection === board.id}
+                    syncStatus={snapshot.selection === board.id ? sidebarSyncStatus : null}
+                    now={now}
+                    onSelect={() => selectBoard(board.id)}
+                    onContextMenu={(event) => {
+                      event.preventDefault()
+                      setContextMenu({ x: event.clientX, y: event.clientY, board })
+                    }}
+                  />
+                ))
+              )}
+            </SourceTree>
+          </>
+        )}
       </aside>
 
       <main className="main">
@@ -517,6 +588,7 @@ export default function Shell() {
             collaborationColor={snapshot.collaborationColor}
             collaborationAvatar={snapshot.collaborationAvatar}
             collaborationAvatarOnly={snapshot.collaborationAvatarOnly}
+            onSyncStatusHidden={setSidebarSyncStatus}
             boardId={snapshot.selection}
             collab={collab}
           />
@@ -529,8 +601,8 @@ export default function Shell() {
               </button>
             </div>
           )}
-          {/* Like the Library trigger, it's gone while its panel is open; the panel has its own close button. */}
-          {snapshot.ai.enabled && !(aiOpen && openBoard) && (
+          {/* Only with a board open, and, like the Library trigger, gone while its panel is open. */}
+          {snapshot.ai.enabled && openBoard && !aiOpen && (
             <button
               className="merlin-canvas-toggle"
               // Open on press, not on click: an open Library closes on any pointerdown outside it, and this
@@ -540,8 +612,7 @@ export default function Shell() {
               }}
               // Keyboard activation (Enter/Space) only arrives as a click.
               onClick={() => setAIOpen(true)}
-              disabled={!openBoard}
-              title={openBoard ? 'Open Merlin' : 'Select a board to use Merlin'}
+              title="Open Merlin"
               aria-expanded={false}
               aria-controls="merlin-panel"
               aria-label="Open Merlin"
@@ -597,6 +668,32 @@ export default function Shell() {
       {addServerOpen && <AddServerDialog onClose={() => setAddServerOpen(false)} />}
       {newBucketFor && <NewBucketDialog source={newBucketFor} onClose={() => setNewBucketFor(null)} />}
       {removingServer && <RemoveServerDialog source={removingServer} onClose={() => setRemovingServer(null)} />}
+      {folderMenu && (
+        <div className="context-menu" style={{ left: folderMenu.x, top: folderMenu.y }} role="menu">
+          <button
+            role="menuitem"
+            onClick={() => {
+              revealFolder(folderMenu.folder).catch((err: unknown) => log('error', `Could not reveal the folder: ${String(err)}`))
+              setFolderMenu(null)
+            }}
+          >
+            Show in {FILE_MANAGER}
+          </button>
+          <div className="context-menu-divider" />
+          <button
+            role="menuitem"
+            className="destructive"
+            disabled={(snapshot.sources.find((source) => source.kind === 'local')?.groups.length ?? 0) <= 1}
+            title="Removes the folder from the sidebar. Its boards stay on disk."
+            onClick={() => {
+              handleRemoveFolder(folderMenu.folder)
+              setFolderMenu(null)
+            }}
+          >
+            Remove from Sidebar
+          </button>
+        </div>
+      )}
       {sourceMenu && (
         <div className="context-menu" style={{ left: sourceMenu.x, top: sourceMenu.y }} role="menu">
           <button
@@ -723,6 +820,7 @@ function BoardRow({
   match,
   showThumbnail,
   selected,
+  syncStatus,
   now,
   onSelect,
   onContextMenu,
@@ -731,6 +829,8 @@ function BoardRow({
   match: Match | null
   showThumbnail: boolean
   selected: boolean
+  /** Shown on the board when the canvas has no room for its sync badge. */
+  syncStatus: SyncStatus | null
   now: number
   onSelect: () => void
   onContextMenu: (event: React.MouseEvent) => void
@@ -747,10 +847,14 @@ function BoardRow({
       }}
     >
       {showThumbnail && (
-        <div className="thumbnail">{board.thumbnail ? <img src={board.thumbnail} alt="" draggable={false} /> : null}</div>
+        <div className="thumbnail-frame">
+          <div className="thumbnail">{board.thumbnail ? <img src={board.thumbnail} alt="" draggable={false} /> : null}</div>
+          {syncStatus && <SyncDot status={syncStatus} />}
+        </div>
       )}
       <div className="board-info">
         <div className="board-name-line">
+          {!showThumbnail && syncStatus && <SyncDot status={syncStatus} />}
           <span className="board-name">{board.name}</span>
           {board.isLink && (
             <span className="link-icon" title={board.target ? `Link to ${board.target}` : 'Link'}>
@@ -768,126 +872,223 @@ function BoardRow({
   )
 }
 
-// MARK: - Sources navigation
+/** The open board's sync status as a colored dot; the label is its tooltip and accessible name. */
+function SyncDot({ status }: { status: SyncStatus }) {
+  const label = PERSISTENCE_LABELS[status]
+  return <span className={`sync-dot ${status}`} role="img" aria-label={label} title={label} />
+}
 
-/** The navigation tree: the local boards folder and every NATS server with its buckets. */
-function SourcesNav({
+// MARK: - Source tree
+
+const groupKey = (sourceId: string, groupId: string) => `${sourceId}\u0000${groupId}`
+
+/**
+ * The navigation tree. Sources (this computer, each NATS server) are headings; under each, its folders or
+ * buckets are accordions. Only the active one holds boards (the backend loads one group at a time), so it
+ * is the one that opens, its boards nested beneath it; opening another group switches to it.
+ *
+ * A switch is shown at once: the clicked group takes the highlight and opens with a spinner, and its boards
+ * appear as soon as the backend reports them (the previous group's boards are never shown under it).
+ */
+function SourceTree({
   sources,
   activeSource,
   activeGroup,
   switchingSource,
   refreshing,
+  forceOpen,
   onRefresh,
   onActivateSource,
   onDropBoard,
+  onNewBoard,
+  onAddFolder,
+  onFolderMenu,
   onNewBucket,
   onSourceMenu,
   onBucketMenu,
+  children,
 }: {
   sources: SourceInfo[]
   activeSource: string
   activeGroup: string
+  /** Group key being switched to, while its boards load. */
   switchingSource: string | null
   refreshing: boolean
+  /** Keep the active group open regardless of the user's choice (while searching). */
+  forceOpen: boolean
   onRefresh: () => void
   onActivateSource: (sourceId: string, groupId: string) => void
   onDropBoard: (boardId: string, targetSource: string, targetGroup: string) => void
+  onNewBoard: () => void
+  onAddFolder: () => void
+  onFolderMenu: (event: React.MouseEvent, folder: string) => void
   onNewBucket: (source: SourceInfo) => void
   onSourceMenu: (event: React.MouseEvent, source: SourceInfo) => void
   onBucketMenu: (event: React.MouseEvent, source: SourceInfo, group: GroupInfo) => void
+  /** The active group's boards. */
+  children: React.ReactNode
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
+  /** The active group, if the user folded it away. Any other group is closed because it isn't loaded. */
+  const [foldedGroup, setFoldedGroup] = useState<string | null>(null)
+  const loadedKey = groupKey(activeSource, activeGroup)
+  /** The group the user is on: the one being switched to, else the loaded one. */
+  const currentKey = switchingSource ?? loadedKey
+  const treeRef = useRef<HTMLElement>(null)
 
-  // Shared drop/activation behaviour for anything that represents a group: the
-  // local folder card and every bucket row inside a server card.
-  const groupProps = (source: SourceInfo, group: GroupInfo) => ({
-    onClick: () => onActivateSource(source.id, group.id),
-    disabled: switchingSource !== null,
-    'aria-busy': switchingSource === `${source.id}\u0000${group.id}`,
-    'aria-current': activeSource === source.id && activeGroup === group.id ? ('true' as const) : undefined,
-    onDragEnter: (event: React.DragEvent) => {
-      event.preventDefault()
-      setDragOver(`${source.id}\u0000${group.id}`)
-    },
-    onDragLeave: () => setDragOver((key) => (key === `${source.id}\u0000${group.id}` ? null : key)),
-    onDragOver: (event: React.DragEvent) => {
-      event.preventDefault()
-      event.dataTransfer.dropEffect = 'copy'
-    },
-    onDrop: (event: React.DragEvent) => {
-      event.preventDefault()
-      event.stopPropagation()
-      setDragOver(null)
-      const boardId = event.dataTransfer.getData('text/plain')
-      if (boardId) onDropBoard(boardId, source.id, group.id)
-    },
-    title: group.id,
-  })
-  const groupState = (source: SourceInfo, group: GroupInfo) =>
-    `${activeSource === source.id && activeGroup === group.id ? ' active' : ''}${
-      dragOver === `${source.id}\u0000${group.id}` ? ' drag-over' : ''
-    }`
+  // Once another group's boards arrive, bring the group into view (it may sit below the fold).
+  useEffect(() => {
+    treeRef.current?.querySelector('.tree-group.active')?.scrollIntoView({ block: 'nearest' })
+  }, [loadedKey])
+
+  const renderGroup = (source: SourceInfo, group: GroupInfo, label: string, panelId: string) => {
+    const key = groupKey(source.id, group.id)
+    const current = key === currentKey
+    const loading = current && key !== loadedKey
+    const open = current && !loading && (forceOpen || foldedGroup !== key)
+    return (
+      <div key={key} className={`tree-group${current ? ' active' : ''}${dragOver === key ? ' drag-over' : ''}`}>
+        {/* The header is the group's handle: drop a board on it to copy it here; right-click for options. */}
+        <div
+          className="tree-group-row"
+          title={group.id}
+          onContextMenu={(event) => (source.kind === 'nats' ? onBucketMenu(event, source, group) : onFolderMenu(event, group.id))}
+          onDragEnter={(event) => {
+            event.preventDefault()
+            setDragOver(key)
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragOver((value) => (value === key ? null : value))
+          }}
+          onDragOver={(event) => {
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'copy'
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            setDragOver(null)
+            const boardId = event.dataTransfer.getData('text/plain')
+            if (boardId) onDropBoard(boardId, source.id, group.id)
+          }}
+        >
+          <button
+            className="tree-group-toggle"
+            aria-expanded={open}
+            aria-controls={open ? panelId : undefined}
+            aria-current={current ? 'true' : undefined}
+            aria-busy={loading}
+            onClick={() => {
+              if (!current) {
+                setFoldedGroup(null)
+                onActivateSource(source.id, group.id)
+              } else if (!loading && !forceOpen) {
+                // While searching the group stays open to show the results, so there's nothing to fold.
+                setFoldedGroup((value) => (value === key ? null : key))
+              }
+            }}
+          >
+            <ChevronDownIcon className="tree-chevron" aria-hidden="true" />
+            <span className="tree-group-name">{label}</span>
+          </button>
+          {loading ? (
+            <span className="tree-spinner" role="status" aria-label="Loading boards" />
+          ) : (
+            current && (
+              <span className="row-actions">
+                <button className="icon-button row-action" onClick={onNewBoard} title="New Board (⌘N)" aria-label={`New Board in ${label}`}>
+                  <PlusIcon />
+                </button>
+              </span>
+            )
+          )}
+        </div>
+        {open && (
+          <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
+            {children}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div className="sources">
-      {sources.map((source) => {
-        if (source.kind === 'local') {
-          // The local source is a single folder: render it as one clickable card.
-          const group = source.groups[0]
-          if (!group) return null
-          return (
-            <button key={source.id} className={`source-row local${groupState(source, group)}`} {...groupProps(source, group)}>
+    <nav ref={treeRef} className="source-tree" aria-label="Boards">
+      {sources.map((source, sourceIndex) => (
+        <section key={source.id} className="tree-source" aria-label={source.name}>
+          {source.kind === 'local' ? (
+            <div className="tree-source-row">
               <FolderIcon className="source-icon" />
-              <span className="source-title">{folderDisplayName(group.name)}</span>
-              <span className="source-badge">Local</span>
-            </button>
-          )
-        }
-        return (
-          <div key={source.id} className="source-server">
-            <div
-              className="source-row"
-              title={`${source.name} (right-click for options)`}
-              onContextMenu={(event) => onSourceMenu(event, source)}
-            >
+              <span className="source-title">Local</span>
+              <span className="row-actions">
+                <button className="icon-button row-action" onClick={onAddFolder} title="Add Folder" aria-label="Add Folder">
+                  <PlusIcon />
+                </button>
+              </span>
+            </div>
+          ) : (
+            <div className="tree-source-row" title={`${source.name} (right-click for options)`} onContextMenu={(event) => onSourceMenu(event, source)}>
               <DatabaseIcon className="source-icon" />
               <span className="source-title">{source.name}</span>
               <span className="row-actions">
-                <button
-                  className={`icon-button row-action${refreshing ? ' refreshing' : ''}`}
-                  onClick={onRefresh}
-                  disabled={refreshing}
-                  title="Refresh buckets"
-                  aria-label="Refresh buckets"
-                >
-                  <RefreshIcon />
-                </button>
+                <RefreshButton refreshing={refreshing} onRefresh={onRefresh} />
                 <button className="icon-button row-action" onClick={() => onNewBucket(source)} title="New Bucket" aria-label="New Bucket">
                   <PlusIcon />
                 </button>
               </span>
             </div>
-            {source.groups.length === 0 ? (
-              <button className="source-empty" onClick={() => onNewBucket(source)}>
-                No buckets yet. Create one
-              </button>
-            ) : (
-              source.groups.map((group) => (
-                <button
-                  key={group.id}
-                  className={`source-group${groupState(source, group)}`}
-                  onContextMenu={(event) => onBucketMenu(event, source, group)}
-                  {...groupProps(source, group)}
-                >
-                  <span className="source-group-name">{group.name}</span>
-                  {activeSource === source.id && activeGroup === group.id && <span className="source-active-dot" aria-hidden="true" />}
-                </button>
-              ))
-            )}
-          </div>
-        )
-      })}
-    </div>
+          )}
+          {source.kind === 'nats' && source.groups.length === 0 ? (
+            <button className="source-empty" onClick={() => onNewBucket(source)}>
+              No buckets yet. Create one
+            </button>
+          ) : (
+            source.groups.map((group, groupIndex) =>
+              renderGroup(
+                source,
+                group,
+                source.kind === 'local' ? folderDisplayName(group.name) : group.name,
+                `tree-group-${sourceIndex}-${groupIndex}`,
+              ),
+            )
+          )}
+        </section>
+      ))}
+    </nav>
+  )
+}
+
+/**
+ * Refresh buckets. Every click turns the arrows at least one full circle, however fast the refresh is
+ * (from a local board it's nearly instant), and they always stop at a full turn instead of snapping back.
+ */
+function RefreshButton({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
+  const [spinning, setSpinning] = useState(false)
+  const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  // Also spin when another server's button started the refresh (it refreshes them all).
+  useEffect(() => {
+    if (refreshing && !reducedMotion()) setSpinning(true)
+  }, [refreshing])
+
+  return (
+    <button
+      className={`icon-button row-action${spinning ? ' refreshing' : ''}`}
+      onClick={() => {
+        if (!reducedMotion()) setSpinning(true)
+        onRefresh()
+      }}
+      // Each turn ends here; stop once the refresh is done.
+      onAnimationIteration={() => {
+        if (!refreshing) setSpinning(false)
+      }}
+      disabled={refreshing}
+      title="Refresh buckets"
+      aria-label="Refresh buckets"
+      aria-busy={refreshing}
+    >
+      <RefreshIcon />
+    </button>
   )
 }
 
@@ -1688,7 +1889,7 @@ type SettingsTab = 'appearance' | 'boards' | 'collaboration' | 'servers' | 'ai' 
 
 const SETTINGS_TABS: { id: SettingsTab; title: string; description: string; Icon: (props: React.SVGProps<SVGSVGElement>) => React.ReactElement }[] = [
   { id: 'appearance', title: 'Appearance', description: 'Adjust how the canvas and the interface look.', Icon: AppearanceIcon },
-  { id: 'boards', title: 'Boards', description: 'Choose where boards on this computer are saved.', Icon: FolderIcon },
+  { id: 'boards', title: 'Boards', description: 'How boards are listed, and the folders on this computer where they’re saved.', Icon: FolderIcon },
   {
     id: 'collaboration',
     title: 'Collaboration',
@@ -1925,33 +2126,67 @@ function AppearanceSettings({ snapshot }: { snapshot: StoreSnapshot }) {
 }
 
 function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
-  // The local source's folder (as the sidebar shows it), falling back to the
-  // snapshot folder before the sources have loaded.
-  const localFolder = snapshot.sources.find((source) => source.kind === 'local')?.groups[0]?.name ?? snapshot.folder
+  // The folders the sidebar shows under Local. Group ids are full paths; names are shortened with ~.
+  const folders = snapshot.sources.find((source) => source.kind === 'local')?.groups ?? []
+  const report = (action: string) => (err: unknown) => log('error', `Could not ${action}: ${String(err)}`)
   return (
     <>
       <div className="settings-group">
+        <SettingsField label="Sort boards" help="The order of the boards in the sidebar.">
+          <div className="segmented" role="radiogroup" aria-label="Sort boards">
+            {(
+              [
+                ['name', 'Name'],
+                ['dateEdited', 'Date Edited'],
+              ] as const
+            ).map(([order, title]) => (
+              <button
+                key={order}
+                role="radio"
+                aria-checked={snapshot.sortOrder === order}
+                className={snapshot.sortOrder === order ? 'active' : ''}
+                onClick={() => setSort(order)}
+              >
+                {title}
+              </button>
+            ))}
+          </div>
+        </SettingsField>
+      </div>
+      <div className="settings-group">
         <SettingsField
-          label="Boards folder"
-          help="Boards are saved as plain .excalidraw files. To keep a history, make the folder a Git repository."
+          label="Boards folders"
+          help="Boards are saved as plain .excalidraw files. To keep a history, make a folder a Git repository."
           stacked
         >
-          <div className="folder-setting">
-            <FolderIcon className="folder-icon" />
-            <div className="folder-text">
-              <span className="folder-name">{folderDisplayName(localFolder)}</span>
-              <span className="folder-path" title={localFolder}>
-                {localFolder}
-              </span>
+          {folders.map((folder) => (
+            <div key={folder.id} className="folder-setting">
+              <FolderIcon className="folder-icon" />
+              <div className="folder-text">
+                <span className="folder-name">{folderDisplayName(folder.name)}</span>
+                <span className="folder-path" title={folder.id}>
+                  {folder.name}
+                </span>
+              </div>
+              <div className="settings-actions">
+                <button className="secondary" onClick={() => revealFolder(folder.id).catch(report('reveal the folder'))}>
+                  Show in {FILE_MANAGER}
+                </button>
+                <button
+                  className="secondary"
+                  disabled={folders.length <= 1}
+                  title={folders.length <= 1 ? 'There must be at least one folder.' : 'Removes the folder from the sidebar. Its boards stay on disk.'}
+                  onClick={() => removeLocalFolder(folder.id).catch(report('remove the folder'))}
+                >
+                  Remove
+                </button>
+              </div>
             </div>
-            <div className="settings-actions">
-              <button className="secondary" onClick={() => revealFolder()}>
-                Show in {FILE_MANAGER}
-              </button>
-              <button className="secondary" onClick={() => chooseFolder()}>
-                Change
-              </button>
-            </div>
+          ))}
+          <div className="settings-pane-actions">
+            <button className="secondary" onClick={() => addLocalFolder().catch(report('add the folder'))}>
+              Add Folder…
+            </button>
           </div>
         </SettingsField>
       </div>

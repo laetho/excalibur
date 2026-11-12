@@ -20,7 +20,7 @@ import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
 import type { ExcalidrawElement, OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { RemoteExcalidrawElement } from '@excalidraw/excalidraw/data/reconcile'
 import type { AppState, BinaryFiles, Collaborator, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   canvasChange,
   canvasLibrary,
@@ -156,11 +156,13 @@ function remoteIdentity(
 type PendingScene = { name: string; elements: readonly ExcalidrawElement[]; appState: AppState; files: BinaryFiles }
 type PendingCollabScene = Pick<PendingScene, 'elements' | 'appState' | 'files'> & { session: CollabSession }
 type BufferedCollabEvent = { data: string; sequence: string; delivery: string }
-type PersistenceStatus = 'idle' | 'unwritten' | 'writing' | 'queued' | 'retrying' | 'synced'
+export type PersistenceStatus = 'idle' | 'unwritten' | 'writing' | 'queued' | 'retrying' | 'synced'
+/** A sync status worth showing (anything but idle). */
+export type SyncStatus = Exclude<PersistenceStatus, 'idle'>
 type AppStateVersion = { counter: number; peerId: string }
 type CollabSnapshotData = ImportedDataState & { collaboration?: { appStateVersion?: AppStateVersion } }
 
-const PERSISTENCE_LABELS: Record<Exclude<PersistenceStatus, 'idle'>, string> = {
+export const PERSISTENCE_LABELS: Record<SyncStatus, string> = {
   unwritten: 'Unwritten changes',
   writing: 'Saving locally…',
   queued: 'Saved locally · syncing…',
@@ -385,6 +387,7 @@ export default function Canvas({
   collaborationColor = '',
   collaborationAvatar = '',
   collaborationAvatarOnly = false,
+  onSyncStatusHidden,
 }: {
   canvasAppearance: CanvasAppearance
   showEmptyPlaceholder?: boolean
@@ -400,6 +403,11 @@ export default function Canvas({
   collaborationAvatar?: string
   /** Show only the avatar (not the name) beside this client's cursor for other people. */
   collaborationAvatarOnly?: boolean
+  /**
+   * The sync status the canvas has no room to show (it only shows it on large screens, beside the menu
+   * button), so the host can show it elsewhere; null when there is none or the canvas shows it.
+   */
+  onSyncStatusHidden?: (status: SyncStatus | null) => void
 }) {
   const [board, setBoard] = useState<OpenBoard | null>(null)
   const [collabRestart, setCollabRestart] = useState(0)
@@ -407,6 +415,8 @@ export default function Canvas({
   const [collabSynchronizing, setCollabSynchronizing] = useState(false)
   /** Visible durability state for the open board. */
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>('idle')
+  /** Whether the canvas has room for the sync badge beside its menu button. */
+  const [badgeFits, setBadgeFits] = useState(true)
   const boardRef = useRef<OpenBoard | null>(null)
   boardRef.current = board
   const boardKey = board?.key ?? null
@@ -2071,6 +2081,22 @@ export default function Canvas({
     }
   }
 
+  const showCollabSync = Boolean(
+    collabDocumentId &&
+    (collabSynchronizing || collabSession.current?.documentId !== collabDocumentId || !collabJoinReady.current),
+  )
+  const syncStatus: SyncStatus | null =
+    board && collabDocumentId && persistenceStatus !== 'idle' && !showCollabSync ? persistenceStatus : null
+
+  // Hand the status to the host whenever the canvas can't show it.
+  const hiddenSyncStatus = syncStatus && !badgeFits ? syncStatus : null
+  const onSyncStatusHiddenRef = useRef(onSyncStatusHidden)
+  onSyncStatusHiddenRef.current = onSyncStatusHidden
+  useEffect(() => {
+    onSyncStatusHiddenRef.current?.(hiddenSyncStatus)
+  }, [hiddenSyncStatus])
+  useEffect(() => () => onSyncStatusHiddenRef.current?.(null), [])
+
   if (!board) {
     if (!showEmptyPlaceholder) return null
     return (
@@ -2079,11 +2105,6 @@ export default function Canvas({
       </div>
     )
   }
-
-  const showCollabSync = Boolean(
-    collabDocumentId &&
-    (collabSynchronizing || collabSession.current?.documentId !== collabDocumentId || !collabJoinReady.current),
-  )
 
   return (
     <div className="canvas" data-canvas-theme={theme}>
@@ -2195,12 +2216,55 @@ export default function Canvas({
           </div>
         </div>
       )}
-      {collabDocumentId && persistenceStatus !== 'idle' && !showCollabSync && (
-        <div className={`canvas-persistence-status ${persistenceStatus}`} role="status" aria-live="polite">
-          <span className="canvas-persistence-dot" aria-hidden="true" />
-          <span>{PERSISTENCE_LABELS[persistenceStatus]}</span>
-        </div>
-      )}
+      {syncStatus && <PersistenceBadge status={syncStatus} onFitChange={setBadgeFits} />}
+    </div>
+  )
+}
+
+/** Space the badge keeps from Excalidraw's shape toolbar. */
+const BADGE_TOOLBAR_GAP = 8
+
+/**
+ * The collaboration sync status beside Excalidraw's menu button, shown only on large screens. It measures
+ * the real toolbar (its width depends on Excalidraw's tools and fonts) and reports through `onFitChange`
+ * when the centered toolbar would reach it, or when Excalidraw has switched to its small-screen layout;
+ * then it stays laid out (to keep measuring) but hidden, and the host shows the status elsewhere.
+ */
+function PersistenceBadge({ status, onFitChange }: { status: SyncStatus; onFitChange: (fits: boolean) => void }) {
+  const badgeRef = useRef<HTMLDivElement>(null)
+  const [fits, setFits] = useState(true)
+  const label = PERSISTENCE_LABELS[status]
+
+  useLayoutEffect(() => {
+    const badge = badgeRef.current
+    const canvas = badge?.parentElement
+    if (!badge || !canvas) return
+    const check = () => {
+      const small = canvas.querySelector('.App-toolbar--mobile') !== null
+      const toolbar = canvas.querySelector('.App-toolbar:not(.App-toolbar--mobile)')
+      const next = !small && (!toolbar || badge.getBoundingClientRect().right + BADGE_TOOLBAR_GAP <= toolbar.getBoundingClientRect().left)
+      setFits(next)
+      onFitChange(next)
+    }
+    check()
+    const observer = new ResizeObserver(check)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [label, onFitChange])
+
+  // Unmounting (no status, or another board) leaves room for the next badge.
+  useEffect(() => () => onFitChange(true), [onFitChange])
+
+  return (
+    <div
+      ref={badgeRef}
+      className={`canvas-persistence-status ${status}${fits ? '' : ' offstage'}`}
+      role="status"
+      aria-live="polite"
+      aria-hidden={!fits}
+    >
+      <span className="canvas-persistence-dot" aria-hidden="true" />
+      <span>{label}</span>
     </div>
   )
 }
