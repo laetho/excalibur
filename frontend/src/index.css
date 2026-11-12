@@ -149,33 +149,18 @@ select,
   flex: 1;
   position: relative;
   min-width: 0;
-  /* Match Excalidraw's sidebar-trigger tokens. The canvas appearance can be
-     configured independently from the surrounding shell. */
-  --merlin-trigger-bg: #ececf4;
-  --merlin-trigger-hover-bg: #ffffff;
+  /* The ring Excalidraw draws around its sidebar trigger (--color-surface-lowest).
+     The canvas appearance can be configured independently from the shell. */
   --merlin-trigger-outline: #ffffff;
-  --merlin-trigger-color: #1b1b1f;
-  --merlin-trigger-selected-bg: #e0dfff;
-  --merlin-trigger-selected-color: #030064;
 }
 
 .canvas-stage[data-canvas-appearance='dark'] {
-  --merlin-trigger-bg: hsl(240, 8%, 15%);
-  --merlin-trigger-hover-bg: #232329;
   --merlin-trigger-outline: hsl(0, 0%, 7%);
-  --merlin-trigger-color: #e3e3e8;
-  --merlin-trigger-selected-bg: #403e6a;
-  --merlin-trigger-selected-color: #e0dfff;
 }
 
 @media (prefers-color-scheme: dark) {
   .canvas-stage[data-canvas-appearance='system'] {
-    --merlin-trigger-bg: hsl(240, 8%, 15%);
-    --merlin-trigger-hover-bg: #232329;
     --merlin-trigger-outline: hsl(0, 0%, 7%);
-    --merlin-trigger-color: #e3e3e8;
-    --merlin-trigger-selected-bg: #403e6a;
-    --merlin-trigger-selected-color: #e0dfff;
   }
 }
 
@@ -1341,7 +1326,8 @@ button.link-button:hover {
   flex: 0 0 auto;
   overflow: hidden;
   background: var(--modal-bg);
-  transition: width 180ms ease;
+  /* Same timing as the width transition Excalidraw gives its docked Library sidebar. */
+  transition: width 0.1s ease-in-out;
 }
 
 .merlin-sidebar.open {
@@ -1357,21 +1343,36 @@ button.link-button:hover {
   right: 116px;
   top: 16px;
   z-index: 70;
-  min-height: 36px;
-  padding: 0 12px;
-  display: inline-flex;
+  /* Exactly Excalidraw's `.sidebar-trigger` (the Library button): same size
+     tokens, padding, gap and type. They live on `.excalidraw`, so repeat them. */
+  --lg-button-size: 2.25rem;
+  --lg-icon-size: 1rem;
+  box-sizing: border-box;
+  height: var(--lg-button-size);
+  padding: 0.625rem;
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 0.5rem;
   border-radius: 8px;
-  color: var(--merlin-trigger-color);
-  background: var(--merlin-trigger-bg);
+  /* Library's shape, but the accent purple so the assistant stands out. */
+  color: var(--accent-text);
+  background: var(--accent-strong);
   border: none;
   box-shadow: 0 0 0 1px var(--merlin-trigger-outline);
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
+  line-height: 0;
   letter-spacing: 0.4px;
-  transition: right 180ms ease, background 120ms ease;
+  white-space: nowrap;
+  transition: right 0.1s ease-in-out, background 120ms ease;
+}
+
+@media screen and (min-device-width: 1921px) {
+  .merlin-canvas-toggle {
+    --lg-button-size: 2.5rem;
+    --lg-icon-size: 1.25rem;
+  }
 }
 
 /* Excalidraw's default sidebar is 302px wide. Keep Merlin immediately to its
@@ -1384,19 +1385,12 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
 }
 
 .merlin-canvas-toggle svg {
-  width: 18px;
-  height: 18px;
+  width: var(--lg-icon-size);
+  height: var(--lg-icon-size);
 }
 
-.merlin-canvas-toggle:hover:not(:disabled),
-.merlin-canvas-toggle.open {
-  color: var(--merlin-trigger-selected-color);
-  background: var(--merlin-trigger-selected-bg);
-}
-
-.merlin-canvas-toggle:hover:not(:disabled):not(.open) {
-  color: var(--merlin-trigger-color);
-  background: var(--merlin-trigger-hover-bg);
+.merlin-canvas-toggle:hover:not(:disabled) {
+  background: var(--accent);
 }
 
 .merlin-canvas-toggle:disabled {

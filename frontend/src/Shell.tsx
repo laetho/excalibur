@@ -527,15 +527,22 @@ export default function Shell() {
               </button>
             </div>
           )}
-          {snapshot.ai.enabled && (
+          {/* Like the Library trigger, it's gone while its panel is open; the panel has its own close button. */}
+          {snapshot.ai.enabled && !(aiOpen && openBoard) && (
             <button
-              className={`merlin-canvas-toggle${aiOpen && openBoard ? ' open' : ''}`}
-              onClick={() => setAIOpen((open) => !open)}
+              className="merlin-canvas-toggle"
+              // Open on press, not on click: an open Library closes on any pointerdown outside it, and this
+              // button then slides right (it sits beside the Library), so the release would miss it.
+              onPointerDown={(event) => {
+                if (event.button === 0) setAIOpen(true)
+              }}
+              // Keyboard activation (Enter/Space) only arrives as a click.
+              onClick={() => setAIOpen(true)}
               disabled={!openBoard}
-              title={!openBoard ? 'Select a board to use Merlin' : aiOpen ? 'Collapse Merlin' : 'Open Merlin'}
-              aria-expanded={Boolean(aiOpen && openBoard)}
+              title={openBoard ? 'Open Merlin' : 'Select a board to use Merlin'}
+              aria-expanded={false}
               aria-controls="merlin-panel"
-              aria-label={aiOpen && openBoard ? 'Collapse Merlin' : 'Open Merlin'}
+              aria-label="Open Merlin"
             >
               <SparklesIcon />
               <span>Merlin</span>
