@@ -1574,6 +1574,26 @@ body:has(.default-sidebar) .merlin-canvas-toggle {
   background: var(--accent);
 }
 
+/* No room beside the toolbar: kept in place for measuring, but not shown. */
+.merlin-canvas-toggle.offstage {
+  visibility: hidden;
+}
+
+/* The bookmark tab used instead: flush with the canvas's right edge, like
+   Excalidraw's small-screen tool tab (rounded and outlined on the left only). */
+.merlin-canvas-toggle.tab {
+  right: 0;
+  width: 36px;
+  padding: 0;
+  border-radius: 8px 0 0 8px;
+  box-shadow: -1px 0 0 0 var(--merlin-trigger-outline), 0 -1px 0 0 var(--merlin-trigger-outline), 0 1px 0 0 var(--merlin-trigger-outline);
+}
+
+/* Like Excalidraw's tab, it goes behind an open Library rather than over it. */
+body:has(.default-sidebar) .merlin-canvas-toggle.tab {
+  display: none;
+}
+
 /* Every ~10s the sparkles twinkle and a sheen crosses the button, to hint that
    Merlin is there. The motion is the first ~1.2s of each 10s cycle. */
 .merlin-canvas-toggle svg path {

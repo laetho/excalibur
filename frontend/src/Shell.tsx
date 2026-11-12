@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Canvas, { PERSISTENCE_LABELS, type SyncStatus } from './Canvas'
 import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
 import { RemoteCursor } from './RemoteCursors'
+import { useToolbarRoom } from './toolbarRoom'
 import {
   AppearanceIcon,
   ArrowUpIcon,
@@ -602,25 +603,7 @@ export default function Shell() {
             </div>
           )}
           {/* Only with a board open, and, like the Library trigger, gone while its panel is open. */}
-          {snapshot.ai.enabled && openBoard && !aiOpen && (
-            <button
-              className="merlin-canvas-toggle"
-              // Open on press, not on click: an open Library closes on any pointerdown outside it, and this
-              // button then slides right (it sits beside the Library), so the release would miss it.
-              onPointerDown={(event) => {
-                if (event.button === 0) setAIOpen(true)
-              }}
-              // Keyboard activation (Enter/Space) only arrives as a click.
-              onClick={() => setAIOpen(true)}
-              title="Open Merlin"
-              aria-expanded={false}
-              aria-controls="merlin-panel"
-              aria-label="Open Merlin"
-            >
-              <SparklesIcon />
-              <span>Merlin</span>
-            </button>
-          )}
+          {snapshot.ai.enabled && openBoard && !aiOpen && <MerlinTrigger onOpen={() => setAIOpen(true)} />}
         </div>
         {snapshot.ai.enabled && (
           <aside className={`merlin-sidebar${aiOpen && openBoard ? ' open' : ''}`} aria-label="Merlin assistant">
@@ -1093,6 +1076,43 @@ function RefreshButton({ refreshing, onRefresh }: { refreshing: boolean; onRefre
 }
 
 // MARK: - Merlin assistant
+
+/**
+ * Opens Merlin. Normally a button beside Excalidraw's Library button; when that would run into the shape
+ * toolbar, or in Excalidraw's small-screen layout, a tab on the canvas's right edge instead, styled after
+ * (and stacked under) Excalidraw's own small-screen tool tab. The full button stays laid out, hidden, so it
+ * can keep measuring whether it fits again.
+ */
+function MerlinTrigger({ onOpen }: { onOpen: () => void }) {
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const { fits, tabTop } = useToolbarRoom(buttonRef)
+  const props = {
+    // Open on press, not on click: an open Library closes on any pointerdown outside it, and the button
+    // then slides right (it sits beside the Library), so the release would miss it.
+    onPointerDown: (event: React.PointerEvent) => {
+      if (event.button === 0) onOpen()
+    },
+    // Keyboard activation (Enter/Space) only arrives as a click.
+    onClick: onOpen,
+    title: 'Open Merlin',
+    'aria-label': 'Open Merlin',
+    'aria-expanded': false,
+    'aria-controls': 'merlin-panel',
+  }
+  return (
+    <>
+      <button ref={buttonRef} className={`merlin-canvas-toggle${fits ? '' : ' offstage'}`} aria-hidden={!fits} tabIndex={fits ? 0 : -1} {...props}>
+        <SparklesIcon />
+        <span>Merlin</span>
+      </button>
+      {!fits && (
+        <button className="merlin-canvas-toggle tab" style={{ top: tabTop }} {...props}>
+          <SparklesIcon />
+        </button>
+      )}
+    </>
+  )
+}
 
 function MerlinPanel({
   baseUrl,

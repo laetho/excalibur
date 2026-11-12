@@ -20,7 +20,7 @@ import type { ImportedDataState } from '@excalidraw/excalidraw/data/types'
 import type { ExcalidrawElement, OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { RemoteExcalidrawElement } from '@excalidraw/excalidraw/data/reconcile'
 import type { AppState, BinaryFiles, Collaborator, ExcalidrawImperativeAPI, LibraryItems, SocketId } from '@excalidraw/excalidraw/types'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   canvasChange,
   canvasLibrary,
@@ -55,6 +55,7 @@ import {
 import { FILE_CHOSEN_EVENT } from './shims/browser-fs-access'
 import { avatarImageUrl, isAvatarEmoji, peerColor } from './collabIdentity'
 import { RemoteCursors, type RemoteCursorData } from './RemoteCursors'
+import { useToolbarRoom } from './toolbarRoom'
 
 const SAVE_DEBOUNCE_MS = 300
 /**
@@ -2221,37 +2222,16 @@ export default function Canvas({
   )
 }
 
-/** Space the badge keeps from Excalidraw's shape toolbar. */
-const BADGE_TOOLBAR_GAP = 8
-
 /**
- * The collaboration sync status beside Excalidraw's menu button, shown only on large screens. It measures
- * the real toolbar (its width depends on Excalidraw's tools and fonts) and reports through `onFitChange`
- * when the centered toolbar would reach it, or when Excalidraw has switched to its small-screen layout;
- * then it stays laid out (to keep measuring) but hidden, and the host shows the status elsewhere.
+ * The collaboration sync status beside Excalidraw's menu button, shown only while it has room beside the
+ * shape toolbar (see useToolbarRoom). Otherwise it stays laid out, to keep measuring, but hidden, and
+ * reports that through `onFitChange` so the host can show the status elsewhere.
  */
 function PersistenceBadge({ status, onFitChange }: { status: SyncStatus; onFitChange: (fits: boolean) => void }) {
   const badgeRef = useRef<HTMLDivElement>(null)
-  const [fits, setFits] = useState(true)
-  const label = PERSISTENCE_LABELS[status]
+  const { fits } = useToolbarRoom(badgeRef)
 
-  useLayoutEffect(() => {
-    const badge = badgeRef.current
-    const canvas = badge?.parentElement
-    if (!badge || !canvas) return
-    const check = () => {
-      const small = canvas.querySelector('.App-toolbar--mobile') !== null
-      const toolbar = canvas.querySelector('.App-toolbar:not(.App-toolbar--mobile)')
-      const next = !small && (!toolbar || badge.getBoundingClientRect().right + BADGE_TOOLBAR_GAP <= toolbar.getBoundingClientRect().left)
-      setFits(next)
-      onFitChange(next)
-    }
-    check()
-    const observer = new ResizeObserver(check)
-    observer.observe(canvas)
-    return () => observer.disconnect()
-  }, [label, onFitChange])
-
+  useEffect(() => onFitChange(fits), [fits, onFitChange])
   // Unmounting (no status, or another board) leaves room for the next badge.
   useEffect(() => () => onFitChange(true), [onFitChange])
 
@@ -2264,7 +2244,7 @@ function PersistenceBadge({ status, onFitChange }: { status: SyncStatus; onFitCh
       aria-hidden={!fits}
     >
       <span className="canvas-persistence-dot" aria-hidden="true" />
-      <span>{label}</span>
+      <span>{PERSISTENCE_LABELS[status]}</span>
     </div>
   )
 }
