@@ -243,25 +243,9 @@ export function onCollabOutbox(cb: (documentId: string, pending: number) => void
   )
 }
 
-const MENU_IDS = [
-  'undo',
-  'redo',
-  'new-board',
-  'import',
-  'add-folder',
-  'reveal',
-  'rename',
-  'duplicate',
-  'trash',
-  'sort-name',
-  'sort-date',
-  'show-thumbnails',
-  'settings',
-] as const
-
 /** Any menu item clicked in the native menu bar. */
-export function onMenu(cb: (id: string, payload: unknown) => void): Promise<Unlisten> {
-  return Promise.all(MENU_IDS.map((id) => listen(`menu:${id}`, (payload) => cb(id, payload)))).then((unlistens) => () =>
-    unlistens.forEach((unlisten) => unlisten()),
-  )
+export function onMenu(cb: (id: string) => void): Promise<Unlisten> {
+  return listen<{ id?: unknown }>('menu', (payload) => {
+    if (typeof payload?.id === 'string') cb(payload.id)
+  })
 }

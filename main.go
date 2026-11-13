@@ -88,8 +88,10 @@ func main() {
 
 func nativeMenu(app *App) *application.Menu {
 	root := application.NewMenu()
+	// Every item goes out as one "menu" event carrying its id, so the renderer
+	// can't miss an item by not subscribing to it (see onMenu in ipc.ts).
 	emit := func(id string) func(*application.Context) {
-		return func(*application.Context) { app.emit("menu:"+id, map[string]any{}) }
+		return func(*application.Context) { app.emit("menu", map[string]any{"id": id}) }
 	}
 	add := func(menu *application.Menu, label, accelerator, id string) {
 		item := menu.Add(label).OnClick(emit(id))
