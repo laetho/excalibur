@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Canvas, { PERSISTENCE_LABELS, type SyncStatus } from './Canvas'
 import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
 import { RemoteCursor } from './RemoteCursors'
@@ -1141,6 +1141,7 @@ function MerlinPanel({
   const [modelsError, setModelsError] = useState<string | null>(null)
   const [streamedAnswer, setStreamedAnswer] = useState('')
   const [streamedThinking, setStreamedThinking] = useState('')
+  const [streamedStatus, setStreamedStatus] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const requestId = useRef(0)
@@ -1152,7 +1153,10 @@ function MerlinPanel({
     let unlisten: (() => void) | undefined
     void onAIStream((streamRequestId, kind, delta) => {
       if (streamRequestId !== activeRequestRef.current) return
-      if (kind === 'thinking') {
+      if (kind === 'status') {
+        // Statuses are replacement labels for the loader, not fragments.
+        setStreamedStatus(delta)
+      } else if (kind === 'thinking') {
         streamedThinkingRef.current += delta
         setStreamedThinking(streamedThinkingRef.current)
       } else {
@@ -1201,7 +1205,7 @@ function MerlinPanel({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, queue, busy, errors, modelsError, streamedAnswer, streamedThinking])
+  }, [messages, queue, busy, errors, modelsError, streamedAnswer, streamedThinking, streamedStatus])
 
   const selected = models.find((available) => available.model === selectedModel)
   const ready = !modelsLoading && Boolean(selected)
@@ -1232,6 +1236,7 @@ function MerlinPanel({
     setStreamedAnswer('')
     streamedThinkingRef.current = ''
     setStreamedThinking('')
+    setStreamedStatus('')
     void aiChat(next, request.model, streamRequestId, boardId, request.thinking)
       .then((answer) => {
         const thinking = streamedThinkingRef.current
@@ -1250,6 +1255,7 @@ function MerlinPanel({
         setStreamedAnswer('')
         streamedThinkingRef.current = ''
         setStreamedThinking('')
+        setStreamedStatus('')
         setBusy(false)
         requestAnimationFrame(() => inputRef.current?.focus())
       })
@@ -1315,24 +1321,18 @@ function MerlinPanel({
                 <CopyButton text={message.content} className="merlin-copy" label="Merlin response" />
               </MerlinMessageHead>
               {message.thinking && <AIThinking text={message.thinking} />}
-              <p>{message.content}</p>
+              <MerlinRichText text={message.content} />
             </div>
           ),
         )}
         {busy && (
           <div className="merlin-message assistant streaming">
             <MerlinMessageHead />
-            {streamedThinking && <AIThinking text={streamedThinking} streaming={!streamedAnswer} />}
+            {streamedThinking && <AIThinking text={streamedThinking} />}
             {streamedAnswer ? (
-              <p>{streamedAnswer}</p>
+              <MerlinRichText text={streamedAnswer} />
             ) : (
-              !streamedThinking && (
-                <span className="merlin-typing" role="status" aria-label="Merlin is thinking">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-              )
+              <MerlinLoader label={streamedStatus} />
             )}
           </div>
         )}
@@ -1434,13 +1434,139 @@ function MerlinMessageHead({ children }: { children?: React.ReactNode }) {
   )
 }
 
-function AIThinking({ text, streaming = false }: { text: string; streaming?: boolean }) {
+/**
+ * Merlin's reasoning. Collapsed by default and always one click away, so a
+ * working turn shows a loader instead of a growing wall of prose.
+ */
+/**
+ * Merlin's reasoning. Collapsed by default, and the whole card is the toggle so a
+ * long block can be closed from wherever the reader ended up instead of forcing
+ * a scroll back to the summary.
+ */
+function AIThinking({ text }: { text: string }) {
+  const ref = useRef<HTMLDetailsElement>(null)
   return (
-    <details className="merlin-thinking" open={streaming}>
-      <summary>{streaming ? 'Thinking…' : 'Thinking'}</summary>
+    <details
+      ref={ref}
+      className="merlin-thinking"
+      title="Click to expand or collapse"
+      onClick={(event) => {
+        const card = ref.current
+        if (!card) return
+        // The summary already toggles natively, and selecting the reasoning text
+        // must not close the card out from under the selection.
+        if (event.target instanceof Element && event.target.closest('summary')) return
+        if (!window.getSelection()?.isCollapsed) return
+        card.open = !card.open
+      }}
+    >
+      <summary>Thinking</summary>
       <div>{text}</div>
     </details>
   )
+}
+
+/** The single progress line shown while Merlin works; the label is the current tool step. */
+function MerlinLoader({ label }: { label: string }) {
+  return (
+    <span className="merlin-loader" role="status">
+      <i className="merlin-spinner" aria-hidden="true" />
+      <span className="merlin-loader-label">{label || 'Working…'}</span>
+    </span>
+  )
+}
+
+type MerlinBlock = {
+  kind: 'heading' | 'bullet' | 'ordered' | 'paragraph'
+  text: string
+}
+
+/**
+ * Parse the small markdown subset Merlin is asked to use: `#` headings, `-` or
+ * `*` bullets, `1.` steps, and blank-line separated paragraphs. Anything else
+ * stays literal, so a partial stream never renders as broken markup.
+ */
+function parseMerlinBlocks(text: string): MerlinBlock[] {
+  const blocks: MerlinBlock[] = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    const heading = /^#{1,6}\s+(.+)$/.exec(line)
+    if (heading) {
+      blocks.push({ kind: 'heading', text: heading[1] })
+      continue
+    }
+    const bullet = /^[-*•]\s+(.+)$/.exec(line)
+    if (bullet) {
+      blocks.push({ kind: 'bullet', text: bullet[1] })
+      continue
+    }
+    const ordered = /^\d+[.)]\s+(.+)$/.exec(line)
+    if (ordered) {
+      blocks.push({ kind: 'ordered', text: ordered[1] })
+      continue
+    }
+    blocks.push({ kind: 'paragraph', text: line.trim() })
+  }
+  return blocks
+}
+
+/** Inline `**bold**`, `*italic*`, and `` `code` `` for the parsed blocks. */
+function renderMerlinInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const pattern = /\*\*([^*]+)\*\*|`([^`]+)`|(?<![*\w])\*(?!\s)([^*]+)\*/g
+  let last = 0
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0
+    if (start > last) nodes.push(text.slice(last, start))
+    if (match[1] !== undefined) {
+      nodes.push(<strong key={start}>{match[1]}</strong>)
+    } else if (match[2] !== undefined) {
+      nodes.push(<code key={start}>{match[2]}</code>)
+    } else {
+      nodes.push(<em key={start}>{match[3]}</em>)
+    }
+    last = start + match[0].length
+  }
+  if (last < text.length) nodes.push(text.slice(last))
+  return nodes
+}
+
+/** Renders an assistant turn: short headings, real bullets, and emoji the model sends. */
+function MerlinRichText({ text }: { text: string }) {
+  const blocks = useMemo(() => parseMerlinBlocks(text), [text])
+  const rendered: ReactNode[] = []
+  let list: MerlinBlock[] = []
+  let listKind: 'bullet' | 'ordered' = 'bullet'
+
+  /** Close the open list, if any, before the next block. */
+  const flushList = (key: number) => {
+    if (list.length === 0) return
+    const items = list.map((item, index) => <li key={index}>{renderMerlinInline(item.text)}</li>)
+    rendered.push(
+      listKind === 'ordered' ? <ol key={`list-${key}`}>{items}</ol> : <ul key={`list-${key}`}>{items}</ul>,
+    )
+    list = []
+  }
+
+  blocks.forEach((block, index) => {
+    if (block.kind === 'bullet' || block.kind === 'ordered') {
+      if (list.length > 0 && listKind !== block.kind) flushList(index)
+      listKind = block.kind
+      list.push(block)
+      return
+    }
+    flushList(index)
+    rendered.push(
+      block.kind === 'heading' ? (
+        <h4 key={index}>{renderMerlinInline(block.text)}</h4>
+      ) : (
+        <p key={index}>{renderMerlinInline(block.text)}</p>
+      ),
+    )
+  })
+  flushList(blocks.length)
+
+  return <div className="merlin-rich">{rendered}</div>
 }
 
 function CopyButton({ text, className, label }: { text: string; className?: string; label: string }) {

@@ -1929,7 +1929,56 @@ body:has(.default-sidebar) .merlin-canvas-toggle.tab {
   background: var(--row-hover);
 }
 
-.merlin-message.streaming p::after {
+/* Assistant answers: short headings and real bullets, never a wall of text. */
+.merlin-rich {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.merlin-rich h4 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  line-height: 1.4;
+}
+
+.merlin-rich ul,
+.merlin-rich ol {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-left: 17px;
+}
+
+.merlin-rich li {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.merlin-rich li::marker {
+  color: var(--text-secondary);
+}
+
+.merlin-rich strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.merlin-rich code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--row-hover);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+/* One caret at the end of the growing answer, wherever the last block ends. */
+.merlin-message.streaming .merlin-rich > :last-child::after,
+.merlin-message.streaming .merlin-rich > :last-child > li:last-child::after {
   content: '';
   display: inline-block;
   width: 2px;
@@ -1944,26 +1993,39 @@ body:has(.default-sidebar) .merlin-canvas-toggle.tab {
   50% { opacity: 0; }
 }
 
-.merlin-typing {
+/* The one progress line shown while Merlin works: a spinner and the current step. */
+.merlin-loader {
   display: inline-flex;
-  gap: 4px;
-  padding: 6px 0 2px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
-.merlin-typing i {
-  width: 6px;
-  height: 6px;
+.merlin-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
   border-radius: 50%;
-  background: var(--accent);
-  animation: merlin-typing 1.2s ease-in-out infinite;
+  animation: merlin-spin 0.7s linear infinite;
 }
 
-.merlin-typing i:nth-child(2) { animation-delay: 0.15s; }
-.merlin-typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes merlin-spin {
+  to { transform: rotate(360deg); }
+}
 
-@keyframes merlin-typing {
-  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-3px); }
+.merlin-loader-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .merlin-spinner { animation-duration: 2.4s; }
 }
 
 .merlin-thinking {
@@ -1972,6 +2034,20 @@ body:has(.default-sidebar) .merlin-canvas-toggle.tab {
   border-radius: 10px;
   color: var(--text-secondary);
   font-size: 12px;
+  /* The whole card toggles, so it reads as one control. */
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.merlin-thinking:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--divider));
+}
+
+/* Keyboard focus lands on the summary; show it since the card is a control. */
+.merlin-thinking summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 9px;
 }
 
 .merlin-thinking summary {
@@ -1987,6 +2063,10 @@ body:has(.default-sidebar) .merlin-canvas-toggle.tab {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.45;
+  /* Inherits the card's pointer: the body is part of the toggle too. */
+  cursor: pointer;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .merlin-message.queued {

@@ -1501,3 +1501,43 @@ func TestImportCredentialsFileRejectsOversized(t *testing.T) {
 		t.Fatal("expected an error for an oversized file")
 	}
 }
+
+func TestDiagramIntent(t *testing.T) {
+	for _, prompt := range []string{
+		"Draw a class diagram with 15 classes",
+		"make a flowchart for the deployment",
+		"Mind map about our release checklist",
+		"Show the architecture of the sync layer",
+	} {
+		if !diagramIntent(prompt) {
+			t.Errorf("expected diagram intent for %q", prompt)
+		}
+	}
+	for _, prompt := range []string{
+		"Summarize this board",
+		"What is on the canvas?",
+		"recolor everything blue",
+	} {
+		if diagramIntent(prompt) {
+			t.Errorf("unexpected diagram intent for %q", prompt)
+		}
+	}
+}
+
+func TestDiagramBudgetError(t *testing.T) {
+	// The fifteen-class wall from a real session: 15 boxes plus labels and arrows.
+	wall := `{"operations":[` + strings.TrimSuffix(strings.Repeat(`{"op":"add"},`, 45), ",") + `]}`
+	if err := diagramBudgetError(wall); err == nil {
+		t.Fatal("expected the oversized diagram to be rejected")
+	} else if !strings.Contains(err.Error(), "budget is 24") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	small := `{"operations":[{"op":"add"},{"op":"add"},{"op":"update"}]}`
+	if err := diagramBudgetError(small); err != nil {
+		t.Fatalf("expected the small diagram to pass, got %v", err)
+	}
+	// Malformed arguments are left to the apply path to report.
+	if err := diagramBudgetError("{"); err != nil {
+		t.Fatalf("expected malformed arguments to pass through, got %v", err)
+	}
+}

@@ -78,6 +78,31 @@ instead of accepting a printed JSON “blueprint” as a successful canvas chang
 Models that ignore the required tool are retried and ultimately return an
 explicit error without claiming that the canvas was modified.
 
+While a turn runs, the panel shows a single loader line naming the current step
+("Reading the board", "Drawing", "Wrapping up") instead of the raw stream of
+reasoning and tool output. The label switches before each step starts, so it
+already says "Drawing" while the model is generating the edit rather than after
+it lands. Reasoning stays available behind a collapsed "Thinking" disclosure
+that toggles from anywhere on the card. Answers are capped to a short summary —
+at most two sentences or three bullets — so the panel reports what changed
+rather than repeating coordinates, IDs, or the operations that were sent.
+
+The harness prompt also carries the diagram conventions Merlin follows when
+asked to draw: a grid layout with 200-300 unit horizontal and 100-150 unit
+vertical gaps (or a radial layout for mind maps), the `#a5d8ff` / `#b2f2bb` /
+`#ffd43b` / `#ffc9c9` fill palette on `#1e1e1e` strokes, `fontFamily: 5` labels
+bound to their containers, and per-type shape budgets. The budget is enforced,
+not just advised: a diagram request whose operations exceed 24 element changes is
+rejected by `apply_canvas_operations` with a message telling the model to redraw
+a smaller version, so a request for fifteen classes becomes a readable subset
+plus a list of what was left out.
+
+Answers to questions get a structured form instead of a summary: a short
+heading, real bullet lists, and emoji the model chooses for scanning. The panel
+renders a small markdown subset (headings, bullets, numbered steps, bold, italic,
+and inline code) itself, so the model never has to emit HTML and the chat needs
+no markdown dependency.
+
 ## Platform builds
 
 Wails v3 can produce the desktop targets below. The macOS task uses Wails'

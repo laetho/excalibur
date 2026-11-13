@@ -24,7 +24,10 @@ const (
 	maxCanvasOperations    = 100
 	maxCanvasOperationArgs = 2 << 20
 	maxAIToolRounds        = 10
-	aiResponseIdleTimeout  = 5 * time.Minute
+	// maxDiagramOperations caps one diagram so a large request becomes a
+	// high-level view instead of a wall of boxes.
+	maxDiagramOperations  = 24
+	aiResponseIdleTimeout = 5 * time.Minute
 )
 
 var errAIChatBoardChanged = errors.New("the chat board is no longer open")
@@ -34,6 +37,9 @@ type aiStreamKind string
 const (
 	aiStreamAnswer   aiStreamKind = "answer"
 	aiStreamThinking aiStreamKind = "thinking"
+	// aiStreamStatus replaces any earlier status instead of appending: the panel
+	// shows one loader line describing the current tool step.
+	aiStreamStatus aiStreamKind = "status"
 )
 
 type openAIMessage struct {
@@ -442,7 +448,22 @@ func requestAIModels(client *http.Client, endpoint, apiKey string) ([]AIModel, e
 	return models, nil
 }
 
-// AIChat runs a small OpenAI-compatible tool loop. Dramallama can inspect the
+// merlinSystemPrompt is the harness prompt. It keeps the model scoped to the
+// open board, encodes the Excalidraw element rules the tool schema cannot
+// express, and caps the length of the reply: the panel shows a short summary,
+// never blueprints or tool narration.
+const merlinSystemPrompt = `You are the AI assistant inside Excalibur. This conversation belongs only to the currently edited board %q (file %q). The current board is provided through get_canvas_file at the start of every user turn; ground your answer in that board and do not carry assumptions from another board.
+
+You can modify the drawing with apply_canvas_operations, which exposes the full persisted Excalidraw element model plus z-ordering. Always inspect first, preserve unrelated elements, use existing IDs for updates/deletes/reordering, and prefer a small number of precise operations. x/y are absolute scene coordinates; line, arrow, and freedraw points are numeric [x,y] pairs relative to the element's x/y. Use ellipse for circles. Excalidraw has no triangle type, so use a closed line. Use frameId to place elements in frames, groupIds for groups, containerId/boundElements for bound text, and startBinding/endBinding for connected arrows. Image fileId values must already exist in the inspected document's files map. Use reorder instead of trying to edit Excalidraw's managed index field. After an edit succeeds, normally report the result instead of repeatedly reading and editing. When a tool reports an error, correct the arguments and retry. Never claim to have inspected or changed the canvas unless the corresponding tool succeeded.
+
+Diagrams: when the user asks for a diagram, pick the fitting form - flowchart for processes, relationship map for dependencies, mind map for concept hierarchies, architecture map for system design, swimlane for cross-actor processes, and class, ER, or sequence diagrams built from boxes, labels, and arrows. Budgets are hard limits on the whole diagram, labels and arrows included: at most 8 shapes in one diagram (6 boxes for class, ER, architecture, and relationship diagrams, 4 lifelines for a sequence diagram, 3-10 steps for a flowchart, 4-6 branches for a mind map). The canvas tool rejects a diagram larger than that, so count before you send. When the request needs more than the budget - for example fifteen classes - draw the most important subset and list the rest as text in your reply; do not ask a follow-up question first. Lay boxes out on a grid with 200-300 unit horizontal and 100-150 unit vertical gaps (columns = ceil(sqrt(count))), or radially around the central topic for mind maps. Use strokeColor #1e1e1e with fills #a5d8ff for primary, #b2f2bb for secondary, #ffd43b for the focus element, and #ffc9c9 for warnings. Bind label text to its container and use fontFamily 5 with fontSize 20. Place new diagrams clear of existing content so the current drawing stays intact.
+
+Style: the chat is a narrow side panel, so never send prose walls.
+- After a canvas edit: a short summary only - at most three bullets or two sentences saying what changed and anything the user must decide.
+- When the user asks a question about the board: a compact structured answer. Optionally open with a short bold heading, then short bullets grouped under a heading or two, with one fitting emoji per heading or bullet for scanning. Keep it to about six bullets.
+In both cases: never print JSON, element properties, coordinates, IDs, or a blueprint, never narrate the tool sequence, never repeat the request, and never open with filler such as "Sure" or "I have updated the canvas".`
+
+// AIChat runs a small OpenAI-compatible tool loop. Merlin can inspect the
 // current canvas and make bounded, granular, undoable element changes.
 func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, enableThinking bool) (string, error) {
 	a.mu.Lock()
@@ -481,7 +502,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 
 	messages := []openAIMessage{{
 		Role:    "system",
-		Content: fmt.Sprintf("You are the AI assistant inside Excalibur. This conversation belongs only to the currently edited board %q (file %q). The current board is provided through get_canvas_file at the start of every user turn; ground your answer in that board and do not carry assumptions from another board. You can modify the drawing with apply_canvas_operations, which exposes the full persisted Excalidraw element model plus z-ordering. Always inspect first, preserve unrelated elements, use existing IDs for updates/deletes/reordering, and prefer a small number of precise operations. x/y are absolute scene coordinates; line, arrow, and freedraw points are numeric [x,y] pairs relative to the element's x/y. Use ellipse for circles. Excalidraw has no triangle type, so use a closed line. Use frameId to place elements in frames, groupIds for groups, containerId/boundElements for bound text, and startBinding/endBinding for connected arrows. Image fileId values must already exist in the inspected document's files map. Use reorder instead of trying to edit Excalidraw's managed index field. After an edit succeeds, normally report the result instead of repeatedly reading and editing. When a tool reports an error, correct the arguments and retry. Never claim to have inspected or changed the canvas unless the corresponding tool succeeded.", boardName, boardID),
+		Content: fmt.Sprintf(merlinSystemPrompt, boardName, boardID),
 	}}
 	for _, message := range history {
 		if (message.Role != "user" && message.Role != "assistant") || strings.TrimSpace(message.Content) == "" {
@@ -492,9 +513,11 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 
 	client := newAIHTTPClient()
 	editRequested := false
+	diagramRequested := false
 	for index := len(history) - 1; index >= 0; index-- {
 		if history[index].Role == "user" {
 			editRequested = canvasEditIntent(history[index].Content)
+			diagramRequested = diagramIntent(history[index].Content)
 			break
 		}
 	}
@@ -505,12 +528,24 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 			a.emit("ai:stream", map[string]string{"requestId": requestID, "kind": string(kind), "delta": delta})
 		}
 	}
+	// emitStatus drives the single loader line in the panel. Statuses are
+	// replacements, not fragments, so the panel never accumulates tool noise.
+	emitStatus := func(text string) {
+		if requestID != "" {
+			a.emit("ai:stream", map[string]string{"requestId": requestID, "kind": string(aiStreamStatus), "delta": text})
+		}
+	}
 	for turn := 0; turn < maxAIToolRounds; turn++ {
 		var toolChoice any
+		// Announce the phase before the request: generating an operations payload
+		// takes a while, and the loader should not keep claiming it is still
+		// reading while the model is drawing.
 		if !canvasInspected {
 			toolChoice = forceToolChoice(canvasToolName)
+			emitStatus("Reading the board")
 		} else if editRequested && !canvasEdited {
 			toolChoice = forceToolChoice(canvasOperationsTool)
+			emitStatus("Drawing")
 		}
 		answerIsSafe := canvasInspected && (!editRequested || canvasEdited)
 		onDelta := func(kind aiStreamKind, delta string) {
@@ -553,6 +588,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 			result := ""
 			switch call.Function.Name {
 			case canvasToolName:
+				emitStatus("Reading the board")
 				result, err = a.canvasFileForAI(boardID)
 				if errors.Is(err, errAIChatBoardChanged) {
 					return "", err
@@ -566,8 +602,17 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 			case canvasOperationsTool:
 				if !canvasInspected {
 					err = errors.New("inspect the current board with get_canvas_file before editing it")
+				} else if budgetErr := diagramBudgetError(call.Function.Arguments); diagramRequested && budgetErr != nil {
+					// Refuse an oversized diagram instead of covering the board: the
+					// model then redraws a smaller version within the same turn.
+					emitStatus("Simplifying the diagram")
+					err = budgetErr
 				} else {
+					emitStatus("Drawing")
 					result, err = a.applyCanvasOperationsForAI(boardID, call.Function.Arguments)
+					if err != nil && !errors.Is(err, errAIChatBoardChanged) {
+						emitStatus("Retrying the edit")
+					}
 				}
 				if errors.Is(err, errAIChatBoardChanged) {
 					return "", err
@@ -593,6 +638,7 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 
 	// Do not fail the whole chat after useful canvas work just because the model
 	// kept iterating. Give it one tool-free turn to summarize what it completed.
+	emitStatus("Wrapping up")
 	messages = append(messages, openAIMessage{
 		Role:    "system",
 		Content: fmt.Sprintf("The canvas tool budget of %d rounds is exhausted. Do not request more tools. Briefly summarize the work completed so far and any remaining work.", maxAIToolRounds),
@@ -606,6 +652,40 @@ func (a *App) AIChat(history []AIChatMessage, model, requestID, boardID string, 
 		return "", fmt.Errorf("Dramallama did not finish after %d iterative canvas tool rounds", maxAIToolRounds)
 	}
 	return content, nil
+}
+
+// diagramIntent reports whether the prompt asks for a generated diagram, which
+// is when the element budget is enforced.
+func diagramIntent(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	for _, phrase := range []string{
+		"diagram", "flowchart", "flow chart", "mind map", "mindmap",
+		"swimlane", "swim lane", "sequence chart", "class chart",
+		"entity relationship", "data flow", "org chart", "architecture",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// diagramBudgetError rejects a diagram that grew past maxDiagramOperations so
+// the model has to simplify instead of filling the board. The prompt states the
+// same budget; this backs it up because a paragraph alone does not stop a model
+// asked for fifteen classes from drawing all fifteen.
+func diagramBudgetError(arguments string) error {
+	var input struct {
+		Operations []json.RawMessage `json:"operations"`
+	}
+	// Malformed arguments are reported by the apply path with a better message.
+	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
+		return nil
+	}
+	if len(input.Operations) <= maxDiagramOperations {
+		return nil
+	}
+	return fmt.Errorf("this diagram sends %d element changes but the per-diagram budget is %d; redraw it with at most 8 shapes including their labels and arrows, and tell the user in your reply which parts you left out", len(input.Operations), maxDiagramOperations)
 }
 
 func requestAI(client *http.Client, endpoint string, config AIConfig, messages []openAIMessage) (openAIMessage, error) {

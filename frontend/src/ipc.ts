@@ -222,9 +222,12 @@ export function onAICanvasOperations(cb: (boardId: string, json: string) => void
   return listen<{ boardId: string; json: string }>('canvas:ai-operations', (payload) => cb(payload.boardId, payload.json))
 }
 
-/** An answer or model-thinking fragment from the active streamed Dramallama response. */
-export function onAIStream(cb: (requestId: string, kind: 'answer' | 'thinking', delta: string) => void): Promise<Unlisten> {
-  return listen<{ requestId: string; kind: 'answer' | 'thinking'; delta: string }>('ai:stream', (payload) =>
+/**
+ * A fragment of the active streamed Merlin response: answer and thinking
+ * fragments are appended, while status replaces the loader line's label.
+ */
+export function onAIStream(cb: (requestId: string, kind: 'answer' | 'thinking' | 'status', delta: string) => void): Promise<Unlisten> {
+  return listen<{ requestId: string; kind: 'answer' | 'thinking' | 'status'; delta: string }>('ai:stream', (payload) =>
     cb(payload.requestId, payload.kind, payload.delta),
   )
 }

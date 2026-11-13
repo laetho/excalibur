@@ -10,7 +10,7 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * AIChat runs a small OpenAI-compatible tool loop. Dramallama can inspect the
+ * AIChat runs a small OpenAI-compatible tool loop. Merlin can inspect the
  * current canvas and make bounded, granular, undoable element changes.
  */
 export function AIChat(history: $models.AIChatMessage[] | null, model: string, requestID: string, boardID: string, enableThinking: boolean): $CancellablePromise<string> {
