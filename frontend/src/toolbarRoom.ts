@@ -42,7 +42,9 @@ export function useToolbarRoom(ref: RefObject<HTMLElement | null>): ToolbarRoom 
         }
         const toolbar = container.querySelector('.App-toolbar')?.getBoundingClientRect()
         const rect = element.getBoundingClientRect()
-        const fits = !toolbar || rect.right + TOOLBAR_GAP <= toolbar.left || rect.left - TOOLBAR_GAP >= toolbar.right
+        // Only something in the toolbar's row can run into it; the gap is kept to its sides.
+        const sameRow = toolbar && rect.top < toolbar.bottom && rect.bottom > toolbar.top
+        const fits = !sameRow || rect.right + TOOLBAR_GAP <= toolbar.left || rect.left - TOOLBAR_GAP >= toolbar.right
         setRoom((current) => (current.fits === fits && current.tabTop === tabTop ? current : { fits, tabTop }))
       })
     }

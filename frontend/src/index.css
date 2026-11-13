@@ -42,6 +42,7 @@ body,
   --backdrop: rgba(0, 0, 0, 0.35);
   --thumbnail-border: rgba(0, 0, 0, 0.15);
   --divider: rgba(0, 0, 0, 0.13); /* 1.35 */
+  --switch-off: rgba(0, 0, 0, 0.32); /* the off track of a switch, clearly darker than a field */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -72,6 +73,7 @@ body,
     --backdrop: rgba(0, 0, 0, 0.5);
     --thumbnail-border: rgba(255, 255, 255, 0.2);
     --divider: hsl(245, 9%, 26%); /* 1.45 */
+    --switch-off: hsl(240, 7%, 8%);
   }
 }
 
@@ -323,12 +325,20 @@ select,
   box-shadow: 0 0 0 2px var(--row-selected);
 }
 
-/* Collapsed sidebar: centered under the logo. */
-.rail-sync {
+/* Collapsed sidebar: New Board, then the sync dot, centered under the logo. */
+.rail-actions {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
   width: 60px;
-  padding-top: 14px;
+  padding-top: 10px;
+}
+
+.rail-actions .icon-button.row-action {
+  width: 36px;
+  height: 36px;
+  margin: 0;
 }
 
 /* MARK: - Sidebar top row
@@ -361,8 +371,8 @@ select,
   margin-left: auto;
 }
 
-/* The app mark on a gradient tile: Excalidraw's violet, deepening to indigo,
-   with a pink glow from the top left. */
+/* The app mark: light line art on a flat tile of the app's selected-row
+   violet (dark theme). Same as the app icon (build/appicon.png). */
 .app-logo {
   position: relative;
   flex-shrink: 0;
@@ -373,13 +383,8 @@ select,
   height: 36px;
   padding: 0;
   border-radius: 10px;
-  color: #ffffff;
-  background:
-    radial-gradient(circle at 22% 18%, rgba(255, 176, 228, 0.8), transparent 58%),
-    linear-gradient(140deg, #9a94ff 0%, #6965db 48%, #3a2b9e 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    0 2px 8px rgba(76, 64, 196, 0.35);
+  color: #e0dfff;
+  background: #49457b;
 }
 
 .app-logo svg {
@@ -391,7 +396,6 @@ select,
 .app-logo-mark {
   width: 24px;
   height: 24px;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.22));
 }
 
 .app-logo-expand {
@@ -937,8 +941,8 @@ button.secondary:disabled {
 
 .modal.settings {
   display: flex;
-  width: min(780px, calc(100vw - 48px));
-  height: min(580px, calc(100vh - 48px));
+  width: min(820px, calc(100vw - 48px));
+  height: min(760px, calc(100vh - 48px)); /* room for the Collaboration page without scrolling */
   padding: 0;
   overflow: hidden;
 }
@@ -1260,7 +1264,7 @@ button.secondary:disabled {
   padding: 0;
   border: none;
   border-radius: 999px;
-  background: var(--input-border);
+  background: var(--switch-off);
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -1489,6 +1493,65 @@ button.link-button:hover {
   margin: 5px 6px;
 }
 
+/* Excalidraw's canvas context menu, restyled like the shell's (above): same
+   radius, padding, row shape, hover tint and type, in the canvas theme. */
+.canvas .excalidraw .context-menu {
+  margin: 0;
+  padding: 5px;
+  min-width: 180px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  background: var(--island-bg-color);
+  box-shadow: var(--modal-shadow);
+  color: var(--color-on-surface);
+  font-size: 13px;
+}
+
+.canvas .excalidraw.theme--dark .context-menu {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.canvas .excalidraw .context-menu button,
+.canvas .excalidraw .context-menu-item {
+  color: var(--color-on-surface);
+}
+
+.canvas .excalidraw .context-menu-item {
+  padding: 6px 10px;
+  border-radius: 5px;
+}
+
+.canvas .excalidraw .context-menu-item:hover {
+  color: var(--color-on-surface);
+  background: var(--color-surface-low);
+}
+
+.canvas .excalidraw.theme--dark .context-menu-item:hover {
+  background: var(--color-surface-high);
+}
+
+.canvas .excalidraw .context-menu-item.dangerous .context-menu-item__label,
+.canvas .excalidraw .context-menu-item:hover.dangerous .context-menu-item__label {
+  color: var(--color-danger);
+}
+
+.canvas .excalidraw .context-menu-item:hover.dangerous {
+  background: var(--color-surface-low);
+}
+
+.canvas .excalidraw.theme--dark .context-menu-item:hover.dangerous {
+  background: var(--color-surface-high);
+}
+
+.canvas .excalidraw .context-menu-item-separator {
+  margin: 5px 6px;
+  border-top-color: rgba(0, 0, 0, 0.13);
+}
+
+.canvas .excalidraw.theme--dark .context-menu-item-separator {
+  border-top-color: hsl(245, 9%, 26%);
+}
+
 /* MARK: - Merlin side panel
  *
  * Built from the same parts as Settings and the sidebar: an 18px title with a
@@ -1518,10 +1581,11 @@ button.link-button:hover {
 
 .merlin-canvas-toggle {
   position: absolute;
-  /* Sit immediately to the left of Excalidraw's Library control instead of
-     covering it. */
-  right: 116px;
-  top: 16px;
+  /* Directly below Excalidraw's Library button (1rem from the top, 2.25rem
+     tall, then an 8px gap), right-aligned with it. Beside it is where
+     Excalidraw lists collaborators. */
+  right: 16px;
+  top: 60px;
   z-index: 70;
   /* Exactly Excalidraw's `.sidebar-trigger` (the Library button): same size
      tokens, padding, gap and type. They live on `.excalidraw`, so repeat them. */
@@ -1553,14 +1617,14 @@ button.link-button:hover {
   .merlin-canvas-toggle {
     --lg-button-size: 2.5rem;
     --lg-icon-size: 1.25rem;
+    top: 64px; /* the Library button is 2.5rem tall here too */
   }
 }
 
-/* Excalidraw's default sidebar is 302px wide. Keep Merlin immediately to its
-   left while the Library (or another default sidebar tab) is open. */
-/* Excalidraw may portal the sidebar outside the canvas wrapper, so detect the
-   mounted sidebar at the document level rather than requiring it to remain a
-   descendant of `.canvas-stage`. */
+/* Excalidraw's default sidebar is 302px wide. Keep Merlin just to its left
+   while the Library (or another default sidebar tab) is open. Excalidraw may
+   portal the sidebar outside the canvas wrapper, so detect the mounted sidebar
+   at the document level rather than requiring it inside `.canvas-stage`. */
 body:has(.default-sidebar) .merlin-canvas-toggle {
   right: min(318px, calc(100% - 116px));
 }
@@ -2157,19 +2221,20 @@ body:has(.default-sidebar) .merlin-canvas-toggle.tab {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
-  color: var(--text);
+  /* Excalidraw's canvas color in the canvas theme, so the message sits on the canvas. */
+  background: #ffffff;
+  color: #5c5c5c;
+}
+
+.canvas[data-canvas-theme='dark'] .canvas-syncing {
+  background: #121212;
+  color: #b8b8b8;
 }
 
 .canvas-syncing-card {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
-  border: 1px solid var(--sidebar-border);
-  border-radius: 10px;
-  background: var(--modal-bg);
-  box-shadow: var(--modal-shadow);
 }
 
 .canvas-syncing-spinner {

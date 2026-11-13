@@ -211,7 +211,8 @@ tasks:
       - "windows/icon.ico"
     cmds:
       # appicon.png is rendered from ../excalibur.svg as a 1024x1024 icon with
-      # transparent margins around a rounded-square background, and committed
+      # transparent margins around a rounded-square background (light #e0dfff line
+      # art on the app's violet, #49457b, as in the sidebar logo), and committed
       # so builds do not require an SVG rasterizer. Regenerate it when the SVG
       # changes.
       # appicon.icon is an optional Apple Icon Composer project and is not part

@@ -8,7 +8,7 @@ import {
   ArrowUpIcon,
   ChevronDownIcon,
   CloseIcon,
-  DatabaseIcon,
+  CloudIcon,
   FolderIcon,
   LogoMark,
   InfoIcon,
@@ -510,9 +510,12 @@ export default function Shell() {
               </span>
             ))}
         </div>
-        {sidebarCollapsed && sidebarSyncStatus && (
-          <div className="rail-sync">
-            <SyncDot status={sidebarSyncStatus} />
+        {sidebarCollapsed && (
+          <div className="rail-actions">
+            <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
+              <PlusIcon />
+            </button>
+            {sidebarSyncStatus && <SyncDot status={sidebarSyncStatus} />}
           </div>
         )}
         {!sidebarCollapsed && (
@@ -1011,7 +1014,7 @@ function SourceTree({
             </div>
           ) : (
             <div className="tree-source-row" title={`${source.name} (right-click for options)`} onContextMenu={(event) => onSourceMenu(event, source)}>
-              <DatabaseIcon className="source-icon" />
+              <CloudIcon className="source-icon" />
               <span className="source-title">{source.name}</span>
               <span className="row-actions">
                 <RefreshButton refreshing={refreshing} onRefresh={onRefresh} />
@@ -1078,7 +1081,7 @@ function RefreshButton({ refreshing, onRefresh }: { refreshing: boolean; onRefre
 // MARK: - Merlin assistant
 
 /**
- * Opens Merlin. Normally a button beside Excalidraw's Library button; when that would run into the shape
+ * Opens Merlin. Normally a button below Excalidraw's Library button; when that would run into the shape
  * toolbar, or in Excalidraw's small-screen layout, a tab on the canvas's right edge instead, styled after
  * (and stacked under) Excalidraw's own small-screen tool tab. The full button stays laid out, hidden, so it
  * can keep measuring whether it fits again.
@@ -1088,7 +1091,7 @@ function MerlinTrigger({ onOpen }: { onOpen: () => void }) {
   const { fits, tabTop } = useToolbarRoom(buttonRef)
   const props = {
     // Open on press, not on click: an open Library closes on any pointerdown outside it, and the button
-    // then slides right (it sits beside the Library), so the release would miss it.
+    // then slides back right (it moves aside for the Library), so the release would miss it.
     onPointerDown: (event: React.PointerEvent) => {
       if (event.button === 0) onOpen()
     },
@@ -1920,7 +1923,7 @@ const SETTINGS_TABS: { id: SettingsTab; title: string; description: string; Icon
     id: 'servers',
     title: 'NATS Servers',
     description: 'Connect to NATS servers to store boards in shared buckets and collaborate in real time.',
-    Icon: DatabaseIcon,
+    Icon: CloudIcon,
   },
   {
     id: 'ai',
@@ -2205,7 +2208,7 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
           ))}
           <div className="settings-pane-actions">
             <button className="secondary" onClick={() => addLocalFolder().catch(report('add the folder'))}>
-              Add Folder…
+              Add Folder
             </button>
           </div>
         </SettingsField>
@@ -2448,7 +2451,7 @@ function ServersSettings({
           return (
             <div key={source.id} className="settings-group nats-server">
               <div className="nats-server-head">
-                <DatabaseIcon className="nats-server-icon" />
+                <CloudIcon className="nats-server-icon" />
                 <div className="nats-server-text">
                   <span className="nats-server-name">{source.name}</span>
                   <span className="settings-field-help">

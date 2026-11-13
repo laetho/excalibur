@@ -39,12 +39,10 @@ export function FolderIcon(props: IconProps) {
   )
 }
 
-export function DatabaseIcon(props: IconProps) {
+export function CloudIcon(props: IconProps) {
   return (
-    <Icon data-icon="database" {...props}>
-      <ellipse cx="12" cy="5.5" rx="8" ry="3" />
-      <path d="M4 5.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
-      <path d="M4 11.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+    <Icon data-icon="cloud" {...props}>
+      <path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.5 9.2 4.65 4.65 0 0 0 7 18.5z" />
     </Icon>
   )
 }
@@ -153,7 +151,8 @@ export function SidebarIcon(props: IconProps) {
 
 /**
  * The Excalibur mark (excalibur.svg) redrawn for small sizes: heavier strokes, and the finest details (grip
- * wrap, inner frame, crossguard gem) left out so it stays legible at 20–24px. Drawn in `currentColor`.
+ * wrap, inner frame, crossguard gem) left out so it stays legible at 20–24px. Line art in `currentColor`
+ * over the tile's own color, as in the app icon.
  */
 export function LogoMark(props: IconProps) {
   return (
@@ -173,7 +172,7 @@ export function LogoMark(props: IconProps) {
       <path d="M574 118 L564 270 M626 118 L636 270" />
       <path d="M561 270 C514 294 453 291 414 260 C383 281 359 326 369 358 C409 319 482 301 538 321 C565 331 586 352 600 370 C614 352 635 331 662 321 C718 301 791 319 831 358 C841 326 817 281 786 260 C747 291 686 294 639 270" />
       <path d="M557 400 L560 344 M643 400 L640 344" />
-      <rect x="310" y="401" width="580" height="350" rx="28" fill="currentColor" fillOpacity={0.16} />
+      <rect x="310" y="401" width="580" height="350" rx="28" />
       <path d="M720 751 V724 Q720 709 735 709 H806 Q821 709 821 724 V751" />
       <rect x="292" y="751" width="616" height="40" rx="20" fill="currentColor" />
       <path d="M560 812 L560 876 Q560 885 565 895 L600 955 L635 895 Q640 885 640 876 L640 812" />
