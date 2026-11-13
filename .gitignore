@@ -5,3 +5,7 @@
 /.task/
 *.log
 /.dev/
+
+# `go build .` at the repo root drops the module binary here.
+/excalibur
+/excalibur.exe
