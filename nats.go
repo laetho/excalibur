@@ -32,6 +32,9 @@ type natsClient struct {
 	streamMu sync.RWMutex
 	streams  map[string]struct{}
 
+	replicasMu      sync.Mutex
+	replicasChecked map[string]struct{} // streams already considered for replica upgrades
+
 	libraryMu      sync.Mutex
 	libraryWatcher nats.ObjectWatcher
 	libraryOwn     map[string]struct{} // digests of library versions this client wrote
@@ -63,7 +66,14 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 		nc.Close()
 		return nil, fmt.Errorf("could not initialise JetStream on %q: %w", config.Name, err)
 	}
-	return &natsClient{config: config, conn: nc, js: js, jsm: jsm, streams: map[string]struct{}{}}, nil
+	return &natsClient{
+		config:          config,
+		conn:            nc,
+		js:              js,
+		jsm:             jsm,
+		streams:         map[string]struct{}{},
+		replicasChecked: map[string]struct{}{},
+	}, nil
 }
 
 // normalizeNatsServerConfig validates authentication before a connection is
@@ -108,16 +118,119 @@ func (c *natsClient) close() {
 	c.conn.Close()
 }
 
+// replicaTarget is the desired replication factor for durable JetStream data
+// (board object stores, the shared library, and collaboration update streams).
+// A non-clustered server cannot replicate at all, and a cluster may have fewer
+// than three usable peers, so creation falls back to a lower count when three
+// replicas cannot be placed.
+const replicaTarget = 3
+
+// replicaCandidates lists the replication factors to attempt, most durable
+// first. JetStream does not expose the cluster size, so the only reliable way to
+// learn whether three replicas can be placed is to ask for them and fall back on
+// a placement error. A non-clustered server advertises no cluster name and can
+// only ever host one replica.
+func (c *natsClient) replicaCandidates() []int {
+	if c.conn.ConnectedClusterName() == "" {
+		return []int{1}
+	}
+	return []int{replicaTarget, 2, 1}
+}
+
+// isReplicaError reports whether err means the requested replication factor
+// could not be satisfied by the current cluster.
+func isReplicaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "replica") ||
+		strings.Contains(message, "no suitable peers") ||
+		strings.Contains(message, "insufficient resources")
+}
+
+// withReplicas runs create for each candidate replication factor until one
+// succeeds. Failures unrelated to replica placement are returned immediately; if
+// every candidate is rejected for placement reasons, the last error is returned.
+func (c *natsClient) withReplicas(create func(replicas int) error) error {
+	var lastErr error
+	for _, replicas := range c.replicaCandidates() {
+		err := create(replicas)
+		if err == nil {
+			return nil
+		}
+		if !isReplicaError(err) {
+			return err
+		}
+		log.Printf("could not place %d replica(s): %v", replicas, err)
+		lastErr = err
+	}
+	return lastErr
+}
+
+// ensureStreamReplicas upgrades an existing stream to the desired replication
+// factor. It runs at most once per stream per process and is best-effort: a
+// failed upgrade is logged so an unrelated read or write still succeeds. New
+// streams are created with the correct count directly, so this only matters for
+// resources created before replication was enabled.
+func (c *natsClient) ensureStreamReplicas(streamName string) {
+	if c.conn.ConnectedClusterName() == "" {
+		return // a single server cannot replicate
+	}
+	c.replicasMu.Lock()
+	if _, checked := c.replicasChecked[streamName]; checked {
+		c.replicasMu.Unlock()
+		return
+	}
+	c.replicasMu.Unlock()
+
+	info, err := c.js.StreamInfo(streamName)
+	if err != nil {
+		return // retried on a later call
+	}
+	c.replicasMu.Lock()
+	c.replicasChecked[streamName] = struct{}{}
+	c.replicasMu.Unlock()
+	if info.Config.Replicas >= replicaTarget {
+		return
+	}
+	err = c.withReplicas(func(replicas int) error {
+		if replicas <= info.Config.Replicas {
+			return nil // never lower an existing replication factor
+		}
+		config := info.Config
+		config.Replicas = replicas
+		_, updateErr := c.js.UpdateStream(&config)
+		return updateErr
+	})
+	if err != nil {
+		log.Printf("could not raise replicas on stream %q: %v", streamName, err)
+	}
+}
+
 func (c *natsClient) objectStore(bucket string) (nats.ObjectStore, error) {
 	store, err := c.js.ObjectStore(bucket)
 	if err == nil {
+		// Existing buckets may predate replication; upgrade them in place.
+		c.ensureStreamReplicas("OBJ_" + bucket)
 		return store, nil
 	}
-	store, err = c.js.CreateObjectStore(&nats.ObjectStoreConfig{Bucket: bucket})
+	var created nats.ObjectStore
+	err = c.withReplicas(func(replicas int) error {
+		candidate, createErr := c.js.CreateObjectStore(&nats.ObjectStoreConfig{
+			Bucket:   bucket,
+			Storage:  nats.FileStorage,
+			Replicas: replicas,
+		})
+		if createErr == nil {
+			created = candidate
+		}
+		return createErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("could not create bucket %q on %s: %w", bucket, c.config.Name, err)
 	}
-	return store, nil
+	return created, nil
 }
 
 // listBuckets returns the object-store bucket names on the server. It uses the
@@ -303,32 +416,47 @@ func (c *natsClient) ensureCollabStream(bucket string) (string, error) {
 		return name, nil
 	}
 	if info, err := c.js.StreamInfo(name); err == nil {
-		// Updates must not expire independently of per-document snapshot progress.
-		// Older builds configured time/size limits which could silently discard the
-		// only durable copy of an edit, so remove those limits when encountered.
-		if info.Config.MaxAge != 0 || info.Config.MaxBytes != -1 {
-			config := info.Config
+		base := info.Config
+		limitsStale := base.MaxAge != 0 || base.MaxBytes != -1
+		updateErr := c.withReplicas(func(replicas int) error {
+			config := base
+			// Updates must not expire independently of per-document snapshot progress.
+			// Older builds configured time/size limits which could silently discard the
+			// only durable copy of an edit, so remove those limits when encountered.
 			config.MaxAge = 0
 			config.MaxBytes = -1
-			if _, updateErr := c.js.UpdateStream(&config); updateErr != nil {
-				return "", fmt.Errorf("could not make collaboration stream %q lossless: %w", name, updateErr)
+			// Existing streams may predate replication; upgrade them in place.
+			if replicas > config.Replicas {
+				config.Replicas = replicas
 			}
+			if !limitsStale && config.Replicas == base.Replicas {
+				return nil
+			}
+			_, err := c.js.UpdateStream(&config)
+			return err
+		})
+		if updateErr != nil {
+			return "", fmt.Errorf("could not update collaboration stream %q: %w", name, updateErr)
 		}
 		c.streams[name] = struct{}{}
 		return name, nil
 	} else if !errors.Is(err, nats.ErrStreamNotFound) {
 		return "", err
 	}
-	_, err := c.js.AddStream(&nats.StreamConfig{
-		Name:        name,
-		Description: "Excalibur durable collaboration updates for " + bucket,
-		Subjects:    []string{"wb.crdt.v2." + collabBucketToken(bucket) + ".*.updates"},
-		Retention:   nats.LimitsPolicy,
-		Storage:     nats.FileStorage,
-		Discard:     nats.DiscardOld,
-		MaxAge:      0,
-		MaxBytes:    -1,
-		Duplicates:  10 * time.Minute,
+	err := c.withReplicas(func(replicas int) error {
+		_, addErr := c.js.AddStream(&nats.StreamConfig{
+			Name:        name,
+			Description: "Excalibur durable collaboration updates for " + bucket,
+			Subjects:    []string{"wb.crdt.v2." + collabBucketToken(bucket) + ".*.updates"},
+			Retention:   nats.LimitsPolicy,
+			Storage:     nats.FileStorage,
+			Discard:     nats.DiscardOld,
+			MaxAge:      0,
+			MaxBytes:    -1,
+			Duplicates:  10 * time.Minute,
+			Replicas:    replicas,
+		})
+		return addErr
 	})
 	if err != nil {
 		// Another client may have created the stream after our StreamInfo call.
@@ -749,7 +877,14 @@ func (c *natsClient) lockKV() (nats.KeyValue, error) {
 	if err == nil {
 		return kv, nil
 	}
-	kv, err = c.js.CreateKeyValue(&nats.KeyValueConfig{Bucket: lockBucket})
+	// Compaction leases and the snapshot index are coordination state, not board
+	// data. Keeping them in memory avoids disk churn; a restart simply forces a
+	// new election, and the snapshot index rebuilds from the stored snapshots.
+	kv, err = c.js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:   lockBucket,
+		Storage:  nats.MemoryStorage,
+		Replicas: 1,
+	})
 	if err != nil {
 		// Another client may have created the shared KV stream between our lookup
 		// and create. Resolve it once before surfacing a real permission/server error.

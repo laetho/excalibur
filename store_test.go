@@ -1541,3 +1541,22 @@ func TestDiagramBudgetError(t *testing.T) {
 		t.Fatalf("expected malformed arguments to pass through, got %v", err)
 	}
 }
+
+func TestIsReplicaError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{err: nil, want: false},
+		{err: errors.New("nats: replicas > 1 not supported in non-clustered mode"), want: true},
+		{err: errors.New("nats: no suitable peers for placement"), want: true},
+		{err: errors.New("nats: insufficient resources"), want: true},
+		{err: errors.New("nats: stream name already in use"), want: false},
+		{err: errors.New("context deadline exceeded"), want: false},
+	}
+	for _, tc := range cases {
+		if got := isReplicaError(tc.err); got != tc.want {
+			t.Errorf("isReplicaError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}

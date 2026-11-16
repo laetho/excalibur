@@ -83,8 +83,21 @@ from SHA-256(`B`) and uses these resources:
 | Immutable snapshot | `.crdt.<document-id>.snapshot.<sequence>.<content-hash>` | Tombstone-preserving replay baseline |
 | Immutable blob | `.crdt.<document-id>.file.<blob-hash>` | Images and oversized scene messages |
 | Deletion marker | `.crdt.<document-id>.deleted` | Prevents a stale compactor from recreating a deleted board |
-| JetStream KV bucket | `excalibur-locks` | Snapshot lease and CAS-protected snapshot index |
+| JetStream KV bucket | `excalibur-locks` | In-memory snapshot lease and CAS-protected snapshot index |
 | Object Store bucket | `excalibur-library` | Shape library shared by every board on the server (hidden from the bucket list) |
+
+Durable resources — the per-bucket update streams, board Object Stores, and the
+shared library bucket — are created with three replicas. JetStream does not
+expose the cluster size to clients, so creation asks for three and falls back to
+two (then one) only when the cluster rejects the placement; a non-clustered
+server always uses one. Existing streams created by older builds are upgraded in
+place the next time they are opened.
+
+The `excalibur-locks` bucket is deliberately different: it uses memory storage
+and a single replica because its leases and snapshot index are coordination
+state, not board data. A restart drops the leases (clients simply elect a new
+compactor) and the snapshot index, which rebuilds by scanning the immutable
+snapshot objects when first read.
 
 ### Shared library
 
