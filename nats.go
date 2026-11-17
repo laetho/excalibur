@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -36,8 +37,12 @@ type natsClient struct {
 	replicasChecked map[string]struct{} // streams already considered for replica upgrades
 
 	libraryMu      sync.Mutex
-	libraryWatcher nats.ObjectWatcher
+	libraryWatcher *nats.Subscription
 	libraryOwn     map[string]struct{} // digests of library versions this client wrote
+	// instanceID identifies this app run. Durable consumer names embed it so a
+	// restarted client starts a fresh consumer instead of competing with the one
+	// its predecessor left behind.
+	instanceID string
 }
 
 func connectNATS(config NatsServerConfig) (*natsClient, error) {
@@ -73,6 +78,7 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 		jsm:             jsm,
 		streams:         map[string]struct{}{},
 		replicasChecked: map[string]struct{}{},
+		instanceID:      newInstanceID(),
 	}, nil
 }
 
@@ -111,11 +117,22 @@ func normalizeNatsServerConfig(config NatsServerConfig) (NatsServerConfig, error
 func (c *natsClient) close() {
 	c.libraryMu.Lock()
 	if c.libraryWatcher != nil {
-		_ = c.libraryWatcher.Stop()
+		_ = c.libraryWatcher.Unsubscribe()
 		c.libraryWatcher = nil
 	}
 	c.libraryMu.Unlock()
 	c.conn.Close()
+}
+
+// newInstanceID returns a short random token that scopes durable consumer names
+// to one app run. It never fails: the fallback only has to be unique enough to
+// keep two concurrent app runs apart.
+func newInstanceID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%016x", uint64(time.Now().UnixNano()))
+	}
+	return hex.EncodeToString(buf)
 }
 
 // replicaTarget is the desired replication factor for durable JetStream data
@@ -125,16 +142,22 @@ func (c *natsClient) close() {
 // replicas cannot be placed.
 const replicaTarget = 3
 
-// replicaCandidates lists the replication factors to attempt, most durable
-// first. JetStream does not expose the cluster size, so the only reliable way to
-// learn whether three replicas can be placed is to ask for them and fall back on
-// a placement error. A non-clustered server advertises no cluster name and can
-// only ever host one replica.
-func (c *natsClient) replicaCandidates() []int {
-	if c.conn.ConnectedClusterName() == "" {
+// replicaCandidatesFor lists the replication factors to attempt, most durable
+// first, for a clustered server. JetStream does not expose the cluster size, so
+// the only reliable way to learn whether three replicas can be placed is to ask
+// for them and fall back on a placement error. A non-clustered server advertises
+// no cluster name and can only ever host one replica.
+func replicaCandidatesFor(clustered bool) []int {
+	if !clustered {
 		return []int{1}
 	}
 	return []int{replicaTarget, 2, 1}
+}
+
+// replicaCandidates reports the replication factors to attempt for the server
+// this client is connected to.
+func (c *natsClient) replicaCandidates() []int {
+	return replicaCandidatesFor(c.conn.ConnectedClusterName() != "")
 }
 
 // isReplicaError reports whether err means the requested replication factor
@@ -810,6 +833,34 @@ func objectDigest(data []byte) string {
 	return "SHA-256=" + base64.URLEncoding.EncodeToString(sum[:])
 }
 
+// The shared library mirror is a long-lived watcher that must survive
+// reconnects without minting a new JetStream consumer. Object Store Watch()
+// cannot do that: it runs on an ordered consumer, which the client replaces from
+// scratch after every error or reconnect, so a single session could leave dozens
+// of consumer instances behind on the library stream.
+//
+// Instead the mirror binds to a durable push consumer named after this app run.
+// The name has to be per instance rather than per server, because every client
+// needs every library update: a shared durable consumer would load-balance the
+// updates across clients instead of fanning them out. The inactive threshold
+// reclaims the consumer shortly after the app quits or loses its connection for
+// long enough that the run is over for practical purposes.
+const (
+	libraryWatchConsumerPrefix = "library-watch-"
+	libraryWatchInactiveAfter  = 30 * time.Minute
+)
+
+// libraryWatchConsumerName scopes the library consumer to one app run.
+func libraryWatchConsumerName(instanceID string) string {
+	return libraryWatchConsumerPrefix + instanceID
+}
+
+// libraryWatchSubject is the object store meta subject that announces every
+// stored object, matching what Object Store Watch() subscribes to.
+func libraryWatchSubject(bucket string) string {
+	return fmt.Sprintf("$O.%s.M.>", bucket)
+}
+
 // watchLibrary calls onChange with the new content whenever another client
 // replaces the shared library. It is idempotent and stops when the client closes.
 func (c *natsClient) watchLibrary(onChange func([]byte)) error {
@@ -818,37 +869,72 @@ func (c *natsClient) watchLibrary(onChange func([]byte)) error {
 	if c.libraryWatcher != nil {
 		return nil
 	}
-	store, err := c.objectStore(libraryBucket)
+	// Ensure the bucket exists before deriving its stream name.
+	if _, err := c.objectStore(libraryBucket); err != nil {
+		return err
+	}
+	subject := libraryWatchSubject(libraryBucket)
+	stream, err := c.js.StreamNameBySubject(subject)
 	if err != nil {
 		return err
 	}
-	watcher, err := store.Watch(nats.IgnoreDeletes())
-	if err != nil {
-		return err
+	consumer := libraryWatchConsumerName(c.instanceID)
+	// A consumer created here replays one message per stored object. Those are
+	// the baseline this client already read on startup, so they must not be
+	// reported as changes. A consumer that already exists is being resumed
+	// instead, and whatever is still pending is a real update missed while the
+	// client was offline.
+	created := true
+	if _, infoErr := c.js.ConsumerInfo(stream, consumer); infoErr == nil {
+		created = false
 	}
-	c.libraryWatcher = watcher
-	go func() {
-		initial := true
-		for info := range watcher.Updates() {
-			if info == nil {
-				initial = false // end of the initial replay; only live changes follow
-				continue
-			}
-			if initial || info.Name != libraryName {
-				continue
-			}
-			c.libraryMu.Lock()
-			_, own := c.libraryOwn[info.Digest]
-			delete(c.libraryOwn, info.Digest)
-			c.libraryMu.Unlock()
-			if own {
-				continue
-			}
-			if data, err := c.readObject(libraryBucket, libraryName); err == nil && data != nil {
-				onChange(data)
-			}
+	var replaying atomic.Bool
+	replaying.Store(created)
+	opts := []nats.SubOpt{
+		nats.BindStream(stream),
+		nats.Durable(consumer),
+		nats.ManualAck(),
+		nats.AckExplicit(),
+		nats.MaxAckPending(256),
+		nats.InactiveThreshold(libraryWatchInactiveAfter),
+		nats.DeliverLastPerSubject(),
+	}
+	sub, err := c.js.Subscribe(subject, func(msg *nats.Msg) {
+		// Every path acknowledges, including malformed metadata and deletes, so
+		// the consumer never accumulates ack-pending backlog.
+		defer func() { _ = msg.Ack() }()
+		var info nats.ObjectInfo
+		if err := json.Unmarshal(msg.Data, &info); err != nil {
+			return
 		}
-	}()
+		meta, metaErr := msg.Metadata()
+		if metaErr != nil {
+			return
+		}
+		if replaying.Load() {
+			if meta.NumPending == 0 {
+				replaying.Store(false) // end of the initial replay; only live changes follow
+			}
+			return
+		}
+		if info.Deleted || info.Name != libraryName {
+			return
+		}
+		c.libraryMu.Lock()
+		_, own := c.libraryOwn[info.Digest]
+		delete(c.libraryOwn, info.Digest)
+		c.libraryMu.Unlock()
+		if own {
+			return
+		}
+		if data, err := c.readObject(libraryBucket, libraryName); err == nil && data != nil {
+			onChange(data)
+		}
+	}, opts...)
+	if err != nil {
+		return err
+	}
+	c.libraryWatcher = sub
 	return nil
 }
 

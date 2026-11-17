@@ -45,6 +45,41 @@ func TestLockKeySeparatesBucketAndBoard(t *testing.T) {
 	}
 }
 
+func TestLibraryWatchConsumerIsScopedToOneInstance(t *testing.T) {
+	first := libraryWatchConsumerName("0123456789abcdef")
+	second := libraryWatchConsumerName("fedcba9876543210")
+	if first == second {
+		t.Fatal("library watch consumer names must differ per app run")
+	}
+	if first != "library-watch-0123456789abcdef" {
+		t.Fatalf("libraryWatchConsumerName() = %q", first)
+	}
+	// JetStream rejects consumer names outside this alphabet.
+	if !regexp.MustCompile(`^[-_a-zA-Z0-9]+$`).MatchString(first) {
+		t.Fatalf("library watch consumer name is invalid: %q", first)
+	}
+}
+
+func TestNewInstanceIDIsUniquePerRun(t *testing.T) {
+	seen := map[string]struct{}{}
+	for range 100 {
+		id := newInstanceID()
+		if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(id) {
+			t.Fatalf("newInstanceID() = %q, want 16 hex characters", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("newInstanceID() repeated %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestLibraryWatchSubjectMatchesObjectStoreMeta(t *testing.T) {
+	if got, want := libraryWatchSubject(libraryBucket), "$O."+libraryBucket+".M.>"; got != want {
+		t.Fatalf("libraryWatchSubject() = %q, want %q", got, want)
+	}
+}
+
 func testStore(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()
@@ -1558,5 +1593,24 @@ func TestIsReplicaError(t *testing.T) {
 		if got := isReplicaError(tc.err); got != tc.want {
 			t.Errorf("isReplicaError(%v) = %v, want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestReplicaCandidates(t *testing.T) {
+	cases := []struct {
+		name      string
+		clustered bool
+		want      []int
+	}{
+		{name: "non-clustered server only hosts one replica", clustered: false, want: []int{1}},
+		{name: "clustered server tries three, then two, then one", clustered: true, want: []int{3, 2, 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := replicaCandidatesFor(tc.clustered)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("replicaCandidatesFor(%v) = %v, want %v", tc.clustered, got, tc.want)
+			}
+		})
 	}
 }
