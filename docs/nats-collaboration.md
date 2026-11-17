@@ -110,6 +110,22 @@ bucket is opened and no shared library exists, its legacy per-bucket
 `library.excalidrawlib` is adopted as the shared library. Local boards keep a
 `library.excalidrawlib` file in their folder.
 
+The library mirror runs on a durable JetStream consumer named
+`library-watch-<run>`, created on the library stream the first time a client
+watches it and reused for the rest of that app run. The run token keeps the
+consumer per instance rather than per server: every client needs every library
+update, so a consumer shared between clients would load-balance the updates
+instead of fanning them out. A 30 minute inactive threshold reclaims the
+consumer after the app quits. Mirroring used to run on an Object Store
+`Watch()`, whose ordered consumer the client rebuilds after every reconnect,
+which left one new consumer instance per reconnect on the stream.
+
+Collaboration update consumers are deliberately different. Each canvas join
+creates one ephemeral consumer that starts at the snapshot sequence + 1 and is
+deleted when the canvas closes, because a join needs the replay window the
+renderer asks for rather than a position remembered on the server. That bounds
+the consumer count to one per open canvas instead of one per reconnect.
+
 The update stream uses file storage with no age or byte limit. Updates are
 removed only by snapshot-aware compaction. NATS message IDs deduplicate retries
 inside JetStream's deduplication window; Excalidraw reconciliation remains
