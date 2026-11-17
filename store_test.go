@@ -1560,3 +1560,22 @@ func TestIsReplicaError(t *testing.T) {
 		}
 	}
 }
+
+func TestReplicaCandidates(t *testing.T) {
+	cases := []struct {
+		name      string
+		clustered bool
+		want      []int
+	}{
+		{name: "non-clustered server only hosts one replica", clustered: false, want: []int{1}},
+		{name: "clustered server tries three, then two, then one", clustered: true, want: []int{3, 2, 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := replicaCandidatesFor(tc.clustered)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("replicaCandidatesFor(%v) = %v, want %v", tc.clustered, got, tc.want)
+			}
+		})
+	}
+}

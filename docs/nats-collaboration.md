@@ -91,7 +91,9 @@ shared library bucket — are created with three replicas. JetStream does not
 expose the cluster size to clients, so creation asks for three and falls back to
 two (then one) only when the cluster rejects the placement; a non-clustered
 server always uses one. Existing streams created by older builds are upgraded in
-place the next time they are opened.
+place the next time they are opened. See
+[`nats-replication-risk.md`](nats-replication-risk.md) for the rationale behind
+the replication factor and the deliberate exception for `excalibur-locks`.
 
 The `excalibur-locks` bucket is deliberately different: it uses memory storage
 and a single replica because its leases and snapshot index are coordination
