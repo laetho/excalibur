@@ -142,16 +142,22 @@ func newInstanceID() string {
 // replicas cannot be placed.
 const replicaTarget = 3
 
-// replicaCandidates lists the replication factors to attempt, most durable
-// first. JetStream does not expose the cluster size, so the only reliable way to
-// learn whether three replicas can be placed is to ask for them and fall back on
-// a placement error. A non-clustered server advertises no cluster name and can
-// only ever host one replica.
-func (c *natsClient) replicaCandidates() []int {
-	if c.conn.ConnectedClusterName() == "" {
+// replicaCandidatesFor lists the replication factors to attempt, most durable
+// first, for a clustered server. JetStream does not expose the cluster size, so
+// the only reliable way to learn whether three replicas can be placed is to ask
+// for them and fall back on a placement error. A non-clustered server advertises
+// no cluster name and can only ever host one replica.
+func replicaCandidatesFor(clustered bool) []int {
+	if !clustered {
 		return []int{1}
 	}
 	return []int{replicaTarget, 2, 1}
+}
+
+// replicaCandidates reports the replication factors to attempt for the server
+// this client is connected to.
+func (c *natsClient) replicaCandidates() []int {
+	return replicaCandidatesFor(c.conn.ConnectedClusterName() != "")
 }
 
 // isReplicaError reports whether err means the requested replication factor
