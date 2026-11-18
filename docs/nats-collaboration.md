@@ -294,7 +294,7 @@ coalesced away, and laser positions are sent at a higher rate than cursors.
 `view` messages carry the scene rectangle a peer currently sees. They are sent
 on scroll/zoom, on join, and as a heartbeat, so an idle peer stays listed and
 can be followed. Any presence message refreshes that peer's TTL, so the
-heartbeat is throttled to one `view` every 12 seconds for a peer that publishes
+heartbeat is throttled to one `view` every 10 seconds for a peer that publishes
 nothing else, rather than firing on every TTL sweep. When a user follows a peer from Excalidraw's user list, the
 follower fits the peer's last known rectangle into its own viewport and tracks
 every later `view` message until the follower scrolls or zooms. A followed view

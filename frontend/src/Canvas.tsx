@@ -82,10 +82,12 @@ const POINTER_UPDATE_INTERVAL_MS = 100
 const LASER_UPDATE_INTERVAL_MS = 50
 const PRESENCE_TTL_MS = 30_000
 /**
- * An idle peer only needs one view before its TTL runs out. Any publish already
- * refreshes it, so heartbeats are throttled well below the sweep interval.
+ * An idle peer only needs a view now and then to stay listed. Any publish already
+ * refreshes its TTL, so the heartbeat is throttled to roughly one per sweep
+ * interval instead of firing on every sweep — still three messages per TTL, so a
+ * single lost heartbeat cannot drop an idle peer.
  */
-const PRESENCE_HEARTBEAT_MS = 12_000
+const PRESENCE_HEARTBEAT_MS = 10_000
 /**
  * Leader lease TTL and how often it is renewed/contested while collaborating.
  * Renewing every third of the TTL keeps a stale holder from blocking the board
