@@ -100,7 +100,21 @@ type Preferences struct {
 	NatsServers      []NatsServerConfig  `json:"natsServers"`
 	ActiveSource     string              `json:"activeSource,omitempty"`
 	ActiveGroup      string              `json:"activeGroup,omitempty"`
+	Pinned           []PinnedGroup       `json:"pinned,omitempty"`
 	AI               AIConfig            `json:"ai"`
+}
+
+// PinnedGroup is a folder or bucket kept open in the tree while another one is active.
+type PinnedGroup struct {
+	Source string `json:"source"`
+	Group  string `json:"group"`
+}
+
+// PinnedGroupInfo is a pinned group and the boards it holds.
+type PinnedGroupInfo struct {
+	Source string      `json:"source"`
+	Group  string      `json:"group"`
+	Boards []BoardInfo `json:"boards"`
 }
 
 type Board struct {
@@ -179,6 +193,7 @@ type StoreSnapshot struct {
 	NatsServers      []NatsServerSettings `json:"natsServers"`
 	ActiveSource     string               `json:"activeSource"`
 	ActiveGroup      string               `json:"activeGroup"`
+	Pinned           []PinnedGroupInfo    `json:"pinned"`
 	AI               AISettings           `json:"ai"`
 }
 

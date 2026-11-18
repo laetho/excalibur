@@ -660,6 +660,21 @@ func (a *App) SetSort(order string) error {
 	a.emitSnapshotLocked()
 	return nil
 }
+
+// TogglePinnedGroup pins a folder or bucket so its boards stay visible while
+// another group is active.
+func (a *App) TogglePinnedGroup(sourceID, groupID string) error {
+	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(groupID) == "" {
+		return errors.New("a pinned group needs a source and a group")
+	}
+	a.savePending()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store.togglePinnedGroup(sourceID, groupID)
+	a.emitSnapshotLocked()
+	return nil
+}
+
 func (a *App) SetShowThumbnails(show bool) {
 	a.mu.Lock()
 	a.store.prefs.ShowThumbnails = &show

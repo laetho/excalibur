@@ -39,6 +39,13 @@ export type GroupInfo = { id: string; name: string; kind: 'folder' | 'bucket' }
 /** One entry in the navigation tree: the local boards folder or a NATS server. */
 export type SourceInfo = { id: string; name: string; kind: 'local' | 'nats'; groups: GroupInfo[] }
 
+/**
+ * A folder or bucket pinned open: its boards stay in the sidebar while another
+ * group is active. The active group's entry carries an empty board list, since
+ * its boards are already shown.
+ */
+export type PinnedGroupInfo = { source: string; group: string; boards: BoardInfo[] }
+
 /** A NATS server the user added (persisted in preferences). */
 export type NatsServerConfig = {
   id: string
@@ -80,6 +87,8 @@ export type StoreSnapshot = {
   activeSource: string
   /** The active group id (a folder path or a bucket name). */
   activeGroup: string
+  /** Folders and buckets pinned open, with their boards. */
+  pinned: PinnedGroupInfo[]
   ai: AISettings
 }
 
@@ -158,6 +167,8 @@ export const addBucket = (sourceId: string, bucket: string) => app().AddBucket(s
 export const deleteBucket = (sourceId: string, bucket: string) => app().DeleteBucket(sourceId, bucket)
 /** Switches the sidebar's active source/group (a local folder or a NATS bucket). */
 export const activateSource = (sourceId: string, groupId: string) => app().ActivateSource(sourceId, groupId)
+/** Pins a folder or bucket open so its boards stay visible beside the active group. */
+export const togglePinnedGroup = (sourceId: string, groupId: string) => app().TogglePinnedGroup(sourceId, groupId)
 /** Copies a board into another source/group (drag & drop between sources). */
 export const copyBoardToSource = (boardId: string, targetSource: string, targetGroup: string) =>
   app().CopyBoardToSource(boardId, targetSource, targetGroup)

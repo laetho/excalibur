@@ -39,6 +39,10 @@ type Store struct {
 	closed      bool
 	// dialNATS connects a server; tests replace it to observe dialling.
 	dialNATS func(config NatsServerConfig) (*natsClient, error)
+
+	// pinnedCache holds the last listing of each pinned group, keyed by
+	// source+"\x00"+group, so the 2 s sidebar refresh does not re-list buckets.
+	pinnedCache map[string]pinnedBoardsEntry
 }
 
 // preferencesPath migrates the former ExcaliWails preferences on first launch
@@ -72,7 +76,7 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	s := &Store{
 		prefsPath: prefsPath,
 		prefs:     Preferences{Viewports: map[string]Viewport{}, SortOrder: "name", CanvasAppearance: "system", ShowThumbnails: &show},
-		details:   map[string]BoardDetails{}, detailStamp: map[string]string{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS,
+		details:   map[string]BoardDetails{}, detailStamp: map[string]string{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS, pinnedCache: map[string]pinnedBoardsEntry{},
 	}
 	if data, err := os.ReadFile(prefsPath); err == nil {
 		_ = json.Unmarshal(data, &s.prefs)
@@ -278,59 +282,17 @@ func (s *Store) syncConnectionNotice() bool {
 
 func (s *Store) scan() error {
 	var boards []Board
+	var err error
 	if s.isLocal() {
-		entries, err := os.ReadDir(s.activeGroup)
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if strings.HasPrefix(name, ".") || !strings.EqualFold(filepath.Ext(name), fileExtension) {
-				continue
-			}
-			path := filepath.Join(s.activeGroup, name)
-			info, err := os.Lstat(path)
-			if err != nil {
-				continue
-			}
-			board := Board{ID: name, Name: strings.TrimSuffix(name, filepath.Ext(name)), Path: path}
-			if info.Mode()&os.ModeSymlink != 0 {
-				target, err := filepath.EvalSymlinks(path)
-				if err != nil || !strings.EqualFold(filepath.Ext(target), fileExtension) {
-					continue
-				}
-				targetInfo, err := os.Stat(target)
-				if err != nil || !targetInfo.Mode().IsRegular() {
-					continue
-				}
-				board.IsLink, board.Target, board.Modified, board.Size = true, target, targetInfo.ModTime(), uint64(targetInfo.Size())
-			} else {
-				if !info.Mode().IsRegular() {
-					continue
-				}
-				board.Modified, board.Size = info.ModTime(), uint64(info.Size())
-			}
-			boards = append(boards, board)
-		}
+		boards, err = listLocalBoards(s.activeGroup)
 	} else {
-		client, err := s.clientFor(s.activeSource)
-		if err != nil {
-			return err
+		var client *natsClient
+		if client, err = s.clientFor(s.activeSource); err == nil {
+			boards, err = listRemoteBoards(client, s.activeGroup)
 		}
-		objects, err := client.listObjects(s.activeGroup)
-		if err != nil {
-			return err
-		}
-		for _, object := range objects {
-			if object == nil || object.Deleted || strings.HasPrefix(object.Name, ".") || !strings.HasSuffix(object.Name, fileExtension) {
-				continue
-			}
-			documentID, err := client.documentID(s.activeGroup, object.Name)
-			if err != nil {
-				return err
-			}
-			boards = append(boards, Board{ID: object.Name, Name: strings.TrimSuffix(object.Name, fileExtension), DocumentID: documentID, Modified: object.ModTime, Size: object.Size})
-		}
+	}
+	if err != nil {
+		return err
 	}
 	sort.Slice(boards, func(i, j int) bool { return strings.ToLower(boards[i].Name) < strings.ToLower(boards[j].Name) })
 	s.boards = boards
@@ -338,6 +300,77 @@ func (s *Store) scan() error {
 		s.selection = ""
 	}
 	return nil
+}
+
+// listLocalBoards lists the .excalidraw files in one folder without activating it.
+func listLocalBoards(folder string) ([]Board, error) {
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return nil, err
+	}
+	boards := make([]Board, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.EqualFold(filepath.Ext(name), fileExtension) {
+			continue
+		}
+		path := filepath.Join(folder, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		board := Board{ID: name, Name: strings.TrimSuffix(name, filepath.Ext(name)), Path: path}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(path)
+			if err != nil || !strings.EqualFold(filepath.Ext(target), fileExtension) {
+				continue
+			}
+			targetInfo, err := os.Stat(target)
+			if err != nil || !targetInfo.Mode().IsRegular() {
+				continue
+			}
+			board.IsLink, board.Target, board.Modified, board.Size = true, target, targetInfo.ModTime(), uint64(targetInfo.Size())
+		} else {
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			board.Modified, board.Size = info.ModTime(), uint64(info.Size())
+		}
+		boards = append(boards, board)
+	}
+	return boards, nil
+}
+
+// listRemoteBoards lists the board objects in one bucket without activating it.
+func listRemoteBoards(client *natsClient, bucket string) ([]Board, error) {
+	objects, err := client.listObjects(bucket)
+	if err != nil {
+		return nil, err
+	}
+	boards := make([]Board, 0, len(objects))
+	for _, object := range objects {
+		if object == nil || object.Deleted || strings.HasPrefix(object.Name, ".") || !strings.HasSuffix(object.Name, fileExtension) {
+			continue
+		}
+		documentID, err := client.documentID(bucket, object.Name)
+		if err != nil {
+			return nil, err
+		}
+		boards = append(boards, Board{ID: object.Name, Name: strings.TrimSuffix(object.Name, fileExtension), DocumentID: documentID, Modified: object.ModTime, Size: object.Size})
+	}
+	return boards, nil
+}
+
+// listGroupBoards lists one group's boards without activating it.
+func (s *Store) listGroupBoards(sourceID, group string) ([]Board, error) {
+	if sourceID == localSourceID {
+		return listLocalBoards(group)
+	}
+	client, err := s.clientFor(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	return listRemoteBoards(client, group)
 }
 
 func (s *Store) board(id string) *Board {
@@ -787,6 +820,80 @@ func (s *Store) refreshTexts() {
 	}
 }
 
+// pinnedBoardsTTL bounds how often a pinned bucket is re-listed; the sidebar
+// refreshes every couple of seconds and each listing is a round trip per board.
+const pinnedBoardsTTL = 5 * time.Second
+
+type pinnedBoardsEntry struct {
+	at     time.Time
+	boards []BoardInfo
+}
+
+// pinnedBoards lists the boards of the pinned groups other than the active one,
+// so they stay visible while another folder or bucket is open. An unreachable
+// server keeps showing its last known listing.
+func (s *Store) pinnedBoards() []PinnedGroupInfo {
+	out := make([]PinnedGroupInfo, 0, len(s.prefs.Pinned))
+	for _, pin := range s.prefs.Pinned {
+		if pin.Source == s.activeSource && pin.Group == s.activeGroup {
+			// The active group already shows its boards, so only tell the sidebar
+			// that it is pinned.
+			out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: []BoardInfo{}})
+			continue
+		}
+		key := pin.Source + "\x00" + pin.Group
+		if entry, ok := s.pinnedCache[key]; ok && time.Since(entry.at) < pinnedBoardsTTL {
+			out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
+			continue
+		}
+		boards, err := s.listGroupBoards(pin.Source, pin.Group)
+		if err != nil {
+			if entry, ok := s.pinnedCache[key]; ok {
+				out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
+			}
+			continue
+		}
+		infos := make([]BoardInfo, 0, len(boards))
+		for _, board := range boards {
+			info := BoardInfo{ID: board.ID, Name: board.Name, DocumentID: board.DocumentID, Modified: board.Modified.Unix(), IsLink: board.IsLink, Texts: []string{}}
+			if board.Target != "" {
+				target := board.Target
+				info.Target = &target
+			}
+			infos = append(infos, info)
+		}
+		s.pinnedCache[key] = pinnedBoardsEntry{at: time.Now(), boards: infos}
+		out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: infos})
+	}
+	return out
+}
+
+// togglePinnedGroup pins or unpins a folder or bucket and reports the new state.
+func (s *Store) togglePinnedGroup(sourceID, group string) bool {
+	for i, pin := range s.prefs.Pinned {
+		if pin.Source == sourceID && pin.Group == group {
+			s.prefs.Pinned = slices.Delete(s.prefs.Pinned, i, i+1)
+			delete(s.pinnedCache, sourceID+"\x00"+group)
+			s.savePrefs()
+			return false
+		}
+	}
+	s.prefs.Pinned = append(s.prefs.Pinned, PinnedGroup{Source: sourceID, Group: group})
+	s.savePrefs()
+	return true
+}
+
+// unpinGroup forgets a pin, e.g. when its folder or bucket is gone.
+func (s *Store) unpinGroup(sourceID, group string) {
+	for i, pin := range s.prefs.Pinned {
+		if pin.Source == sourceID && pin.Group == group {
+			s.prefs.Pinned = slices.Delete(s.prefs.Pinned, i, i+1)
+			delete(s.pinnedCache, sourceID+"\x00"+group)
+			return
+		}
+	}
+}
+
 func (s *Store) snapshot() StoreSnapshot {
 	boards := make([]BoardInfo, 0, len(s.boards))
 	for _, board := range s.boards {
@@ -816,6 +923,7 @@ func (s *Store) snapshot() StoreSnapshot {
 	for _, folder := range s.localFolders {
 		localGroups = append(localGroups, GroupInfo{ID: folder, Name: displayPath(folder), Kind: "folder"})
 	}
+	pinned := s.pinnedBoards()
 	sources := []SourceInfo{{ID: localSourceID, Name: "Local", Kind: "local", Groups: localGroups}}
 	natsServers := make([]NatsServerSettings, 0, len(s.prefs.NatsServers))
 	for _, server := range s.prefs.NatsServers {
@@ -831,7 +939,7 @@ func (s *Store) snapshot() StoreSnapshot {
 		folder = displayPath(s.activeGroup)
 	}
 	ai := AISettings{Enabled: s.prefs.AI.Enabled, BaseURL: s.prefs.AI.BaseURL, Model: s.prefs.AI.Model, HasAPIKey: s.prefs.AI.APIKey != ""}
-	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, AI: ai}
+	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, Pinned: pinned, AI: ai}
 }
 
 func displayPath(path string) string {

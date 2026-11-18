@@ -343,6 +343,14 @@ export function ToggleFullscreen(): $CancellablePromise<void> {
     return $Call.ByID(3281614320);
 }
 
+/**
+ * TogglePinnedGroup pins a folder or bucket so its boards stay visible while
+ * another group is active.
+ */
+export function TogglePinnedGroup(sourceID: string, groupID: string): $CancellablePromise<void> {
+    return $Call.ByID(3342281742, sourceID, groupID);
+}
+
 export function TrashBoard(id: string): $CancellablePromise<void> {
     return $Call.ByID(218553747, id);
 }

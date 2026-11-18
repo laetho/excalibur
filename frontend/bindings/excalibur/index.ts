@@ -19,6 +19,7 @@ export type {
     NatsServerSettings,
     Notice,
     PickFileResult,
+    PinnedGroupInfo,
     SourceInfo,
     StoreSnapshot
 } from "./models.js";

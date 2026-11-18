@@ -553,6 +553,16 @@ select,
   font-weight: 500;
 }
 
+/* A pinned group keeps its boards in the tree beside the active group; the pin
+ * carries the accent so a fold never loses it. */
+.tree-group .row-action.pin.on {
+  color: var(--accent);
+}
+
+.tree-group.pinned .tree-group-name {
+  color: var(--text);
+}
+
 /* Inside the pill, keep the + clear of the rounded edge. */
 .tree-group-row .row-actions .row-action:last-child {
   margin-right: 0;

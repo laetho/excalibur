@@ -202,6 +202,60 @@ func TestMultipleLocalFolders(t *testing.T) {
 	}
 }
 
+func TestPinnedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
+	store := testStore(t)
+	if err := store.createBoard("Pinned"); err != nil {
+		t.Fatal(err)
+	}
+	background := store.activeGroup
+	active := filepath.Join(t.TempDir(), "active boards")
+	if err := store.addLocalFolder(active); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.createBoard("Active"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !store.togglePinnedGroup(localSourceID, background) {
+		t.Fatal("togglePinnedGroup reported no pin")
+	}
+	snapshot := store.snapshot()
+	if len(snapshot.Pinned) != 1 {
+		t.Fatalf("pinned groups = %#v", snapshot.Pinned)
+	}
+	if groups := snapshot.Pinned[0]; groups.Source != localSourceID || groups.Group != background {
+		t.Fatalf("pinned group = %s/%s", groups.Source, groups.Group)
+	}
+	if boards := snapshot.Pinned[0].Boards; len(boards) != 1 || boards[0].Name != "Pinned" {
+		t.Fatalf("pinned boards = %#v", boards)
+	}
+
+	// Pinning the folder that is already open only marks it: its boards are in
+	// the active list, not a second one.
+	if !store.togglePinnedGroup(localSourceID, active) {
+		t.Fatal("togglePinnedGroup reported no pin for the active folder")
+	}
+	snapshot = store.snapshot()
+	if len(snapshot.Pinned) != 2 || len(snapshot.Pinned[1].Boards) != 0 {
+		t.Fatalf("pinned groups with the active folder = %#v", snapshot.Pinned)
+	}
+
+	// Each listing is cached for the sidebar's refresh; unpinning drops it.
+	store.togglePinnedGroup(localSourceID, background)
+	if len(store.pinnedCache) != 0 {
+		t.Fatalf("pin cache after unpin = %#v", store.pinnedCache)
+	}
+
+	// A removed folder can't stay pinned.
+	store.togglePinnedGroup(localSourceID, background)
+	if err := store.removeLocalFolder(background); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.prefs.Pinned) != 1 || store.prefs.Pinned[0].Group != active {
+		t.Fatalf("pins after removing a folder = %#v", store.prefs.Pinned)
+	}
+}
+
 func TestLegacyBoardsFolderMigrates(t *testing.T) {
 	root := t.TempDir()
 	legacy := filepath.Join(root, "legacy")

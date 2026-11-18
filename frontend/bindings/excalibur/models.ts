@@ -121,6 +121,15 @@ export interface PickFileResult {
     "dataUrl": string;
 }
 
+/**
+ * PinnedGroupInfo is a pinned group and the boards it holds.
+ */
+export interface PinnedGroupInfo {
+    "source": string;
+    "group": string;
+    "boards": BoardInfo[] | null;
+}
+
 export interface SourceInfo {
     "id": string;
     "name": string;
@@ -146,5 +155,6 @@ export interface StoreSnapshot {
     "natsServers": NatsServerSettings[] | null;
     "activeSource": string;
     "activeGroup": string;
+    "pinned": PinnedGroupInfo[] | null;
     "ai": AISettings;
 }

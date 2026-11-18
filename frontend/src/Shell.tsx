@@ -13,6 +13,7 @@ import {
   LogoMark,
   InfoIcon,
   MinusIcon,
+  PinIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
@@ -61,6 +62,7 @@ import {
   setSort,
   setWindowTitle,
   showAlert,
+  togglePinnedGroup,
   trashBoard,
   type BoardInfo,
   type BoardSortOrder,
@@ -70,6 +72,7 @@ import {
   type AIModel,
   type NatsServerConfig,
   type NatsServerSettings,
+  type PinnedGroupInfo,
   type SourceInfo,
   type StoreSnapshot,
 } from './ipc'
@@ -222,10 +225,10 @@ export default function Shell() {
 
   /** The switch in flight, read by click handlers without re-rendering them. */
   const switchingRef = useRef<string | null>(null)
-  const handleActivateSource = useCallback((sourceId: string, groupId: string) => {
+  const handleActivateSource = useCallback((sourceId: string, groupId: string): Promise<void> | undefined => {
     const current = snapshotRef.current
     // One switch at a time: further clicks are ignored until the boards have loaded.
-    if (!current || switchingRef.current || (current.activeSource === sourceId && current.activeGroup === groupId)) return
+    if (!current || switchingRef.current || (current.activeSource === sourceId && current.activeGroup === groupId)) return undefined
     const key = `${sourceId}\u0000${groupId}`
     switchingRef.current = key
     setSwitchingSource(key)
@@ -236,8 +239,10 @@ export default function Shell() {
     }
     // On success the switch ends when the snapshot shows the new group (the effect below), not when the
     // call returns: the two can arrive in either order, and ending early would flash the old group open.
-    activateSource(sourceId, groupId)
-      .then(() => setTimeout(finish, 2000)) // safety net if that snapshot never comes
+    return activateSource(sourceId, groupId)
+      .then(() => {
+        setTimeout(finish, 2000) // safety net if that snapshot never comes
+      })
       .catch((err: unknown) => {
         log('error', `Could not switch source: ${String(err)}`)
         finish()
@@ -409,6 +414,12 @@ export default function Shell() {
     })
   }, [snapshot, query])
 
+  /** Folders and buckets pinned open, keyed the way the tree keys a group. */
+  const pinnedByKey = useMemo(
+    () => new Map((snapshot?.pinned ?? []).map((pin) => [groupKey(pin.source, pin.group), pin])),
+    [snapshot?.pinned],
+  )
+
   const handleDrop = useCallback(async (event: React.DragEvent) => {
     event.preventDefault()
     setDropTargeted(false)
@@ -429,6 +440,11 @@ export default function Shell() {
     } catch (err) {
       log('error', `Could not copy “${boardId}” to that source: ${String(err)}`)
     }
+  }, [])
+
+  /** Pins a folder or bucket open so its boards stay beside the active group. */
+  const handleTogglePin = useCallback((sourceId: string, groupId: string) => {
+    togglePinnedGroup(sourceId, groupId).catch((err: unknown) => log('error', `Could not change the pin: ${String(err)}`))
   }, [])
 
   /** Re-lists the buckets on every configured NATS server. */
@@ -454,6 +470,78 @@ export default function Shell() {
 
   const alert = snapshot.isAlertPresented ? snapshot.alerts[0] : null
   const activeNatsSource = snapshot.activeSource.startsWith('nats:') ? snapshot.sources.find((s) => s.id === snapshot.activeSource) : undefined
+
+  /**
+   * The board list under a group: the active group's boards carry the filter and the empty states; a pinned
+   * group shows its own boards, unwatched, and opening one switches to that group first.
+   */
+  const renderBoards = (sourceId: string, groupId: string): ReactNode => {
+    if (sourceId === snapshot.activeSource && groupId === snapshot.activeGroup) {
+      if (snapshot.boards.length === 0) {
+        return (
+          <div className="tree-empty">
+            <p>
+              {activeNatsSource
+                ? `No boards yet. They’ll be stored on ${activeNatsSource.name}.`
+                : `No boards yet. They’ll be saved as .excalidraw files in ${lastPathComponent(snapshot.folder)}.`}
+            </p>
+            <button className="tree-empty-action" onClick={() => setCreating(true)}>
+              <PlusIcon /> New Board
+            </button>
+          </div>
+        )
+      }
+      if (visibleBoards.length === 0) {
+        return (
+          <div className="tree-empty">
+            <p>No results for “{query}”</p>
+          </div>
+        )
+      }
+      return visibleBoards.map(({ board, match }) => (
+        <BoardRow
+          key={board.id}
+          board={board}
+          match={match}
+          showThumbnail={snapshot.showThumbnails}
+          selected={snapshot.selection === board.id}
+          syncStatus={snapshot.selection === board.id ? sidebarSyncStatus : null}
+          now={now}
+          onSelect={() => selectBoard(board.id)}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            setContextMenu({ x: event.clientX, y: event.clientY, board })
+          }}
+        />
+      ))
+    }
+    const boards = pinnedByKey.get(groupKey(sourceId, groupId))?.boards ?? []
+    if (boards.length === 0) {
+      return (
+        <div className="tree-empty">
+          <p>No boards yet.</p>
+        </div>
+      )
+    }
+    return sortBoards(boards, snapshot.sortOrder).map((board) => (
+      <BoardRow
+        key={board.id}
+        board={board}
+        match={null}
+        showThumbnail={snapshot.showThumbnails}
+        selected={snapshot.selection === board.id}
+        syncStatus={null}
+        now={now}
+        draggable={false}
+        onSelect={() => {
+          // The board belongs to another group, so switch there before selecting it.
+          void Promise.resolve(handleActivateSource(sourceId, groupId))
+            .then(() => selectBoard(board.id))
+            .catch((err: unknown) => log('error', `Could not open “${board.name}”: ${String(err)}`))
+        }}
+      />
+    ))
+  }
 
   return (
     <div className="shell">
@@ -526,41 +614,10 @@ export default function Shell() {
                 event.preventDefault()
                 setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
               }}
-            >
-              {snapshot.boards.length === 0 ? (
-                <div className="tree-empty">
-                  <p>
-                    {activeNatsSource
-                      ? `No boards yet. They’ll be stored on ${activeNatsSource.name}.`
-                      : `No boards yet. They’ll be saved as .excalidraw files in ${lastPathComponent(snapshot.folder)}.`}
-                  </p>
-                  <button className="tree-empty-action" onClick={() => setCreating(true)}>
-                    <PlusIcon /> New Board
-                  </button>
-                </div>
-              ) : visibleBoards.length === 0 ? (
-                <div className="tree-empty">
-                  <p>No results for “{query}”</p>
-                </div>
-              ) : (
-                visibleBoards.map(({ board, match }) => (
-                  <BoardRow
-                    key={board.id}
-                    board={board}
-                    match={match}
-                    showThumbnail={snapshot.showThumbnails}
-                    selected={snapshot.selection === board.id}
-                    syncStatus={snapshot.selection === board.id ? sidebarSyncStatus : null}
-                    now={now}
-                    onSelect={() => selectBoard(board.id)}
-                    onContextMenu={(event) => {
-                      event.preventDefault()
-                      setContextMenu({ x: event.clientX, y: event.clientY, board })
-                    }}
-                  />
-                ))
-              )}
-            </SourceTree>
+              pinned={snapshot.pinned}
+              onTogglePin={handleTogglePin}
+              renderBoards={renderBoards}
+            />
           </>
         )}
       </aside>
@@ -789,6 +846,7 @@ function BoardRow({
   selected,
   syncStatus,
   now,
+  draggable = true,
   onSelect,
   onContextMenu,
 }: {
@@ -799,15 +857,18 @@ function BoardRow({
   /** Shown on the board when the canvas has no room for its sync badge. */
   syncStatus: SyncStatus | null
   now: number
+  /** Only boards of the active group can be dragged: copying reads them from there. */
+  draggable?: boolean
   onSelect: () => void
-  onContextMenu: (event: React.MouseEvent) => void
+  /** Board actions act on the active group, so a pinned group's rows have no menu. */
+  onContextMenu?: (event: React.MouseEvent) => void
 }) {
   return (
     <div
       className={`board-row${selected ? ' selected' : ''}`}
       onClick={onSelect}
       onContextMenu={onContextMenu}
-      draggable
+      draggable={draggable}
       onDragStart={(event) => {
         event.dataTransfer.setData('text/plain', board.id)
         event.dataTransfer.effectAllowed = 'copy'
@@ -851,8 +912,9 @@ const groupKey = (sourceId: string, groupId: string) => `${sourceId}\u0000${grou
 
 /**
  * The navigation tree. Sources (this computer, each NATS server) are headings; under each, its folders or
- * buckets are accordions. Only the active one holds boards (the backend loads one group at a time), so it
- * is the one that opens, its boards nested beneath it; opening another group switches to it.
+ * buckets are accordions. The active group opens with its boards nested beneath it; opening another group
+ * switches to it. A group pinned open also lists its boards, so several stay in view at once, each pinned
+ * one from the backend (the active group is the only one the backend fully loads).
  *
  * A switch is shown at once: the clicked group takes the highlight and opens with a spinner, and its boards
  * appear as soon as the backend reports them (the previous group's boards are never shown under it).
@@ -876,7 +938,9 @@ function SourceTree({
   onNewBucket,
   onSourceMenu,
   onBucketMenu,
-  children,
+  pinned,
+  onTogglePin,
+  renderBoards,
 }: {
   sources: SourceInfo[]
   activeSource: string
@@ -898,12 +962,18 @@ function SourceTree({
   onNewBucket: (source: SourceInfo) => void
   onSourceMenu: (event: React.MouseEvent, source: SourceInfo) => void
   onBucketMenu: (event: React.MouseEvent, source: SourceInfo, group: GroupInfo) => void
-  /** The active group's boards. */
-  children: React.ReactNode
+  /** Folders and buckets pinned open, with their boards. */
+  pinned: PinnedGroupInfo[]
+  onTogglePin: (sourceId: string, groupId: string) => void
+  /** The boards of a group: filtered for the active one, plain for a pinned one. */
+  renderBoards: (sourceId: string, groupId: string) => React.ReactNode
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
   /** The active group, if the user folded it away. Any other group is closed because it isn't loaded. */
   const [foldedGroup, setFoldedGroup] = useState<string | null>(null)
+  /** Pinned groups the user folded away; they stay pinned but list no boards. */
+  const [foldedPins, setFoldedPins] = useState<string[]>([])
+  const pinnedKeys = useMemo(() => new Set(pinned.map((pin) => groupKey(pin.source, pin.group))), [pinned])
   const loadedKey = groupKey(activeSource, activeGroup)
   /** The group the user is on: the one being switched to, else the loaded one. */
   const currentKey = switchingSource ?? loadedKey
@@ -918,9 +988,15 @@ function SourceTree({
     const key = groupKey(source.id, group.id)
     const current = key === currentKey
     const loading = current && key !== loadedKey
-    const open = current && !loading && foldedGroup !== key
+    const isPinned = pinnedKeys.has(key)
+    const pinnedOpen = !current && isPinned
+    // The active group opens unless folded; a pinned one opens unless it was folded on its own.
+    const open = current ? !loading && foldedGroup !== key : pinnedOpen && !foldedPins.includes(key)
     return (
-      <div key={key} className={`tree-group${current ? ' active' : ''}${dragOver === key ? ' drag-over' : ''}`}>
+      <div
+        key={key}
+        className={`tree-group${current ? ' active' : ''}${pinnedOpen ? ' pinned' : ''}${dragOver === key ? ' drag-over' : ''}`}
+      >
         {/* The header is the group's handle: drop a board on it to copy it here; right-click for options. */}
         <div
           className="tree-group-row"
@@ -952,11 +1028,13 @@ function SourceTree({
             aria-current={current ? 'true' : undefined}
             aria-busy={loading}
             onClick={() => {
-              if (!current) {
+              if (current) {
+                if (!loading) setFoldedGroup((value) => (value === key ? null : key))
+              } else if (isPinned) {
+                setFoldedPins((value) => (value.includes(key) ? value.filter((folded) => folded !== key) : [...value, key]))
+              } else {
                 setFoldedGroup(null)
                 onActivateSource(source.id, group.id)
-              } else if (!loading) {
-                setFoldedGroup((value) => (value === key ? null : key))
               }
             }}
           >
@@ -966,56 +1044,67 @@ function SourceTree({
           {loading ? (
             <span className="tree-spinner" role="status" aria-label="Loading boards" />
           ) : (
-            current && (
-              <span className="row-actions">
+            <span className="row-actions">
+              {current && (
                 <button className="icon-button row-action" onClick={onNewBoard} title="New Board (⌘N)" aria-label={`New Board in ${label}`}>
                   <PlusIcon />
                 </button>
-              </span>
-            )
+              )}
+              <button
+                className={`icon-button row-action pin${isPinned ? ' on' : ''}`}
+                onClick={() => onTogglePin(source.id, group.id)}
+                title={isPinned ? 'Unpin this group' : 'Pin this group open'}
+                aria-label={isPinned ? `Unpin ${label}` : `Pin ${label} open`}
+                aria-pressed={isPinned}
+              >
+                <PinIcon />
+              </button>
+            </span>
           )}
         </div>
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
-            <div className="tree-tools">
-              <div className="tree-find">
-                <SearchIcon className="tree-find-icon" aria-hidden="true" />
-                <input
-                  type="search"
-                  value={query}
-                  placeholder="Find board"
-                  aria-label={`Find a board in ${label}`}
-                  onChange={(event) => onQueryChange(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') onQueryChange('')
-                  }}
-                />
-                {query !== '' && (
-                  <button
-                    type="button"
-                    className="tree-find-clear"
-                    title="Clear"
-                    aria-label="Clear the filter"
-                    onClick={(event) => {
-                      onQueryChange('')
-                      // Keep typing in the field, not on the button that just emptied it.
-                      event.currentTarget.parentElement?.querySelector('input')?.focus()
+            {current && (
+              <div className="tree-tools">
+                <div className="tree-find">
+                  <SearchIcon className="tree-find-icon" aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={query}
+                    placeholder="Find board"
+                    aria-label={`Find a board in ${label}`}
+                    onChange={(event) => onQueryChange(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') onQueryChange('')
                     }}
-                  >
-                    <CloseIcon />
-                  </button>
-                )}
+                  />
+                  {query !== '' && (
+                    <button
+                      type="button"
+                      className="tree-find-clear"
+                      title="Clear"
+                      aria-label="Clear the filter"
+                      onClick={(event) => {
+                        onQueryChange('')
+                        // Keep typing in the field, not on the button that just emptied it.
+                        event.currentTarget.parentElement?.querySelector('input')?.focus()
+                      }}
+                    >
+                      <CloseIcon />
+                    </button>
+                  )}
+                </div>
+                <button
+                  className="tree-sort"
+                  title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
+                  aria-label={sortOrder === 'name' ? 'Sort by date edited' : 'Sort by name'}
+                  onClick={onToggleSort}
+                >
+                  {sortOrder === 'name' ? 'A–Z' : 'Newest'}
+                </button>
               </div>
-              <button
-                className="tree-sort"
-                title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
-                aria-label={sortOrder === 'name' ? 'Sort by date edited' : 'Sort by name'}
-                onClick={onToggleSort}
-              >
-                {sortOrder === 'name' ? 'A–Z' : 'Newest'}
-              </button>
-            </div>
-            {children}
+            )}
+            {renderBoards(source.id, group.id)}
           </div>
         )}
       </div>
