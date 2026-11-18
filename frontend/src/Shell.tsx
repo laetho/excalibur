@@ -1144,20 +1144,21 @@ function SourceTree({
               >
                 <SearchIcon />
               </button>
+              <button
+                className={`icon-button row-action pin${isPinned ? ' on' : ''}`}
+                onClick={() => onTogglePin(source.id, group.id)}
+                title={isPinned ? 'Stop keeping this group open' : 'Keep this group open'}
+                aria-label={isPinned ? `Stop keeping ${label} open` : `Keep ${label} open`}
+                aria-pressed={isPinned}
+              >
+                <PinIcon />
+              </button>
+              {/* The + closes the row: the one control every container has sits furthest right. */}
               {current && (
                 <button className="icon-button row-action" onClick={onNewBoard} title="New Board (⌘N)" aria-label={`New Board in ${label}`}>
                   <PlusIcon />
                 </button>
               )}
-              <button
-                className={`icon-button row-action pin${isPinned ? ' on' : ''}`}
-                onClick={() => onTogglePin(source.id, group.id)}
-                title={isPinned ? 'Unpin this group' : 'Pin this group open'}
-                aria-label={isPinned ? `Unpin ${label}` : `Pin ${label} open`}
-                aria-pressed={isPinned}
-              >
-                <PinIcon />
-              </button>
             </span>
           )}
         </div>
