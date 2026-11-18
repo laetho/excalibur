@@ -516,6 +516,8 @@ func TestNormalizeFolderPath(t *testing.T) {
 		{"/tmp/boards/../boards", "/tmp/boards"},
 		{"~", home},
 		{"~/boards", filepath.Join(home, "boards")},
+		{"file:///tmp/boards", "/tmp/boards"},
+		{"file:///tmp/My%20Boards", "/tmp/My Boards"},
 	}
 	for _, c := range ok {
 		got, err := normalizeFolderPath(c.in)

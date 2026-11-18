@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -532,6 +533,15 @@ func normalizeFolderPath(path string) (string, error) {
 	path = strings.Trim(strings.TrimSpace(path), `"'`)
 	if path == "" {
 		return "", errors.New("enter a folder path")
+	}
+	// File managers copy locations as file:// URIs.
+	if strings.HasPrefix(path, "file://") {
+		raw := strings.TrimPrefix(path, "file://")
+		if decoded, err := url.PathUnescape(raw); err == nil {
+			path = decoded
+		} else {
+			path = raw
+		}
 	}
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
