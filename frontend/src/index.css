@@ -553,16 +553,17 @@ select,
   font-weight: 500;
 }
 
-/* A pinned group keeps its boards in the tree beside the active group; the pin
- * carries the accent so a fold never loses it. */
-.tree-group .row-action.pin.on {
-  color: var(--accent);
+/* The container row's icons stay grey until their toggle is on: a pin that is
+ * set, or a search that is hidden or filtering, reads white instead. */
+.tree-group .row-action {
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 
-/* The search toggle sits with the pin. It stays quiet unless a filter is
- * hiding boards, when the accent says the list is not showing everything. */
-.tree-group .row-action.find.filtered {
-  color: var(--accent);
+.tree-group .row-action:hover,
+.tree-group .row-action.on {
+  color: var(--text);
+  opacity: 1;
 }
 
 .tree-group.pinned .tree-group-name {

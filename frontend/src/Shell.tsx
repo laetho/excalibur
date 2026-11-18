@@ -1075,6 +1075,9 @@ function SourceTree({
     const pinnedOpen = !current && isPinned
     const filter = queries[key] ?? ''
     const showFind = findOpen[key] ?? true
+    // The search icon lights up whenever the box is not in its default state:
+    // hidden, or holding a filter that is narrowing the list.
+    const searchLit = !showFind || filter !== ''
     const isFolded = folded[key] ?? false
     // The active group opens unless folded; a pinned one opens unless it was folded on its own.
     const open = (current ? !loading : pinnedOpen) && !isFolded
@@ -1133,7 +1136,7 @@ function SourceTree({
           ) : (
             <span className="row-actions">
               <button
-                className={`icon-button row-action find${filter !== '' ? ' filtered' : ''}`}
+                className={`icon-button row-action find${searchLit ? ' on' : ''}`}
                 onClick={() => onToggleFind(source.id, group.id)}
                 title={showFind ? 'Hide board search' : 'Search boards'}
                 aria-label={showFind ? `Hide search in ${label}` : `Search boards in ${label}`}
