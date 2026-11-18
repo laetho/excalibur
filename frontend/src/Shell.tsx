@@ -401,14 +401,11 @@ export default function Shell() {
     }
   }, [title])
 
-  const activeKey = snapshot ? groupKey(snapshot.activeSource, snapshot.activeGroup) : ''
-  // Typing lands in the active container's entry; the others keep what they had.
-  const search = queries[activeKey] ?? ''
-  const setSearch = useCallback(
-    (value: string) => setQueries((previous) => ({ ...previous, [activeKey]: value })),
-    [activeKey],
-  )
-  const query = search.trim()
+  // Every open list keeps its own filter: the active group's and each pinned one's.
+  const setQuery = useCallback((sourceId: string, groupId: string, value: string) => {
+    setQueries((previous) => ({ ...previous, [groupKey(sourceId, groupId)]: value }))
+  }, [])
+  const query = (queries[snapshot ? groupKey(snapshot.activeSource, snapshot.activeGroup) : ''] ?? '').trim()
   const visibleBoards = useMemo(() => {
     const sorted = snapshot ? sortBoards(snapshot.boards, snapshot.sortOrder) : []
     if (!query) return sorted.map((board) => ({ board, match: null as Match | null }))
@@ -520,18 +517,27 @@ export default function Shell() {
       ))
     }
     const boards = pinnedByKey.get(groupKey(sourceId, groupId))?.boards ?? []
-    if (boards.length === 0) {
+    const term = (queries[groupKey(sourceId, groupId)] ?? '').trim()
+    // Pinned boards come without text, so their filter matches names only.
+    const sorted = sortBoards(boards, snapshot.sortOrder)
+    const shown: { board: BoardInfo; match: Match | null }[] = term
+      ? sorted.flatMap((board) => {
+          const match = searchMatch(board, term)
+          return match ? [{ board, match }] : []
+        })
+      : sorted.map((board) => ({ board, match: null }))
+    if (shown.length === 0) {
       return (
         <div className="tree-empty">
-          <p>No boards yet.</p>
+          <p>{term ? `No results for “${term}”` : 'No boards yet.'}</p>
         </div>
       )
     }
-    return sortBoards(boards, snapshot.sortOrder).map((board) => (
+    return shown.map(({ board, match }) => (
       <BoardRow
         key={board.id}
         board={board}
-        match={null}
+        match={match}
         showThumbnail={snapshot.showThumbnails}
         selected={snapshot.selection === board.id}
         syncStatus={null}
@@ -596,8 +602,8 @@ export default function Shell() {
               activeGroup={snapshot.activeGroup}
               switchingSource={switchingSource}
               refreshing={refreshingSources}
-              query={search}
-              onQueryChange={setSearch}
+              queries={queries}
+              onQueryChange={setQuery}
               sortOrder={snapshot.sortOrder}
               onToggleSort={() => setSort(snapshot.sortOrder === 'name' ? 'dateEdited' : 'name')}
               onRefresh={handleRefreshSources}
@@ -929,7 +935,7 @@ function SourceTree({
   activeGroup,
   switchingSource,
   refreshing,
-  query,
+  queries,
   onQueryChange,
   sortOrder,
   onToggleSort,
@@ -952,9 +958,9 @@ function SourceTree({
   /** Group key being switched to, while its boards load. */
   switchingSource: string | null
   refreshing: boolean
-  /** The filter for the open group's boards. */
-  query: string
-  onQueryChange: (query: string) => void
+  /** The find filter per group, keyed like the tree keys a group. */
+  queries: Record<string, string>
+  onQueryChange: (sourceId: string, groupId: string, value: string) => void
   sortOrder: BoardSortOrder
   onToggleSort: () => void
   onRefresh: () => void
@@ -994,6 +1000,7 @@ function SourceTree({
     const loading = current && key !== loadedKey
     const isPinned = pinnedKeys.has(key)
     const pinnedOpen = !current && isPinned
+    const filter = queries[key] ?? ''
     // The active group opens unless folded; a pinned one opens unless it was folded on its own.
     const open = current ? !loading && foldedGroup !== key : pinnedOpen && !foldedPins.includes(key)
     return (
@@ -1068,46 +1075,44 @@ function SourceTree({
         </div>
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
-            {current && (
-              <div className="tree-tools">
-                <div className="tree-find">
-                  <SearchIcon className="tree-find-icon" aria-hidden="true" />
-                  <input
-                    type="search"
-                    value={query}
-                    placeholder="Find board"
-                    aria-label={`Find a board in ${label}`}
-                    onChange={(event) => onQueryChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') onQueryChange('')
+            <div className="tree-tools">
+              <div className="tree-find">
+                <SearchIcon className="tree-find-icon" aria-hidden="true" />
+                <input
+                  type="search"
+                  value={filter}
+                  placeholder="Find board"
+                  aria-label={`Find a board in ${label}`}
+                  onChange={(event) => onQueryChange(source.id, group.id, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') onQueryChange(source.id, group.id, '')
+                  }}
+                />
+                {filter !== '' && (
+                  <button
+                    type="button"
+                    className="tree-find-clear"
+                    title="Clear"
+                    aria-label="Clear the filter"
+                    onClick={(event) => {
+                      onQueryChange(source.id, group.id, '')
+                      // Keep typing in the field, not on the button that just emptied it.
+                      event.currentTarget.parentElement?.querySelector('input')?.focus()
                     }}
-                  />
-                  {query !== '' && (
-                    <button
-                      type="button"
-                      className="tree-find-clear"
-                      title="Clear"
-                      aria-label="Clear the filter"
-                      onClick={(event) => {
-                        onQueryChange('')
-                        // Keep typing in the field, not on the button that just emptied it.
-                        event.currentTarget.parentElement?.querySelector('input')?.focus()
-                      }}
-                    >
-                      <CloseIcon />
-                    </button>
-                  )}
-                </div>
-                <button
-                  className="tree-sort"
-                  title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
-                  aria-label={sortOrder === 'name' ? 'Sort by date edited' : 'Sort by name'}
-                  onClick={onToggleSort}
-                >
-                  {sortOrder === 'name' ? 'A–Z' : 'Newest'}
-                </button>
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
               </div>
-            )}
+              <button
+                className="tree-sort"
+                title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
+                aria-label={sortOrder === 'name' ? 'Sort by date edited' : 'Sort by name'}
+                onClick={onToggleSort}
+              >
+                {sortOrder === 'name' ? 'A–Z' : 'Newest'}
+              </button>
+            </div>
             {renderBoards(source.id, group.id)}
           </div>
         )}
