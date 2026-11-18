@@ -140,11 +140,13 @@ export function ChevronDownIcon(props: IconProps) {
 }
 
 /** A pushpin: pins a folder or bucket open in the sidebar. */
-export function PinIcon(props: IconProps) {
+/** A panel whose top is pushed open: the container stays expanded in the tree. */
+export function ExpandIcon(props: IconProps) {
   return (
-    <Icon data-icon="pin" {...props}>
-      <path d="M12 17v5" />
-      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    <Icon data-icon="expand" {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M3 9h18" />
+      <path d="m15 14-3-3-3 3" />
     </Icon>
   )
 }

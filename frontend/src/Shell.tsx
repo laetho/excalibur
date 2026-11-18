@@ -13,7 +13,7 @@ import {
   LogoMark,
   InfoIcon,
   MinusIcon,
-  PinIcon,
+  ExpandIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
@@ -508,7 +508,7 @@ export default function Shell() {
 
   /** Pins a folder or bucket open so its boards stay beside the active group. */
   const handleTogglePin = useCallback((sourceId: string, groupId: string) => {
-    togglePinnedGroup(sourceId, groupId).catch((err: unknown) => log('error', `Could not change the pin: ${String(err)}`))
+    togglePinnedGroup(sourceId, groupId).catch((err: unknown) => log('error', `Could not change the group's expansion: ${String(err)}`))
   }, [])
 
   /** Re-lists the buckets on every configured NATS server. */
@@ -1122,7 +1122,7 @@ function SourceTree({
               } else if (isPinned) {
                 onToggleFolded(source.id, group.id)
               } else {
-                // Activating a group opens it, even if it was folded as a pin.
+                // Activating a group opens it, even if it was folded while kept expanded.
                 if (isFolded) onToggleFolded(source.id, group.id)
                 onActivateSource(source.id, group.id)
               }
@@ -1146,12 +1146,16 @@ function SourceTree({
               </button>
               <button
                 className={`icon-button row-action pin${isPinned ? ' on' : ''}`}
-                onClick={() => onTogglePin(source.id, group.id)}
-                title={isPinned ? 'Stop keeping this group open' : 'Keep this group open'}
-                aria-label={isPinned ? `Stop keeping ${label} open` : `Keep ${label} open`}
+                onClick={() => {
+                  onTogglePin(source.id, group.id)
+                  // "Keep expanded" means expanded now too, not just next time.
+                  if (!isPinned && isFolded) onToggleFolded(source.id, group.id)
+                }}
+                title={isPinned ? 'Collapse this group when another is active' : 'Keep this group expanded'}
+                aria-label={isPinned ? `Let ${label} collapse when inactive` : `Keep ${label} expanded`}
                 aria-pressed={isPinned}
               >
-                <PinIcon />
+                <ExpandIcon />
               </button>
               {/* The + closes the row: the one control every container has sits furthest right. */}
               {current && (
