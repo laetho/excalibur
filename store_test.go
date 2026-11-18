@@ -504,6 +504,35 @@ func TestServiceShutdownDoesNotWaitForDestroyedRenderer(t *testing.T) {
 	}
 }
 
+func TestNormalizeFolderPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := []struct{ in, want string }{
+		{"/tmp/boards", "/tmp/boards"},
+		{"  /tmp/boards  ", "/tmp/boards"},
+		{`"/tmp/boards"`, "/tmp/boards"},
+		{"/tmp/boards/../boards", "/tmp/boards"},
+		{"~", home},
+		{"~/boards", filepath.Join(home, "boards")},
+	}
+	for _, c := range ok {
+		got, err := normalizeFolderPath(c.in)
+		if err != nil {
+			t.Fatalf("normalizeFolderPath(%q) = %v", c.in, err)
+		}
+		if got != c.want {
+			t.Fatalf("normalizeFolderPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	for _, in := range []string{"", "   ", `""`, "boards", "./boards"} {
+		if _, err := normalizeFolderPath(in); err == nil {
+			t.Fatalf("normalizeFolderPath(%q) accepted a relative or empty path", in)
+		}
+	}
+}
+
 // resolveTestNATS starts a throwaway JetStream server when url is "spawn".
 func resolveTestNATS(t *testing.T, url string) string {
 	t.Helper()

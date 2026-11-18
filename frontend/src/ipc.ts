@@ -113,6 +113,8 @@ export const importPaths = (paths: string[]) => app().ImportPaths(paths)
 export const importBoardData = (name: string, json: string) => app().ImportBoardData(name, json)
 export const chooseImport = () => app().ChooseImport()
 export const addLocalFolder = () => app().AddLocalFolder()
+/** Adds a boards folder by path, for desktops whose picker cannot select a directory. */
+export const addLocalFolderPath = (path: string) => app().AddLocalFolderPath(path)
 export const removeLocalFolder = (folder: string) => app().RemoveLocalFolder(folder)
 export const reveal = (id: string | null) => app().Reveal(id)
 /** Opens the boards folder in the file manager (Settings → Show in Finder). */

@@ -512,11 +512,47 @@ func (a *App) AddLocalFolder() error {
 	if err != nil || folder == "" {
 		return err
 	}
+	return a.addLocalFolderAt(folder)
+}
+
+// AddLocalFolderPath adds a boards folder from a typed path, for power users and
+// for desktops whose native picker cannot select a directory. A leading ~ is
+// expanded, surrounding quotes are ignored, and a missing folder is created.
+func (a *App) AddLocalFolderPath(path string) error {
+	folder, err := normalizeFolderPath(path)
+	if err != nil {
+		return err
+	}
+	return a.addLocalFolderAt(folder)
+}
+
+// normalizeFolderPath turns a typed folder location into a clean absolute path.
+// Quotes pasted from a file manager are ignored and ~ expands to the home folder.
+func normalizeFolderPath(path string) (string, error) {
+	path = strings.Trim(strings.TrimSpace(path), `"'`)
+	if path == "" {
+		return "", errors.New("enter a folder path")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(path, "~"), "/"))
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("use an absolute path, for example /home/you/boards")
+	}
+	return filepath.Clean(path), nil
+}
+
+// addLocalFolderAt adds and activates a boards folder, then starts watching it.
+func (a *App) addLocalFolderAt(folder string) error {
 	if err := a.savePending(); err != nil {
 		return err
 	}
 	a.mu.Lock()
-	if err = a.store.addLocalFolder(folder); err != nil {
+	if err := a.store.addLocalFolder(folder); err != nil {
 		a.mu.Unlock()
 		return err
 	}

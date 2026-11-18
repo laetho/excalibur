@@ -26,6 +26,7 @@ import {
   addNatsServer,
   aiChat,
   addLocalFolder,
+  addLocalFolderPath,
   chooseImport,
   chooseNatsCredentialsFile,
   copyBoardToSource,
@@ -2278,6 +2279,16 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
   // The folders the sidebar shows under Local. Group ids are full paths; names are shortened with ~.
   const folders = snapshot.sources.find((source) => source.kind === 'local')?.groups ?? []
   const report = (action: string) => (err: unknown) => log('error', `Could not ${action}: ${String(err)}`)
+  // Power users, and desktops whose native picker cannot select a directory, can
+  // type the location instead of using the dialog.
+  const [folderPath, setFolderPath] = useState<string | null>(null)
+  const addTypedFolder = () => {
+    const value = folderPath?.trim() ?? ''
+    if (!value) return
+    addLocalFolderPath(value)
+      .then(() => setFolderPath(null))
+      .catch(report('add the folder'))
+  }
   return (
     <>
       <div className="settings-group">
@@ -2336,7 +2347,37 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
             <button className="secondary" onClick={() => addLocalFolder().catch(report('add the folder'))}>
               Add Folder
             </button>
+            <button
+              className="secondary"
+              title="Type the folder location instead of using the file picker."
+              onClick={() => setFolderPath(folderPath === null ? '' : null)}
+            >
+              {folderPath === null ? 'Add by Path…' : 'Cancel'}
+            </button>
           </div>
+          {folderPath !== null && (
+            <form
+              className="settings-pane-actions"
+              onSubmit={(event) => {
+                event.preventDefault()
+                addTypedFolder()
+              }}
+            >
+              <input
+                value={folderPath}
+                autoFocus
+                placeholder="/home/you/boards"
+                aria-label="Boards folder path"
+                onChange={(event) => setFolderPath(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setFolderPath(null)
+                }}
+              />
+              <button type="submit" className="secondary">
+                Add
+              </button>
+            </form>
+          )}
         </SettingsField>
       </div>
       {IS_MAC && (

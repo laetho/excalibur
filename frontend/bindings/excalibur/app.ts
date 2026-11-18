@@ -33,6 +33,15 @@ export function AddLocalFolder(): $CancellablePromise<void> {
     return $Call.ByID(3691058851);
 }
 
+/**
+ * AddLocalFolderPath adds a boards folder from a typed path, for power users and
+ * for desktops whose native picker cannot select a directory. A leading ~ is
+ * expanded, surrounding quotes are ignored, and a missing folder is created.
+ */
+export function AddLocalFolderPath(path: string): $CancellablePromise<void> {
+    return $Call.ByID(977972004, path);
+}
+
 export function AddNatsServer(config: $models.NatsServerConfig): $CancellablePromise<void> {
     return $Call.ByID(734037083, config);
 }
