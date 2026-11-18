@@ -15,6 +15,8 @@ export type {
     BoardInfo,
     CollabJoinResult,
     GroupInfo,
+    GroupState,
+    GroupStatePatch,
     NatsServerConfig,
     NatsServerSettings,
     Notice,

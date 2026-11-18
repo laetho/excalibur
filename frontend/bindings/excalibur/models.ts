@@ -86,6 +86,30 @@ export interface GroupInfo {
     "kind": string;
 }
 
+/**
+ * GroupState is how one folder or bucket looked in the sidebar: whether its
+ * find box is showing, what is typed in it, and whether the list is folded.
+ * The default (find box open, list expanded, no filter) is not stored.
+ */
+export interface GroupState {
+    "source": string;
+    "group": string;
+    "query"?: string;
+    "find": boolean;
+    "folded": boolean;
+}
+
+/**
+ * GroupStatePatch changes part of a GroupState; nil fields are left as they are.
+ */
+export interface GroupStatePatch {
+    "source": string;
+    "group": string;
+    "query"?: string | null;
+    "find"?: boolean | null;
+    "folded"?: boolean | null;
+}
+
 export interface NatsServerConfig {
     "id": string;
     "name": string;
@@ -156,5 +180,6 @@ export interface StoreSnapshot {
     "activeSource": string;
     "activeGroup": string;
     "pinned": PinnedGroupInfo[] | null;
+    "tree": GroupState[] | null;
     "ai": AISettings;
 }

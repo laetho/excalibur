@@ -675,6 +675,18 @@ func (a *App) TogglePinnedGroup(sourceID, groupID string) error {
 	return nil
 }
 
+// SetGroupState remembers how a folder or bucket looks in the sidebar: whether
+// its find box is open, what is typed in it, and whether its list is folded.
+func (a *App) SetGroupState(patch GroupStatePatch) error {
+	if strings.TrimSpace(patch.Source) == "" || strings.TrimSpace(patch.Group) == "" {
+		return errors.New("a group state needs a source and a group")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store.applyGroupState(patch)
+	return nil
+}
+
 func (a *App) SetShowThumbnails(show bool) {
 	a.mu.Lock()
 	a.store.prefs.ShowThumbnails = &show

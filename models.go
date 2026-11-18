@@ -101,6 +101,7 @@ type Preferences struct {
 	ActiveSource     string              `json:"activeSource,omitempty"`
 	ActiveGroup      string              `json:"activeGroup,omitempty"`
 	Pinned           []PinnedGroup       `json:"pinned,omitempty"`
+	Tree             []GroupState        `json:"tree,omitempty"`
 	AI               AIConfig            `json:"ai"`
 }
 
@@ -115,6 +116,26 @@ type PinnedGroupInfo struct {
 	Source string      `json:"source"`
 	Group  string      `json:"group"`
 	Boards []BoardInfo `json:"boards"`
+}
+
+// GroupState is how one folder or bucket looked in the sidebar: whether its
+// find box is showing, what is typed in it, and whether the list is folded.
+// The default (find box open, list expanded, no filter) is not stored.
+type GroupState struct {
+	Source string `json:"source"`
+	Group  string `json:"group"`
+	Query  string `json:"query,omitempty"`
+	Find   bool   `json:"find"`
+	Folded bool   `json:"folded"`
+}
+
+// GroupStatePatch changes part of a GroupState; nil fields are left as they are.
+type GroupStatePatch struct {
+	Source string  `json:"source"`
+	Group  string  `json:"group"`
+	Query  *string `json:"query,omitempty"`
+	Find   *bool   `json:"find,omitempty"`
+	Folded *bool   `json:"folded,omitempty"`
 }
 
 type Board struct {
@@ -194,6 +215,7 @@ type StoreSnapshot struct {
 	ActiveSource     string               `json:"activeSource"`
 	ActiveGroup      string               `json:"activeGroup"`
 	Pinned           []PinnedGroupInfo    `json:"pinned"`
+	Tree             []GroupState         `json:"tree"`
 	AI               AISettings           `json:"ai"`
 }
 

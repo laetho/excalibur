@@ -319,6 +319,14 @@ export function SetCollaborationNickname(nickname: string): $CancellablePromise<
     return $Call.ByID(3675270744, nickname);
 }
 
+/**
+ * SetGroupState remembers how a folder or bucket looks in the sidebar: whether
+ * its find box is open, what is typed in it, and whether its list is folded.
+ */
+export function SetGroupState(patch: $models.GroupStatePatch): $CancellablePromise<void> {
+    return $Call.ByID(676065207, patch);
+}
+
 export function SetShowThumbnails(show: boolean): $CancellablePromise<void> {
     return $Call.ByID(116219407, show);
 }

@@ -202,6 +202,48 @@ func TestMultipleLocalFolders(t *testing.T) {
 	}
 }
 
+func TestGroupStateRememberedPerFolderAndDroppedAtDefaults(t *testing.T) {
+	store := testStore(t)
+	folder := store.activeGroup
+	// An untouched group shows its find box and an expanded list.
+	if state := store.groupState(localSourceID, folder); !state.Find || state.Folded || state.Query != "" {
+		t.Fatalf("default group state = %+v", state)
+	}
+
+	query, hidden := "planning", false
+	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &query, Find: &hidden})
+	if len(store.prefs.Tree) != 1 {
+		t.Fatalf("group state not stored: %+v", store.prefs.Tree)
+	}
+	if state := store.groupState(localSourceID, folder); state.Query != "planning" || state.Find {
+		t.Fatalf("stored group state = %+v", state)
+	}
+	// The snapshot carries it, so a restarted window can restore the tree.
+	if tree := store.snapshot().Tree; len(tree) != 1 || tree[0].Query != "planning" {
+		t.Fatalf("snapshot tree = %+v", tree)
+	}
+
+	// Back to the default: the entry goes, so untouched groups cannot pile up.
+	empty, shown := "", true
+	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &empty, Find: &shown})
+	if len(store.prefs.Tree) != 0 {
+		t.Fatalf("default group state kept: %+v", store.prefs.Tree)
+	}
+
+	// A fold alone is worth remembering.
+	folded := true
+	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Folded: &folded})
+	if len(store.prefs.Tree) != 1 || !store.groupState(localSourceID, folder).Folded {
+		t.Fatalf("fold not stored: %+v", store.prefs.Tree)
+	}
+
+	// Removing the folder forgets it.
+	store.forgetGroup(localSourceID, folder)
+	if len(store.prefs.Tree) != 0 {
+		t.Fatalf("forgotten group kept: %+v", store.prefs.Tree)
+	}
+}
+
 func TestPinnedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
 	store := testStore(t)
 	if err := store.createBoard("Pinned"); err != nil {

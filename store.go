@@ -894,6 +894,55 @@ func (s *Store) unpinGroup(sourceID, group string) {
 	}
 }
 
+// groupState is how a folder or bucket looks in the tree. A group the user has
+// never touched shows its find box and an expanded list.
+func (s *Store) groupState(sourceID, group string) GroupState {
+	for _, state := range s.prefs.Tree {
+		if state.Source == sourceID && state.Group == group {
+			return state
+		}
+	}
+	return GroupState{Source: sourceID, Group: group, Find: true}
+}
+
+// applyGroupState stores a change to a folder or bucket's tree state, and drops
+// the entry once it is back to the default so old groups do not build up.
+func (s *Store) applyGroupState(patch GroupStatePatch) {
+	state := s.groupState(patch.Source, patch.Group)
+	if patch.Query != nil {
+		state.Query = *patch.Query
+	}
+	if patch.Find != nil {
+		state.Find = *patch.Find
+	}
+	if patch.Folded != nil {
+		state.Folded = *patch.Folded
+	}
+	state.Source, state.Group = patch.Source, patch.Group
+	tree := make([]GroupState, 0, len(s.prefs.Tree)+1)
+	for _, existing := range s.prefs.Tree {
+		if existing.Source == patch.Source && existing.Group == patch.Group {
+			continue
+		}
+		tree = append(tree, existing)
+	}
+	if state.Query != "" || !state.Find || state.Folded {
+		tree = append(tree, state)
+	}
+	s.prefs.Tree = tree
+	s.savePrefs()
+}
+
+// forgetGroup drops the tree state of a folder or bucket that is gone.
+func (s *Store) forgetGroup(sourceID, group string) {
+	for i, state := range s.prefs.Tree {
+		if state.Source == sourceID && state.Group == group {
+			s.prefs.Tree = slices.Delete(s.prefs.Tree, i, i+1)
+			return
+		}
+	}
+}
+
 func (s *Store) snapshot() StoreSnapshot {
 	boards := make([]BoardInfo, 0, len(s.boards))
 	for _, board := range s.boards {
@@ -939,7 +988,7 @@ func (s *Store) snapshot() StoreSnapshot {
 		folder = displayPath(s.activeGroup)
 	}
 	ai := AISettings{Enabled: s.prefs.AI.Enabled, BaseURL: s.prefs.AI.BaseURL, Model: s.prefs.AI.Model, HasAPIKey: s.prefs.AI.APIKey != ""}
-	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, Pinned: pinned, AI: ai}
+	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, Pinned: pinned, Tree: append([]GroupState(nil), s.prefs.Tree...), AI: ai}
 }
 
 func displayPath(path string) string {

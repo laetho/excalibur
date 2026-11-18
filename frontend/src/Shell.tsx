@@ -59,6 +59,7 @@ import {
   setCollaborationAppearance,
   setAISettings,
   setShowThumbnails,
+  setGroupState,
   setSort,
   setWindowTitle,
   showAlert,
@@ -179,6 +180,14 @@ export default function Shell() {
   const [snapshot, setSnapshot] = useState<StoreSnapshot | null>(null)
   /** The find filter per folder or bucket, so each group returns to its own search. */
   const [queries, setQueries] = useState<Record<string, string>>({})
+  /** Whether a group's find box is showing; hidden keeps the tree quiet when not searching. */
+  const [findOpen, setFindOpen] = useState<Record<string, boolean>>({})
+  /** Groups whose board list is folded away, pinned or active. */
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
+  /** Groups already seeded from the saved state, so typing is never overwritten. */
+  const seededGroups = useRef(new Set<string>())
+  /** Pending writes of a filter, one per group, so a keystroke does not save the whole tree. */
+  const queryTimers = useRef<Record<string, number>>({})
   /** Refreshed every 30 s so "Edited … ago" stays current. */
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [creating, setCreating] = useState(false)
@@ -401,10 +410,64 @@ export default function Shell() {
     }
   }, [title])
 
+  // The saved tree state arrives with the snapshot. Seed each group once, so a
+  // later snapshot refresh never overwrites a filter that is being typed.
+  useEffect(() => {
+    for (const state of snapshot?.tree ?? []) {
+      const key = groupKey(state.source, state.group)
+      if (seededGroups.current.has(key)) continue
+      seededGroups.current.add(key)
+      setQueries((previous) => (key in previous ? previous : { ...previous, [key]: state.query ?? '' }))
+      setFindOpen((previous) => (key in previous ? previous : { ...previous, [key]: state.find }))
+      setFolded((previous) => (key in previous ? previous : { ...previous, [key]: state.folded }))
+    }
+  }, [snapshot?.tree])
+
+  /** Remember a group's tree state; a failure costs the memory, never the UI. */
+  const saveGroupState = useCallback(
+    (sourceId: string, groupId: string, patch: { query?: string; find?: boolean; folded?: boolean }) => {
+      setGroupState({ source: sourceId, group: groupId, ...patch }).catch((error) =>
+        log('error', `Could not save the tree state: ${String(error)}`),
+      )
+    },
+    [],
+  )
+
   // Every open list keeps its own filter: the active group's and each pinned one's.
-  const setQuery = useCallback((sourceId: string, groupId: string, value: string) => {
-    setQueries((previous) => ({ ...previous, [groupKey(sourceId, groupId)]: value }))
-  }, [])
+  // The filter is saved after a pause in typing, not on every keystroke.
+  const setQuery = useCallback(
+    (sourceId: string, groupId: string, value: string) => {
+      const key = groupKey(sourceId, groupId)
+      setQueries((previous) => ({ ...previous, [key]: value }))
+      const pending = queryTimers.current[key]
+      if (pending) window.clearTimeout(pending)
+      queryTimers.current[key] = window.setTimeout(() => {
+        delete queryTimers.current[key]
+        saveGroupState(sourceId, groupId, { query: value })
+      }, 400)
+    },
+    [saveGroupState],
+  )
+
+  const toggleFind = useCallback(
+    (sourceId: string, groupId: string) => {
+      const key = groupKey(sourceId, groupId)
+      const next = !(findOpen[key] ?? true)
+      setFindOpen((previous) => ({ ...previous, [key]: next }))
+      saveGroupState(sourceId, groupId, { find: next })
+    },
+    [findOpen, saveGroupState],
+  )
+
+  const toggleFolded = useCallback(
+    (sourceId: string, groupId: string) => {
+      const key = groupKey(sourceId, groupId)
+      const next = !(folded[key] ?? false)
+      setFolded((previous) => ({ ...previous, [key]: next }))
+      saveGroupState(sourceId, groupId, { folded: next })
+    },
+    [folded, saveGroupState],
+  )
   const query = (queries[snapshot ? groupKey(snapshot.activeSource, snapshot.activeGroup) : ''] ?? '').trim()
   const visibleBoards = useMemo(() => {
     const sorted = snapshot ? sortBoards(snapshot.boards, snapshot.sortOrder) : []
@@ -604,6 +667,10 @@ export default function Shell() {
               refreshing={refreshingSources}
               queries={queries}
               onQueryChange={setQuery}
+              findOpen={findOpen}
+              onToggleFind={toggleFind}
+              folded={folded}
+              onToggleFolded={toggleFolded}
               sortOrder={snapshot.sortOrder}
               onToggleSort={() => setSort(snapshot.sortOrder === 'name' ? 'dateEdited' : 'name')}
               onRefresh={handleRefreshSources}
@@ -937,6 +1004,10 @@ function SourceTree({
   refreshing,
   queries,
   onQueryChange,
+  findOpen,
+  onToggleFind,
+  folded,
+  onToggleFolded,
   sortOrder,
   onToggleSort,
   onRefresh,
@@ -961,6 +1032,12 @@ function SourceTree({
   /** The find filter per group, keyed like the tree keys a group. */
   queries: Record<string, string>
   onQueryChange: (sourceId: string, groupId: string, value: string) => void
+  /** Whether a group's find box is showing, keyed like the tree keys a group. */
+  findOpen: Record<string, boolean>
+  onToggleFind: (sourceId: string, groupId: string) => void
+  /** Groups whose board list is folded away. */
+  folded: Record<string, boolean>
+  onToggleFolded: (sourceId: string, groupId: string) => void
   sortOrder: BoardSortOrder
   onToggleSort: () => void
   onRefresh: () => void
@@ -979,10 +1056,6 @@ function SourceTree({
   renderBoards: (sourceId: string, groupId: string) => React.ReactNode
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
-  /** The active group, if the user folded it away. Any other group is closed because it isn't loaded. */
-  const [foldedGroup, setFoldedGroup] = useState<string | null>(null)
-  /** Pinned groups the user folded away; they stay pinned but list no boards. */
-  const [foldedPins, setFoldedPins] = useState<string[]>([])
   const pinnedKeys = useMemo(() => new Set(pinned.map((pin) => groupKey(pin.source, pin.group))), [pinned])
   const loadedKey = groupKey(activeSource, activeGroup)
   /** The group the user is on: the one being switched to, else the loaded one. */
@@ -1001,8 +1074,10 @@ function SourceTree({
     const isPinned = pinnedKeys.has(key)
     const pinnedOpen = !current && isPinned
     const filter = queries[key] ?? ''
+    const showFind = findOpen[key] ?? true
+    const isFolded = folded[key] ?? false
     // The active group opens unless folded; a pinned one opens unless it was folded on its own.
-    const open = current ? !loading && foldedGroup !== key : pinnedOpen && !foldedPins.includes(key)
+    const open = (current ? !loading : pinnedOpen) && !isFolded
     return (
       <div
         key={key}
@@ -1039,12 +1114,13 @@ function SourceTree({
             aria-current={current ? 'true' : undefined}
             aria-busy={loading}
             onClick={() => {
-              if (current) {
-                if (!loading) setFoldedGroup((value) => (value === key ? null : key))
+              if (current && !loading) {
+                onToggleFolded(source.id, group.id)
               } else if (isPinned) {
-                setFoldedPins((value) => (value.includes(key) ? value.filter((folded) => folded !== key) : [...value, key]))
+                onToggleFolded(source.id, group.id)
               } else {
-                setFoldedGroup(null)
+                // Activating a group opens it, even if it was folded as a pin.
+                if (isFolded) onToggleFolded(source.id, group.id)
                 onActivateSource(source.id, group.id)
               }
             }}
@@ -1056,6 +1132,15 @@ function SourceTree({
             <span className="tree-spinner" role="status" aria-label="Loading boards" />
           ) : (
             <span className="row-actions">
+              <button
+                className={`icon-button row-action find${filter !== '' ? ' filtered' : ''}`}
+                onClick={() => onToggleFind(source.id, group.id)}
+                title={showFind ? 'Hide board search' : 'Search boards'}
+                aria-label={showFind ? `Hide search in ${label}` : `Search boards in ${label}`}
+                aria-pressed={showFind}
+              >
+                <SearchIcon />
+              </button>
               {current && (
                 <button className="icon-button row-action" onClick={onNewBoard} title="New Board (⌘N)" aria-label={`New Board in ${label}`}>
                   <PlusIcon />
@@ -1075,35 +1160,37 @@ function SourceTree({
         </div>
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
-            <div className="tree-tools">
-              <div className="tree-find">
-                <SearchIcon className="tree-find-icon" aria-hidden="true" />
-                <input
-                  type="search"
-                  value={filter}
-                  placeholder="Find board"
-                  aria-label={`Find a board in ${label}`}
-                  onChange={(event) => onQueryChange(source.id, group.id, event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') onQueryChange(source.id, group.id, '')
-                  }}
-                />
-                {filter !== '' && (
-                  <button
-                    type="button"
-                    className="tree-find-clear"
-                    title="Clear"
-                    aria-label="Clear the filter"
-                    onClick={(event) => {
-                      onQueryChange(source.id, group.id, '')
-                      // Keep typing in the field, not on the button that just emptied it.
-                      event.currentTarget.parentElement?.querySelector('input')?.focus()
+            <div className={`tree-tools${showFind ? '' : ' bare'}`}>
+              {showFind && (
+                <div className="tree-find">
+                  <SearchIcon className="tree-find-icon" aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={filter}
+                    placeholder="Find board"
+                    aria-label={`Find a board in ${label}`}
+                    onChange={(event) => onQueryChange(source.id, group.id, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') onQueryChange(source.id, group.id, '')
                     }}
-                  >
-                    <CloseIcon />
-                  </button>
-                )}
-              </div>
+                  />
+                  {filter !== '' && (
+                    <button
+                      type="button"
+                      className="tree-find-clear"
+                      title="Clear"
+                      aria-label="Clear the filter"
+                      onClick={(event) => {
+                        onQueryChange(source.id, group.id, '')
+                        // Keep typing in the field, not on the button that just emptied it.
+                        event.currentTarget.parentElement?.querySelector('input')?.focus()
+                      }}
+                    >
+                      <CloseIcon />
+                    </button>
+                  )}
+                </div>
+              )}
               <button
                 className="tree-sort"
                 title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}

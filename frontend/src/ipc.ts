@@ -46,6 +46,15 @@ export type SourceInfo = { id: string; name: string; kind: 'local' | 'nats'; gro
  */
 export type PinnedGroupInfo = { source: string; group: string; boards: BoardInfo[] }
 
+/**
+ * How one folder or bucket looks in the sidebar. The default (find box open, no
+ * filter, list expanded) is not stored, so a group only appears once touched.
+ */
+export type GroupState = { source: string; group: string; query?: string; find: boolean; folded: boolean }
+
+/** A change to a group's sidebar state; omitted fields keep their value. */
+export type GroupStatePatch = { source: string; group: string; query?: string; find?: boolean; folded?: boolean }
+
 /** A NATS server the user added (persisted in preferences). */
 export type NatsServerConfig = {
   id: string
@@ -89,6 +98,8 @@ export type StoreSnapshot = {
   activeGroup: string
   /** Folders and buckets pinned open, with their boards. */
   pinned: PinnedGroupInfo[]
+  /** Sidebar state saved for the folders and buckets the user has touched. */
+  tree: GroupState[]
   ai: AISettings
 }
 
@@ -169,6 +180,8 @@ export const deleteBucket = (sourceId: string, bucket: string) => app().DeleteBu
 export const activateSource = (sourceId: string, groupId: string) => app().ActivateSource(sourceId, groupId)
 /** Pins a folder or bucket open so its boards stay visible beside the active group. */
 export const togglePinnedGroup = (sourceId: string, groupId: string) => app().TogglePinnedGroup(sourceId, groupId)
+/** Saves a folder or bucket's sidebar state (find box, filter, folded list). */
+export const setGroupState = (patch: GroupStatePatch) => app().SetGroupState(patch)
 /** Copies a board into another source/group (drag & drop between sources). */
 export const copyBoardToSource = (boardId: string, targetSource: string, targetGroup: string) =>
   app().CopyBoardToSource(boardId, targetSource, targetGroup)
