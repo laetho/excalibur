@@ -177,7 +177,8 @@ function newServerId(): string {
 /** The app shell: sidebar (boards, search, thumbnails) + the always-mounted canvas. */
 export default function Shell() {
   const [snapshot, setSnapshot] = useState<StoreSnapshot | null>(null)
-  const [search, setSearch] = useState('')
+  /** The find filter per folder or bucket, so each group returns to its own search. */
+  const [queries, setQueries] = useState<Record<string, string>>({})
   /** Refreshed every 30 s so "Edited … ago" stays current. */
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [creating, setCreating] = useState(false)
@@ -191,10 +192,6 @@ export default function Shell() {
     setSidebarCollapsed(collapsed)
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed))
   }
-  // Each folder and bucket keeps its own finding session: switching group clears the filter.
-  useEffect(() => {
-    setSearch('')
-  }, [snapshot?.activeSource, snapshot?.activeGroup])
   const [addServerOpen, setAddServerOpen] = useState(false)
   /** True while the sources refresh button is re-listing NATS buckets. */
   const [refreshingSources, setRefreshingSources] = useState(false)
@@ -404,6 +401,13 @@ export default function Shell() {
     }
   }, [title])
 
+  const activeKey = snapshot ? groupKey(snapshot.activeSource, snapshot.activeGroup) : ''
+  // Typing lands in the active container's entry; the others keep what they had.
+  const search = queries[activeKey] ?? ''
+  const setSearch = useCallback(
+    (value: string) => setQueries((previous) => ({ ...previous, [activeKey]: value })),
+    [activeKey],
+  )
   const query = search.trim()
   const visibleBoards = useMemo(() => {
     const sorted = snapshot ? sortBoards(snapshot.boards, snapshot.sortOrder) : []
