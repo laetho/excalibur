@@ -47,6 +47,26 @@ flowchart LR
     BCanvas <-->|CAS lease/index| KV
 ```
 
+## Connections
+
+The app keeps exactly one NATS connection per configured server for the whole
+session, cached in the store and dialled on first use. Boards, collab sessions,
+presence, snapshots and lock leases all share it; nothing dials per board or per
+request. Editing a server's settings, or adding and removing one, is the only
+time a second connection is opened.
+
+Reconnects are unlimited with a two-second wait. The client is a desktop app
+that sleeps and changes networks, and a connection that gives up after the
+default two minutes would stay permanently closed for the rest of the session.
+Because retrying is then silent, a dropped connection raises a notice in the UI
+naming the server and the reason; it clears on its own once the link is back.
+`clientFor` also replaces a cached connection that has closed for any other
+reason, so a dead handle is never reused.
+
+Publishes that could not be sent stay in the durable local outbox and are
+replayed after reconnecting, so shutdown closes connections without draining
+them.
+
 ## Durable state
 
 Recovering a collaborative board requires two pieces of durable state:

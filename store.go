@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,7 +29,15 @@ type Store struct {
 	known        map[string][]byte
 	knownStamp   map[string]string
 	alerts       []Notice
-	natsClients  map[string]*natsClient
+
+	// clientsMu guards natsClients and closed. Every read and write of the map
+	// takes it: clientFor runs from the outbox, refresh and collab paths, and a
+	// concurrent map write would abort the process.
+	clientsMu   sync.Mutex
+	natsClients map[string]*natsClient
+	closed      bool
+	// dialNATS connects a server; tests replace it to observe dialling.
+	dialNATS func(config NatsServerConfig) (*natsClient, error)
 }
 
 // preferencesPath migrates the former ExcaliWails preferences on first launch
@@ -62,7 +71,7 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	s := &Store{
 		prefsPath: prefsPath,
 		prefs:     Preferences{Viewports: map[string]Viewport{}, SortOrder: "name", CanvasAppearance: "system", ShowThumbnails: &show},
-		details:   map[string]BoardDetails{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{},
+		details:   map[string]BoardDetails{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS,
 	}
 	if data, err := os.ReadFile(prefsPath); err == nil {
 		_ = json.Unmarshal(data, &s.prefs)
@@ -119,21 +128,69 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 }
 
 func (s *Store) close() {
+	s.clientsMu.Lock()
+	s.closed = true
+	clients := make([]*natsClient, 0, len(s.natsClients))
 	for _, client := range s.natsClients {
+		clients = append(clients, client)
+	}
+	s.natsClients = map[string]*natsClient{}
+	s.clientsMu.Unlock()
+	// Closing happens outside the lock so a slow connection teardown cannot
+	// stall a request that is only reading the map.
+	for _, client := range clients {
 		client.close()
 	}
 }
 
 func (s *Store) isLocal() bool { return s.activeSource == localSourceID }
 
+var errStoreClosed = errors.New("store is closed")
+
+// dial connects a server through the injectable seam.
+func (s *Store) dial(config NatsServerConfig) (*natsClient, error) {
+	if s.dialNATS == nil {
+		return connectNATS(config)
+	}
+	return s.dialNATS(config)
+}
+
+// setClient and takeClient keep natsClients accesses behind clientsMu.
+func (s *Store) setClient(id string, client *natsClient) {
+	s.clientsMu.Lock()
+	s.natsClients[id] = client
+	s.clientsMu.Unlock()
+}
+
+func (s *Store) takeClient(id string) *natsClient {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	return s.natsClients[id]
+}
+
+func (s *Store) deleteClient(id string) {
+	s.clientsMu.Lock()
+	delete(s.natsClients, id)
+	s.clientsMu.Unlock()
+}
+
+// clientFor returns the connection for a source, dialling it on first use. A
+// cached connection that has since closed is dropped and replaced, because a
+// reconnect that exhausts its attempts leaves the client permanently closed and
+// otherwise keeps serving it for the rest of the session.
 func (s *Store) clientFor(sourceID string) (*natsClient, error) {
 	id := strings.TrimPrefix(sourceID, "nats:")
-	if c := s.natsClients[id]; c != nil {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if s.closed {
+		return nil, errStoreClosed
+	}
+	if c := s.natsClients[id]; c != nil && c.conn != nil && !c.conn.IsClosed() {
 		return c, nil
 	}
 	for _, config := range s.prefs.NatsServers {
 		if config.ID == id {
-			c, err := connectNATS(config)
+			c, err := s.dial(config)
 			if err != nil {
 				return nil, err
 			}
@@ -142,6 +199,42 @@ func (s *Store) clientFor(sourceID string) (*natsClient, error) {
 		}
 	}
 	return nil, fmt.Errorf("unknown NATS server %q", id)
+}
+
+const connectionNoticeID = "nats-connection"
+
+// syncConnectionNotice keeps one notice in step with the active server's
+// connection state. Reconnecting is unlimited, so without this an unreachable
+// cluster would only ever show up as publishes quietly failing. It reports
+// whether the notice changed.
+func (s *Store) syncConnectionNotice() bool {
+	message := ""
+	if strings.HasPrefix(s.activeSource, "nats:") {
+		if client := s.takeClient(strings.TrimPrefix(s.activeSource, "nats:")); client != nil {
+			if issue := client.connectionIssue(); issue != "" {
+				message = fmt.Sprintf("Reconnecting to %s: %s", client.config.Name, issue)
+			}
+		}
+	}
+	for i, notice := range s.alerts {
+		if notice.ID != connectionNoticeID {
+			continue
+		}
+		if notice.Message == message {
+			return false
+		}
+		if message == "" {
+			s.alerts = append(s.alerts[:i], s.alerts[i+1:]...)
+		} else {
+			s.alerts[i].Message = message
+		}
+		return true
+	}
+	if message == "" {
+		return false
+	}
+	s.alerts = append(s.alerts, Notice{ID: connectionNoticeID, Title: "NATS connection", Message: message})
+	return true
 }
 
 func (s *Store) scan() error {

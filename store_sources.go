@@ -53,7 +53,7 @@ func (s *Store) addNatsServer(config NatsServerConfig) error {
 			return errors.New("a server with that id already exists")
 		}
 	}
-	client, err := connectNATS(config)
+	client, err := s.dial(config)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (s *Store) addNatsServer(config NatsServerConfig) error {
 		return err
 	}
 	config.Buckets = buckets
-	s.natsClients[config.ID] = client
+	s.setClient(config.ID, client)
 	s.prefs.NatsServers = append(s.prefs.NatsServers, config)
 	s.savePrefs()
 	return nil
@@ -88,7 +88,7 @@ func (s *Store) updateNatsServer(config NatsServerConfig, keepPassword bool) err
 	if keepPassword && config.Password == "" {
 		config.Password = existing.Password
 	}
-	client, err := connectNATS(config)
+	client, err := s.dial(config)
 	if err != nil {
 		return err
 	}
@@ -100,11 +100,11 @@ func (s *Store) updateNatsServer(config NatsServerConfig, keepPassword bool) err
 	config = client.config
 	config.Buckets = buckets
 
-	oldClient := s.natsClients[config.ID]
+	oldClient := s.takeClient(config.ID)
 	oldSource, oldGroup, oldSelection := s.activeSource, s.activeGroup, s.selection
 	oldBoards := s.boards
 	s.prefs.NatsServers[index] = config
-	s.natsClients[config.ID] = client
+	s.setClient(config.ID, client)
 	if s.activeSource == "nats:"+config.ID {
 		if !slices.Contains(buckets, s.activeGroup) {
 			if len(buckets) > 0 {
@@ -118,9 +118,9 @@ func (s *Store) updateNatsServer(config NatsServerConfig, keepPassword bool) err
 			s.prefs.NatsServers[index] = existing
 			s.activeSource, s.activeGroup, s.selection, s.boards = oldSource, oldGroup, oldSelection, oldBoards
 			if oldClient != nil {
-				s.natsClients[config.ID] = oldClient
+				s.setClient(config.ID, oldClient)
 			} else {
-				delete(s.natsClients, config.ID)
+				s.deleteClient(config.ID)
 			}
 			client.close()
 			return err
@@ -145,9 +145,9 @@ func (s *Store) removeNatsServer(id string) error {
 	if index < 0 {
 		return nil
 	}
-	if client := s.natsClients[id]; client != nil {
+	if client := s.takeClient(id); client != nil {
 		client.close()
-		delete(s.natsClients, id)
+		s.deleteClient(id)
 	}
 	removed := s.prefs.NatsServers[index]
 	s.prefs.NatsServers = append(s.prefs.NatsServers[:index], s.prefs.NatsServers[index+1:]...)

@@ -1935,6 +1935,14 @@ func (a *App) remoteRefreshLoop() {
 		select {
 		case <-ticker.C:
 			a.mu.Lock()
+			if a.store != nil {
+				// Surface a dropped connection even while the board list cannot
+				// be refreshed: reconnects are unlimited, so a silent retry
+				// would look like an app that quietly stopped working.
+				if a.store.syncConnectionNotice() {
+					a.emitSnapshotLocked()
+				}
+			}
 			if a.store != nil && !a.store.isLocal() {
 				before := a.store.selection
 				if err := a.store.scan(); err == nil {

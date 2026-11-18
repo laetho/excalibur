@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -562,7 +564,7 @@ func TestSharedLibrarySyncsAcrossBuckets(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := testStore(t)
-	store.natsClients["lib-0"] = clients[0]
+	store.setClient("lib-0", clients[0])
 	store.activeSource, store.activeGroup = "nats:lib-0", "bucket-a"
 	library, err := store.library()
 	if err != nil || library == nil || *library != "legacy" {
@@ -689,7 +691,7 @@ func TestCollaborationJetStreamDurability(t *testing.T) {
 	// receipt. This makes a lost Wails event redeliverable instead of silently
 	// advancing the consumer.
 	store := testStore(t)
-	store.natsClients["test"] = client
+	store.setClient("test", client)
 	app := newApp()
 	app.store = store
 	app.outboxPath = filepath.Join(t.TempDir(), "collab-outbox.json")
@@ -1612,5 +1614,137 @@ func TestReplicaCandidates(t *testing.T) {
 				t.Fatalf("replicaCandidatesFor(%v) = %v, want %v", tc.clustered, got, tc.want)
 			}
 		})
+	}
+}
+
+// testConn returns a connection without requiring a server. RetryOnFailedConnect
+// hands back a live connection that is still dialling, which is enough to
+// exercise cached-vs-closed handling in clientFor.
+func testConn(t *testing.T, closed bool) *nats.Conn {
+	t.Helper()
+	nc, err := nats.Connect("nats://127.0.0.1:1", nats.RetryOnFailedConnect(true), nats.Timeout(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed {
+		nc.Close()
+	}
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+func TestNATSOptionsReconnectIndefinitely(t *testing.T) {
+	client := &natsClient{config: NatsServerConfig{ID: "a", Name: "a", URL: "nats://127.0.0.1:1"}}
+	var options nats.Options
+	for _, option := range natsOptions(client.config, client) {
+		if err := option(&options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if options.MaxReconnect != -1 {
+		t.Fatalf("MaxReconnect = %d, want -1 so a long outage does not close the connection for good", options.MaxReconnect)
+	}
+	if options.ReconnectWait != 2*time.Second {
+		t.Fatalf("ReconnectWait = %v, want 2s", options.ReconnectWait)
+	}
+	if options.DisconnectedErrCB == nil || options.ReconnectedCB == nil || options.ClosedCB == nil {
+		t.Fatal("connection state handlers are not installed")
+	}
+	options.DisconnectedErrCB(nil, errors.New("broken pipe"))
+	if issue := client.connectionIssue(); issue != "broken pipe" {
+		t.Fatalf("connectionIssue after disconnect = %q", issue)
+	}
+	options.DisconnectedErrCB(nil, errors.New("later failure"))
+	if issue := client.connectionIssue(); issue != "broken pipe" {
+		t.Fatalf("connectionIssue was overwritten by a later error: %q", issue)
+	}
+	options.ReconnectedCB(nil)
+	if issue := client.connectionIssue(); issue != "" {
+		t.Fatalf("connectionIssue after reconnect = %q, want empty", issue)
+	}
+}
+
+func TestClientForReplacesClosedConnection(t *testing.T) {
+	store := testStore(t)
+	store.prefs.NatsServers = []NatsServerConfig{{ID: "a", Name: "a", URL: "nats://127.0.0.1:1"}}
+	store.setClient("a", &natsClient{config: NatsServerConfig{ID: "a", Name: "a"}, conn: testConn(t, true)})
+
+	var dials atomic.Int32
+	store.dialNATS = func(config NatsServerConfig) (*natsClient, error) {
+		dials.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		return &natsClient{config: config, conn: testConn(t, false)}, nil
+	}
+
+	const callers = 8
+	clients := make([]*natsClient, callers)
+	var wg sync.WaitGroup
+	for i := range clients {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			client, err := store.clientFor("nats:a")
+			if err != nil {
+				t.Errorf("clientFor: %v", err)
+				return
+			}
+			clients[i] = client
+		}(i)
+	}
+	wg.Wait()
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dialled %d times, want exactly one replacement dial", got)
+	}
+	for i, client := range clients {
+		if client == nil || client.conn.IsClosed() {
+			t.Fatalf("caller %d received a closed connection", i)
+		}
+		if client != clients[0] {
+			t.Fatalf("caller %d received a different client; the replacement was not shared", i)
+		}
+	}
+}
+
+func TestClientForAfterCloseDoesNotDial(t *testing.T) {
+	store := testStore(t)
+	store.prefs.NatsServers = []NatsServerConfig{{ID: "a", Name: "a", URL: "nats://127.0.0.1:1"}}
+	store.dialNATS = func(NatsServerConfig) (*natsClient, error) {
+		t.Error("clientFor dialled after the store was closed")
+		return &natsClient{conn: testConn(t, false)}, nil
+	}
+	store.close()
+	if _, err := store.clientFor("nats:a"); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("clientFor after close = %v, want errStoreClosed", err)
+	}
+}
+
+func TestSyncConnectionNoticeTracksConnectionState(t *testing.T) {
+	store := testStore(t)
+	store.activeSource = "nats:a"
+	client := &natsClient{config: NatsServerConfig{ID: "a", Name: "Work"}, conn: testConn(t, false)}
+	store.setClient("a", client)
+
+	if store.syncConnectionNotice() {
+		t.Fatal("a connected server must not raise a notice")
+	}
+	client.markDisconnected(errors.New("no route to host"))
+	if !store.syncConnectionNotice() {
+		t.Fatal("a dropped connection must raise a notice")
+	}
+	if len(store.alerts) != 1 || store.alerts[0].ID != connectionNoticeID {
+		t.Fatalf("alerts = %+v, want one %s notice", store.alerts, connectionNoticeID)
+	}
+	if !strings.Contains(store.alerts[0].Message, "Work") || !strings.Contains(store.alerts[0].Message, "no route to host") {
+		t.Fatalf("notice message %q does not name the server and the reason", store.alerts[0].Message)
+	}
+	if store.syncConnectionNotice() {
+		t.Fatal("an unchanged connection state must not trigger another emit")
+	}
+	client.markConnected()
+	if !store.syncConnectionNotice() {
+		t.Fatal("a restored connection must clear the notice")
+	}
+	if len(store.alerts) != 0 {
+		t.Fatalf("alerts = %+v, want none after reconnect", store.alerts)
 	}
 }

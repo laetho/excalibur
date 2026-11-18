@@ -39,10 +39,42 @@ type natsClient struct {
 	libraryMu      sync.Mutex
 	libraryWatcher *nats.Subscription
 	libraryOwn     map[string]struct{} // digests of library versions this client wrote
+
+	connMu    sync.Mutex
+	connIssue string // reason the connection is down; empty while it is up
 	// instanceID identifies this app run. Durable consumer names embed it so a
 	// restarted client starts a fresh consumer instead of competing with the one
 	// its predecessor left behind.
 	instanceID string
+}
+
+// natsOptions builds the connection options for one server. Reconnects are
+// unlimited: a machine that sleeps through a network change must return to the
+// same connection, not leave the app holding a permanently closed one. The
+// handlers record why the link is down so the UI can show it instead of
+// retrying silently.
+func natsOptions(config NatsServerConfig, client *natsClient) []nats.Option {
+	options := []nats.Option{
+		nats.Name("Excalibur"),
+		nats.Timeout(5 * time.Second),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			client.markDisconnected(err)
+		}),
+		nats.ReconnectHandler(func(*nats.Conn) {
+			client.markConnected()
+		}),
+		nats.ClosedHandler(func(*nats.Conn) {
+			client.markDisconnected(errors.New("connection closed"))
+		}),
+	}
+	if config.CredentialsFile != "" {
+		options = append(options, nats.UserCredentials(config.CredentialsFile))
+	} else if config.Username != "" || config.Password != "" {
+		options = append(options, nats.UserInfo(config.Username, config.Password))
+	}
+	return options
 }
 
 func connectNATS(config NatsServerConfig) (*natsClient, error) {
@@ -51,13 +83,13 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := []nats.Option{nats.Name("Excalibur"), nats.Timeout(5 * time.Second)}
-	if config.CredentialsFile != "" {
-		options = append(options, nats.UserCredentials(config.CredentialsFile))
-	} else if config.Username != "" || config.Password != "" {
-		options = append(options, nats.UserInfo(config.Username, config.Password))
+	client := &natsClient{
+		config:          config,
+		streams:         map[string]struct{}{},
+		replicasChecked: map[string]struct{}{},
+		instanceID:      newInstanceID(),
 	}
-	nc, err := nats.Connect(config.URL, options...)
+	nc, err := nats.Connect(config.URL, natsOptions(config, client)...)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to %q (%s): %w", config.Name, config.URL, err)
 	}
@@ -71,15 +103,35 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 		nc.Close()
 		return nil, fmt.Errorf("could not initialise JetStream on %q: %w", config.Name, err)
 	}
-	return &natsClient{
-		config:          config,
-		conn:            nc,
-		js:              js,
-		jsm:             jsm,
-		streams:         map[string]struct{}{},
-		replicasChecked: map[string]struct{}{},
-		instanceID:      newInstanceID(),
-	}, nil
+	client.conn, client.js, client.jsm = nc, js, jsm
+	return client, nil
+}
+
+// markDisconnected records why the connection dropped. The first reason wins so
+// a reconnect storm does not overwrite the cause that started it.
+func (c *natsClient) markDisconnected(err error) {
+	reason := "connection lost"
+	if err != nil {
+		reason = err.Error()
+	}
+	c.connMu.Lock()
+	if c.connIssue == "" {
+		c.connIssue = reason
+	}
+	c.connMu.Unlock()
+}
+
+func (c *natsClient) markConnected() {
+	c.connMu.Lock()
+	c.connIssue = ""
+	c.connMu.Unlock()
+}
+
+// connectionIssue reports why the connection is unusable, or "" while it works.
+func (c *natsClient) connectionIssue() string {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.connIssue
 }
 
 // normalizeNatsServerConfig validates authentication before a connection is
