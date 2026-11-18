@@ -180,7 +180,6 @@ export default function Shell() {
   const [creating, setCreating] = useState(false)
   const [renaming, setRenaming] = useState<BoardInfo | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
   /** The open board's sync status when the canvas has no room to show it; the sidebar shows it instead. */
   const [sidebarSyncStatus, setSidebarSyncStatus] = useState<SyncStatus | null>(null)
   /** Collapsed to a rail with just the logo; remembered between sessions. */
@@ -189,10 +188,10 @@ export default function Shell() {
     setSidebarCollapsed(collapsed)
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed))
   }
-  const closeSearch = () => {
-    setSearchOpen(false)
+  // Each folder and bucket keeps its own finding session: switching group clears the filter.
+  useEffect(() => {
     setSearch('')
-  }
+  }, [snapshot?.activeSource, snapshot?.activeGroup])
   const [addServerOpen, setAddServerOpen] = useState(false)
   /** True while the sources refresh button is re-listing NATS buckets. */
   const [refreshingSources, setRefreshingSources] = useState(false)
@@ -481,35 +480,13 @@ export default function Shell() {
               <LogoMark className="app-logo-mark" />
             </span>
           )}
-          {!sidebarCollapsed &&
-            (searchOpen ? (
-              <div className="search">
-                <SearchIcon className="search-icon" />
-                <input
-                  type="search"
-                  placeholder="Search boards"
-                  aria-label="Search boards"
-                  value={search}
-                  autoFocus
-                  onChange={(event) => setSearch(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') closeSearch()
-                  }}
-                />
-                <button className="icon-button row-action" onClick={closeSearch} title="Close Search" aria-label="Close Search">
-                  <CloseIcon />
-                </button>
-              </div>
-            ) : (
-              <span className="row-actions">
-                <button className="icon-button row-action" onClick={() => setSearchOpen(true)} title="Search" aria-label="Search">
-                  <SearchIcon />
-                </button>
-                <button className="icon-button row-action" onClick={() => setCollapsed(true)} title="Hide Sidebar" aria-label="Hide Sidebar">
-                  <SidebarIcon />
-                </button>
-              </span>
-            ))}
+          {!sidebarCollapsed && (
+            <span className="row-actions">
+              <button className="icon-button row-action" onClick={() => setCollapsed(true)} title="Hide Sidebar" aria-label="Hide Sidebar">
+                <SidebarIcon />
+              </button>
+            </span>
+          )}
         </div>
         {sidebarCollapsed && (
           <div className="rail-actions">
@@ -527,7 +504,10 @@ export default function Shell() {
               activeGroup={snapshot.activeGroup}
               switchingSource={switchingSource}
               refreshing={refreshingSources}
-              forceOpen={query !== ''}
+              query={search}
+              onQueryChange={setSearch}
+              sortOrder={snapshot.sortOrder}
+              onToggleSort={() => setSort(snapshot.sortOrder === 'name' ? 'dateEdited' : 'name')}
               onRefresh={handleRefreshSources}
               onActivateSource={handleActivateSource}
               onDropBoard={handleDropBoard}
@@ -883,7 +863,10 @@ function SourceTree({
   activeGroup,
   switchingSource,
   refreshing,
-  forceOpen,
+  query,
+  onQueryChange,
+  sortOrder,
+  onToggleSort,
   onRefresh,
   onActivateSource,
   onDropBoard,
@@ -901,8 +884,11 @@ function SourceTree({
   /** Group key being switched to, while its boards load. */
   switchingSource: string | null
   refreshing: boolean
-  /** Keep the active group open regardless of the user's choice (while searching). */
-  forceOpen: boolean
+  /** The filter for the open group's boards. */
+  query: string
+  onQueryChange: (query: string) => void
+  sortOrder: BoardSortOrder
+  onToggleSort: () => void
   onRefresh: () => void
   onActivateSource: (sourceId: string, groupId: string) => void
   onDropBoard: (boardId: string, targetSource: string, targetGroup: string) => void
@@ -932,7 +918,7 @@ function SourceTree({
     const key = groupKey(source.id, group.id)
     const current = key === currentKey
     const loading = current && key !== loadedKey
-    const open = current && !loading && (forceOpen || foldedGroup !== key)
+    const open = current && !loading && foldedGroup !== key
     return (
       <div key={key} className={`tree-group${current ? ' active' : ''}${dragOver === key ? ' drag-over' : ''}`}>
         {/* The header is the group's handle: drop a board on it to copy it here; right-click for options. */}
@@ -969,8 +955,7 @@ function SourceTree({
               if (!current) {
                 setFoldedGroup(null)
                 onActivateSource(source.id, group.id)
-              } else if (!loading && !forceOpen) {
-                // While searching the group stays open to show the results, so there's nothing to fold.
+              } else if (!loading) {
                 setFoldedGroup((value) => (value === key ? null : key))
               }
             }}
@@ -993,6 +978,29 @@ function SourceTree({
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
             {children}
+            <div className="tree-tools">
+              <label className="tree-find">
+                <SearchIcon className="tree-find-icon" aria-hidden="true" />
+                <input
+                  type="search"
+                  value={query}
+                  placeholder="Find board"
+                  aria-label={`Find a board in ${label}`}
+                  onChange={(event) => onQueryChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') onQueryChange('')
+                  }}
+                />
+              </label>
+              <button
+                className="tree-sort"
+                title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
+                aria-label={sortOrder === 'name' ? 'Sort by date edited' : 'Sort by name'}
+                onClick={onToggleSort}
+              >
+                {sortOrder === 'name' ? 'A–Z' : 'Newest'}
+              </button>
+            </div>
           </div>
         )}
       </div>
