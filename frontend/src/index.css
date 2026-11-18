@@ -603,8 +603,8 @@ select,
   align-items: center;
   gap: 2px;
   margin-bottom: 2px;
-  padding: 2px 4px 4px;
-  background: linear-gradient(to bottom, var(--sidebar-bg) 72%, transparent);
+  padding: 2px 4px 5px;
+  background: linear-gradient(to bottom, var(--sidebar-bg) 85%, transparent);
 }
 
 .tree-find {
@@ -657,6 +657,29 @@ select,
 
 .tree-find input::-webkit-search-cancel-button {
   -webkit-appearance: none;
+}
+
+.tree-find-clear {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
+.tree-find-clear:hover {
+  background: var(--card-hover);
+  color: var(--text);
+  opacity: 1;
+}
+
+.tree-find-clear svg {
+  width: 11px;
+  height: 11px;
 }
 
 .tree-sort {

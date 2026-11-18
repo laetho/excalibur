@@ -978,7 +978,7 @@ function SourceTree({
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
             <div className="tree-tools">
-              <label className="tree-find">
+              <div className="tree-find">
                 <SearchIcon className="tree-find-icon" aria-hidden="true" />
                 <input
                   type="search"
@@ -990,7 +990,22 @@ function SourceTree({
                     if (event.key === 'Escape') onQueryChange('')
                   }}
                 />
-              </label>
+                {query !== '' && (
+                  <button
+                    type="button"
+                    className="tree-find-clear"
+                    title="Clear"
+                    aria-label="Clear the filter"
+                    onClick={(event) => {
+                      onQueryChange('')
+                      // Keep typing in the field, not on the button that just emptied it.
+                      event.currentTarget.parentElement?.querySelector('input')?.focus()
+                    }}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </div>
               <button
                 className="tree-sort"
                 title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
