@@ -26,6 +26,7 @@ type Store struct {
 	boards       []Board
 	selection    string
 	details      map[string]BoardDetails
+	detailStamp  map[string]string // board revision the cached details were built from
 	known        map[string][]byte
 	knownStamp   map[string]string
 	alerts       []Notice
@@ -71,7 +72,7 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	s := &Store{
 		prefsPath: prefsPath,
 		prefs:     Preferences{Viewports: map[string]Viewport{}, SortOrder: "name", CanvasAppearance: "system", ShowThumbnails: &show},
-		details:   map[string]BoardDetails{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS,
+		details:   map[string]BoardDetails{}, detailStamp: map[string]string{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS,
 	}
 	if data, err := os.ReadFile(prefsPath); err == nil {
 		_ = json.Unmarshal(data, &s.prefs)
@@ -168,6 +169,31 @@ func (s *Store) takeClient(id string) *natsClient {
 	return s.natsClients[id]
 }
 
+// detailsStale reports whether cached board details must be rebuilt. Re-reading
+// every board costs an object-store fetch and an ordered consumer, so a
+// background board is only re-read when its object revision changed. The open
+// board is always refreshed because collaboration snapshots do not touch the
+// board object itself.
+func (s *Store) detailsStale(board Board, stamp string) bool {
+	cached, ok := s.detailStamp[board.ID]
+	if ok && cached == stamp {
+		return !s.isLocal() && board.ID == s.selection
+	}
+	return true
+}
+
+// clients returns the open connections. The slice is a snapshot; the
+// connections themselves are safe for concurrent use.
+func (s *Store) clients() []*natsClient {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	clients := make([]*natsClient, 0, len(s.natsClients))
+	for _, client := range s.natsClients {
+		clients = append(clients, client)
+	}
+	return clients
+}
+
 func (s *Store) deleteClient(id string) {
 	s.clientsMu.Lock()
 	delete(s.natsClients, id)
@@ -203,38 +229,51 @@ func (s *Store) clientFor(sourceID string) (*natsClient, error) {
 
 const connectionNoticeID = "nats-connection"
 
-// syncConnectionNotice keeps one notice in step with the active server's
+// syncConnectionNotice keeps one notice per connected server in step with its
 // connection state. Reconnecting is unlimited, so without this an unreachable
 // cluster would only ever show up as publishes quietly failing. It reports
-// whether the notice changed.
+// whether any notice changed.
 func (s *Store) syncConnectionNotice() bool {
-	message := ""
-	if strings.HasPrefix(s.activeSource, "nats:") {
-		if client := s.takeClient(strings.TrimPrefix(s.activeSource, "nats:")); client != nil {
-			if issue := client.connectionIssue(); issue != "" {
-				message = fmt.Sprintf("Reconnecting to %s: %s", client.config.Name, issue)
-			}
+	wanted := map[string]string{}
+	for _, config := range s.prefs.NatsServers {
+		client := s.takeClient(config.ID)
+		if client == nil {
+			continue // never dialled, so there is no state to report
+		}
+		if issue := client.connectionIssue(); issue != "" {
+			wanted[connectionNoticeID+":"+config.ID] = fmt.Sprintf("Reconnecting to %s: %s", config.Name, issue)
 		}
 	}
-	for i, notice := range s.alerts {
-		if notice.ID != connectionNoticeID {
+	changed := false
+	kept := s.alerts[:0]
+	for _, notice := range s.alerts {
+		if !strings.HasPrefix(notice.ID, connectionNoticeID) {
+			kept = append(kept, notice)
 			continue
 		}
-		if notice.Message == message {
-			return false
+		message, stillDown := wanted[notice.ID]
+		if !stillDown {
+			changed = true
+			continue
 		}
-		if message == "" {
-			s.alerts = append(s.alerts[:i], s.alerts[i+1:]...)
-		} else {
-			s.alerts[i].Message = message
+		delete(wanted, notice.ID)
+		if notice.Message != message {
+			notice.Message = message
+			changed = true
 		}
-		return true
+		kept = append(kept, notice)
 	}
-	if message == "" {
-		return false
+	s.alerts = kept
+	ids := make([]string, 0, len(wanted))
+	for id := range wanted {
+		ids = append(ids, id)
 	}
-	s.alerts = append(s.alerts, Notice{ID: connectionNoticeID, Title: "NATS connection", Message: message})
-	return true
+	sort.Strings(ids)
+	for _, id := range ids {
+		s.alerts = append(s.alerts, Notice{ID: id, Title: "NATS connection", Message: wanted[id]})
+		changed = true
+	}
+	return changed
 }
 
 func (s *Store) scan() error {
@@ -520,6 +559,10 @@ func (s *Store) renameBoard(id, raw string) error {
 	if detail, ok := s.details[id]; ok {
 		delete(s.details, id)
 		s.details[newID] = detail
+	}
+	if stamp, ok := s.detailStamp[id]; ok {
+		delete(s.detailStamp, id)
+		s.detailStamp[newID] = stamp
 	}
 	if known, ok := s.known[id]; ok {
 		delete(s.known, id)

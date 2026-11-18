@@ -127,6 +127,9 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	a.startWatcher(store.localFolders)
 	go a.remoteRefreshLoop()
 	go a.refreshBucketsOnStartup()
+	if os.Getenv("EXCALIBUR_DEBUG_NATS") != "" {
+		go a.natsStatsLoop()
+	}
 	a.outboxWorkers.Add(1)
 	go func() {
 		defer a.outboxWorkers.Done()
@@ -1449,6 +1452,7 @@ func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSeq
 		client.invalidateCollabStream(bucket)
 		return CollabJoinResult{}, err
 	}
+	client.trackSub(updates)
 	presence, err := client.conn.Subscribe(collabPresenceSubject(bucket, documentID), func(msg *nats.Msg) {
 		a.emit("canvas:collab", map[string]any{"documentId": documentID, "subscriberId": subscriberID, "data": string(msg.Data), "sequence": "0", "delivery": "0"})
 	})
@@ -1456,6 +1460,7 @@ func (a *App) CollabJoin(sourceID, bucket, documentID, subscriberID, baselineSeq
 		_ = updates.Unsubscribe()
 		return CollabJoinResult{}, err
 	}
+	client.trackSub(presence)
 	// Close the snapshot-discovery/stream-compaction race. If a compactor wrote a
 	// newer snapshot after our first lookup (and possibly purged older covered
 	// updates), return that snapshot. Already emitted replay events are buffered by
@@ -1722,11 +1727,21 @@ func (a *App) refreshDetails() {
 		current := a.store.board(board.ID)
 		var data []byte
 		var err error
+		var stamp string
+		skip := false
 		if current != nil {
-			data, err = a.store.readBoard(*current)
+			stamp = fmt.Sprintf("%d:%d", board.Modified.UnixNano(), board.Size)
+			// Re-reading every board costs an object-store fetch (and one ordered
+			// consumer) per board. A background board only needs that when its
+			// object changed; the open board is always refreshed because
+			// collaboration snapshots do not touch the board object itself.
+			skip = !a.store.detailsStale(board, stamp)
+			if !skip {
+				data, err = a.store.readBoard(*current)
+			}
 		}
 		a.mu.Unlock()
-		if err != nil || data == nil {
+		if skip || err != nil || data == nil {
 			continue
 		}
 		texts := searchableTexts(data)
@@ -1742,6 +1757,7 @@ func (a *App) refreshDetails() {
 				detail.Thumbnail = thumbnail
 			}
 			a.store.details[board.ID] = detail
+			a.store.detailStamp[board.ID] = stamp
 		}
 		a.mu.Unlock()
 	}
@@ -1953,6 +1969,30 @@ func (a *App) remoteRefreshLoop() {
 				}
 			}
 			a.mu.Unlock()
+		case <-a.stop:
+			return
+		}
+	}
+}
+
+// natsStatsLoop logs connection and subscription counters every half minute. It
+// runs only when EXCALIBUR_DEBUG_NATS is set, and exists to attribute delivered
+// messages to subscriptions while diagnosing collaboration traffic.
+func (a *App) natsStatsLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		a.mu.Lock()
+		var clients []*natsClient
+		if a.store != nil {
+			clients = a.store.clients()
+		}
+		a.mu.Unlock()
+		for _, client := range clients {
+			client.logStats()
+		}
+		select {
+		case <-ticker.C:
 		case <-a.stop:
 			return
 		}

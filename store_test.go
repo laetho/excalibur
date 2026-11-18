@@ -1658,9 +1658,14 @@ func TestNATSOptionsReconnectIndefinitely(t *testing.T) {
 	if issue := client.connectionIssue(); issue != "broken pipe" {
 		t.Fatalf("connectionIssue was overwritten by a later error: %q", issue)
 	}
-	options.ReconnectedCB(nil)
+	if !client.markConnected() {
+		t.Fatal("markConnected must report recovery when the connection was down")
+	}
 	if issue := client.connectionIssue(); issue != "" {
 		t.Fatalf("connectionIssue after reconnect = %q, want empty", issue)
+	}
+	if client.markConnected() {
+		t.Fatal("markConnected must not report recovery when the connection was up")
 	}
 }
 
@@ -1721,6 +1726,7 @@ func TestClientForAfterCloseDoesNotDial(t *testing.T) {
 func TestSyncConnectionNoticeTracksConnectionState(t *testing.T) {
 	store := testStore(t)
 	store.activeSource = "nats:a"
+	store.prefs.NatsServers = []NatsServerConfig{{ID: "a", Name: "Work"}}
 	client := &natsClient{config: NatsServerConfig{ID: "a", Name: "Work"}, conn: testConn(t, false)}
 	store.setClient("a", client)
 
@@ -1731,7 +1737,7 @@ func TestSyncConnectionNoticeTracksConnectionState(t *testing.T) {
 	if !store.syncConnectionNotice() {
 		t.Fatal("a dropped connection must raise a notice")
 	}
-	if len(store.alerts) != 1 || store.alerts[0].ID != connectionNoticeID {
+	if len(store.alerts) != 1 || !strings.HasPrefix(store.alerts[0].ID, connectionNoticeID) {
 		t.Fatalf("alerts = %+v, want one %s notice", store.alerts, connectionNoticeID)
 	}
 	if !strings.Contains(store.alerts[0].Message, "Work") || !strings.Contains(store.alerts[0].Message, "no route to host") {
@@ -1746,5 +1752,44 @@ func TestSyncConnectionNoticeTracksConnectionState(t *testing.T) {
 	}
 	if len(store.alerts) != 0 {
 		t.Fatalf("alerts = %+v, want none after reconnect", store.alerts)
+	}
+}
+
+func TestDetailsStaleSkipsUnchangedBackgroundBoards(t *testing.T) {
+	store := testStore(t)
+	board := Board{ID: "board", Modified: time.Unix(100, 0), Size: 42}
+	stamp := "100:42"
+
+	if !store.detailsStale(board, stamp) {
+		t.Fatal("a board with no cached details is always stale")
+	}
+	store.detailStamp[board.ID] = stamp
+	if store.detailsStale(board, stamp) {
+		t.Fatal("an unchanged local board must not be re-read")
+	}
+	if !store.detailsStale(board, "100:43") {
+		t.Fatal("a resized board is stale")
+	}
+
+	store.activeSource = "nats:server"
+	if store.detailsStale(board, stamp) {
+		t.Fatal("an unchanged background remote board must not be re-read")
+	}
+	store.selection = board.ID
+	if !store.detailsStale(board, stamp) {
+		t.Fatal("the open remote board must be refreshed even when its object is unchanged")
+	}
+}
+
+func TestInvalidateCollabStreamBacksOffRevalidation(t *testing.T) {
+	client := &natsClient{}
+	client.invalidateCollabStream("bucket")
+	name := collabStreamName("bucket")
+	until, ok := client.streamRetry[name]
+	if !ok {
+		t.Fatal("invalidating a stream must record a revalidation deadline")
+	}
+	if wait := time.Until(until); wait <= 0 || wait > streamRevalidateDelay {
+		t.Fatalf("revalidation deadline is %v away, want (0, %v]", wait, streamRevalidateDelay)
 	}
 }

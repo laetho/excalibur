@@ -26,12 +26,13 @@ import (
 )
 
 type natsClient struct {
-	config   NatsServerConfig
-	conn     *nats.Conn
-	js       nats.JetStreamContext
-	jsm      jetstream.JetStream
-	streamMu sync.RWMutex
-	streams  map[string]struct{}
+	config      NatsServerConfig
+	conn        *nats.Conn
+	js          nats.JetStreamContext
+	jsm         jetstream.JetStream
+	streamMu    sync.RWMutex
+	streams     map[string]struct{}
+	streamRetry map[string]time.Time // earliest StreamInfo revalidation per stream
 
 	replicasMu      sync.Mutex
 	replicasChecked map[string]struct{} // streams already considered for replica upgrades
@@ -42,6 +43,11 @@ type natsClient struct {
 
 	connMu    sync.Mutex
 	connIssue string // reason the connection is down; empty while it is up
+
+	// tracked holds the long-lived subscriptions this client opened so the
+	// diagnostics dump can attribute deliveries to them.
+	subsMu  sync.Mutex
+	tracked []*nats.Subscription
 	// instanceID identifies this app run. Durable consumer names embed it so a
 	// restarted client starts a fresh consumer instead of competing with the one
 	// its predecessor left behind.
@@ -59,14 +65,20 @@ func natsOptions(config NatsServerConfig, client *natsClient) []nats.Option {
 		nats.Timeout(5 * time.Second),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
+		// The default ping interval is two minutes, so a half-open connection
+		// left behind by sleep or a network change can look healthy for minutes.
+		nats.PingInterval(10 * time.Second),
+		nats.MaxPingsOutstanding(2),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			client.markDisconnected(err)
+			log.Printf("nats %q: disconnected: %s", config.Name, client.markDisconnected(err))
 		}),
-		nats.ReconnectHandler(func(*nats.Conn) {
-			client.markConnected()
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			if client.markConnected() {
+				log.Printf("nats %q: reconnected", config.Name)
+			}
 		}),
 		nats.ClosedHandler(func(*nats.Conn) {
-			client.markDisconnected(errors.New("connection closed"))
+			log.Printf("nats %q: connection closed: %s", config.Name, client.markDisconnected(errors.New("connection closed")))
 		}),
 	}
 	if config.CredentialsFile != "" {
@@ -107,24 +119,70 @@ func connectNATS(config NatsServerConfig) (*natsClient, error) {
 	return client, nil
 }
 
-// markDisconnected records why the connection dropped. The first reason wins so
-// a reconnect storm does not overwrite the cause that started it.
-func (c *natsClient) markDisconnected(err error) {
+// markDisconnected records why the connection dropped and returns the reason.
+// The first reason wins so a reconnect storm does not overwrite the cause that
+// started it.
+func (c *natsClient) markDisconnected(err error) string {
 	reason := "connection lost"
 	if err != nil {
 		reason = err.Error()
 	}
 	c.connMu.Lock()
-	if c.connIssue == "" {
+	if c.connIssue != "" {
+		reason = c.connIssue
+	} else {
 		c.connIssue = reason
 	}
 	c.connMu.Unlock()
+	return reason
 }
 
-func (c *natsClient) markConnected() {
+// markConnected clears the reason and reports whether the connection had been
+// marked down, so a reconnect is only logged when it is a recovery.
+func (c *natsClient) markConnected() bool {
 	c.connMu.Lock()
+	wasDown := c.connIssue != ""
 	c.connIssue = ""
 	c.connMu.Unlock()
+	return wasDown
+}
+
+// trackSub records a long-lived subscription for the diagnostics dump. Entries
+// that are no longer valid are dropped so the list cannot grow without bound.
+func (c *natsClient) trackSub(sub *nats.Subscription) {
+	if sub == nil {
+		return
+	}
+	c.subsMu.Lock()
+	live := c.tracked[:0]
+	for _, existing := range c.tracked {
+		if existing.IsValid() {
+			live = append(live, existing)
+		}
+	}
+	c.tracked = append(live, sub)
+	c.subsMu.Unlock()
+}
+
+// logStats writes connection and per-subscription counters to the log. It exists
+// to attribute delivered messages to subscriptions, which the server-side
+// counters cannot do when a connection receives far more than its subscriptions
+// account for.
+func (c *natsClient) logStats() {
+	stats := c.conn.Stats()
+	log.Printf("nats %q stats: in_msgs=%d out_msgs=%d in_bytes=%d out_bytes=%d reconnects=%d subs=%d tracked=%d",
+		c.config.Name, stats.InMsgs, stats.OutMsgs, stats.InBytes, stats.OutBytes, stats.Reconnects,
+		c.conn.NumSubscriptions(), len(c.tracked))
+	c.subsMu.Lock()
+	tracked := append([]*nats.Subscription(nil), c.tracked...)
+	c.subsMu.Unlock()
+	for _, sub := range tracked {
+		delivered, _ := sub.Delivered()
+		dropped, _ := sub.Dropped()
+		pendingMsgs, pendingBytes, _ := sub.Pending()
+		log.Printf("nats %q sub %q: delivered=%d dropped=%d pending=%d/%dB",
+			c.config.Name, sub.Subject, delivered, dropped, pendingMsgs, pendingBytes)
+	}
 }
 
 // connectionIssue reports why the connection is unusable, or "" while it works.
@@ -385,13 +443,25 @@ func (c *natsClient) readObject(bucket, name string) ([]byte, error) {
 	return data, err
 }
 
+// objectChunkSize is the chunk size for new object writes. The library default
+// is 128 KiB, which turns a single snapshot into five or more roundtrips; 512 KiB
+// keeps a chunk message well under the 1 MiB default server max_payload.
+const objectChunkSize = 512 * 1024
+
+// putObject writes an object with objectChunkSize chunks. The chunk size is
+// recorded per object, so objects written by older builds keep their old size.
+func (c *natsClient) putObject(store nats.ObjectStore, name string, data []byte) error {
+	meta := &nats.ObjectMeta{Name: name, Opts: &nats.ObjectMetaOptions{ChunkSize: objectChunkSize}}
+	_, err := store.Put(meta, bytes.NewReader(data))
+	return err
+}
+
 func (c *natsClient) writeObject(bucket, name string, data []byte) error {
 	store, err := c.objectStore(bucket)
 	if err != nil {
 		return err
 	}
-	_, err = store.PutBytes(name, data)
-	return err
+	return c.putObject(store, name, data)
 }
 
 func (c *natsClient) deleteObject(bucket, name string) error {
@@ -471,9 +541,19 @@ func collabPresenceSubject(bucket, documentID string) string {
 	return "wb.crdt.v2." + collabBucketToken(bucket) + "." + documentID + ".presence"
 }
 
+// streamRevalidateDelay bounds how often a failed publish re-checks the stream.
+// Without it, an outage turns every queued outbox entry into a StreamInfo
+// roundtrip.
+const streamRevalidateDelay = 5 * time.Second
+
 func (c *natsClient) invalidateCollabStream(bucket string) {
+	name := collabStreamName(bucket)
 	c.streamMu.Lock()
-	delete(c.streams, collabStreamName(bucket))
+	delete(c.streams, name)
+	if c.streamRetry == nil {
+		c.streamRetry = map[string]time.Time{}
+	}
+	c.streamRetry[name] = time.Now().Add(streamRevalidateDelay)
 	c.streamMu.Unlock()
 }
 
@@ -489,6 +569,14 @@ func (c *natsClient) ensureCollabStream(bucket string) (string, error) {
 	defer c.streamMu.Unlock()
 	if _, ready = c.streams[name]; ready {
 		return name, nil
+	}
+	if until, ok := c.streamRetry[name]; ok {
+		if time.Now().Before(until) {
+			// Recently failed: let the publish fail fast instead of paying for
+			// another StreamInfo on every queued update.
+			return name, nil
+		}
+		delete(c.streamRetry, name)
 	}
 	if info, err := c.js.StreamInfo(name); err == nil {
 		base := info.Config
@@ -871,7 +959,7 @@ func (c *natsClient) writeSharedLibrary(data []byte) error {
 	}
 	c.libraryOwn[digest] = struct{}{}
 	c.libraryMu.Unlock()
-	if _, err = store.PutBytes(libraryName, data); err != nil {
+	if err = c.putObject(store, libraryName, data); err != nil {
 		c.libraryMu.Lock()
 		delete(c.libraryOwn, digest)
 		c.libraryMu.Unlock()
@@ -987,6 +1075,7 @@ func (c *natsClient) watchLibrary(onChange func([]byte)) error {
 		return err
 	}
 	c.libraryWatcher = sub
+	c.trackSub(sub)
 	return nil
 }
 
