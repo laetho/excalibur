@@ -67,7 +67,7 @@ const COLLAB_UPDATE_INTERVAL_MS = 150
 /** Active drags/resizes publish durable checkpoints less often; live deltas mask the gap. */
 const COLLAB_ACTIVE_UPDATE_INTERVAL_MS = 1_000
 /** Ephemeral scene deltas sent over Core NATS while an element interaction is active. */
-const LIVE_COLLAB_UPDATE_INTERVAL_MS = 100
+const LIVE_COLLAB_UPDATE_INTERVAL_MS = 150
 /** Revert live-only element state if its sender disappears before a durable checkpoint. */
 const LIVE_COLLAB_TTL_MS = 3_000
 const LIVE_COLLAB_EXPIRY_SWEEP_MS = 500
@@ -79,11 +79,20 @@ const COLLAB_INITIAL_SNAPSHOT_DELAY_MS = 2_000
 /** Cursor presence is best-effort; 10fps is enough while keeping constrained links usable. */
 const POINTER_UPDATE_INTERVAL_MS = 100
 /** Laser trails need a denser stream than a cursor to look smooth. */
-const LASER_UPDATE_INTERVAL_MS = 33
+const LASER_UPDATE_INTERVAL_MS = 50
 const PRESENCE_TTL_MS = 30_000
-/** Leader lease TTL and how often it is renewed/contested while collaborating. */
-const LOCK_TTL_SECONDS = 30
-const LOCK_RENEW_MS = 10_000
+/**
+ * An idle peer only needs one view before its TTL runs out. Any publish already
+ * refreshes it, so heartbeats are throttled well below the sweep interval.
+ */
+const PRESENCE_HEARTBEAT_MS = 12_000
+/**
+ * Leader lease TTL and how often it is renewed/contested while collaborating.
+ * Renewing every third of the TTL keeps a stale holder from blocking the board
+ * for at most one renewal period while cutting CAS roundtrips threefold.
+ */
+const LOCK_TTL_SECONDS = 90
+const LOCK_RENEW_MS = 30_000
 /** Scrolling and zooming are reported less often than edits; only the last position matters. */
 const VIEW_DEBOUNCE_MS = 500
 const LIBRARY_FILE = /\.excalidrawlib$/i
@@ -521,6 +530,8 @@ export default function Canvas({
   const [followerNames, setFollowerNames] = useState<string[]>([])
   const pendingBounds = useRef<Bounds | null>(null)
   const lastSentBounds = useRef('')
+  /** When this peer last published anything that refreshes its presence TTL. */
+  const lastPresenceSentAt = useRef(0)
   const nicknameRef = useRef('')
   nicknameRef.current = collaborationNickname.trim()
   const colorRef = useRef('')
@@ -868,6 +879,7 @@ export default function Canvas({
       collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(view))
     }
     if (message) collabSend(target.sourceId, target.bucket, target.documentId, JSON.stringify(message))
+    if (bounds || message) lastPresenceSentAt.current = Date.now()
   }, [])
 
   // Let everyone see a changed name, color or avatar right away instead of at the next heartbeat.
@@ -1848,11 +1860,15 @@ export default function Canvas({
         presenceTimer.current = setInterval(() => {
           const instance = api.current
           if (!instance) return
-          // Heartbeat: keeps this peer listed (and followable) while idle.
-          const own = getVisibleSceneBounds(instance.getAppState())
-          lastSentBounds.current = own.join(',')
-          pendingBounds.current = own
-          flushPointer()
+          // Heartbeat: keeps this peer listed (and followable) while idle. Any
+          // publish refreshes the peer's TTL, so only re-assert the view when the
+          // last one is about to age out.
+          if (Date.now() - lastPresenceSentAt.current >= PRESENCE_HEARTBEAT_MS) {
+            const own = getVisibleSceneBounds(instance.getAppState())
+            lastSentBounds.current = own.join(',')
+            pendingBounds.current = own
+            flushPointer()
+          }
           const cutoff = Date.now() - PRESENCE_TTL_MS
           const followed = instance.getAppState().userToFollow
           if (followed) sendFollow(followed.socketId, 'FOLLOW')

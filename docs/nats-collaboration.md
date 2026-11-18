@@ -243,12 +243,26 @@ Events authored by the same peer are also reconciled during retained replay.
 They may be harmless live echoes, but after reopening they can be newer than the
 loaded snapshot and must not be discarded.
 
+## Object chunking
+
+New objects are written with 512 KiB chunks instead of the library default of
+128 KiB, so a few-hundred-kilobyte snapshot is one or two records rather than
+five or more. The chunk size is recorded per object: objects written by older
+builds keep their original size and are read unchanged. A chunk message must
+stay under the server `max_payload`, which defaults to 1 MiB, hence the half.
+
+Board details are also cached against the board revision: the open board is
+re-read on every refresh, but a background board is only re-read when its object
+changed, because each read costs an object fetch and an ephemeral ordered
+consumer.
+
 ## Snapshot leadership and compaction
 
 All clients may publish live updates. Snapshot creation is restricted to one
 lease holder per document:
 
-- clients contend for a 30-second lease in the `excalibur-locks` KV bucket;
+- clients contend for a 90-second lease in the `excalibur-locks` KV bucket,
+  renewed every 30 seconds;
 - the holder renews the lease while the board remains open;
 - a crashed or disconnected holder can be replaced after expiry; and
 - CAS operations prevent a stale holder from overwriting a newer lease or
@@ -276,7 +290,9 @@ the laser trail is drawn from the press/release edges, so those are never
 coalesced away, and laser positions are sent at a higher rate than cursors.
 `view` messages carry the scene rectangle a peer currently sees. They are sent
 on scroll/zoom, on join, and as a heartbeat, so an idle peer stays listed and
-can be followed. When a user follows a peer from Excalidraw's user list, the
+can be followed. Any presence message refreshes that peer's TTL, so the
+heartbeat is throttled to one `view` every 12 seconds for a peer that publishes
+nothing else, rather than firing on every TTL sweep. When a user follows a peer from Excalidraw's user list, the
 follower fits the peer's last known rectangle into its own viewport and tracks
 every later `view` message until the follower scrolls or zooms. A followed view
 is not saved as the board's remembered viewport.
