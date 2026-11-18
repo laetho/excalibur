@@ -1793,3 +1793,24 @@ func TestInvalidateCollabStreamBacksOffRevalidation(t *testing.T) {
 		t.Fatalf("revalidation deadline is %v away, want (0, %v]", wait, streamRevalidateDelay)
 	}
 }
+
+func TestSnapshotCacheRequiresTheSameSequence(t *testing.T) {
+	client := &natsClient{}
+	if _, ok := client.cachedSnapshot("bucket", "doc", 1); ok {
+		t.Fatal("an empty cache returned a snapshot")
+	}
+	client.cacheSnapshot("bucket", "doc", 2, []byte("scene"))
+	if data, ok := client.cachedSnapshot("bucket", "doc", 2); !ok || string(data) != "scene" {
+		t.Fatalf("cache miss for the same sequence (hit=%v)", ok)
+	}
+	if _, ok := client.cachedSnapshot("bucket", "doc", 3); ok {
+		t.Fatal("cache served a snapshot from a different sequence")
+	}
+	if _, ok := client.cachedSnapshot("bucket", "other", 2); ok {
+		t.Fatal("cache leaked across documents")
+	}
+	client.cacheSnapshot("bucket", "big", 1, make([]byte, snapshotCacheMaxBytes+1))
+	if _, ok := client.cachedSnapshot("bucket", "big", 1); ok {
+		t.Fatal("an oversized snapshot must not be cached")
+	}
+}

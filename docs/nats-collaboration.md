@@ -254,7 +254,10 @@ stay under the server `max_payload`, which defaults to 1 MiB, hence the half.
 Board details are also cached against the board revision: the open board is
 re-read on every refresh, but a background board is only re-read when its object
 changed, because each read costs an object fetch and an ephemeral ordered
-consumer.
+consumer. Materialized snapshots are cached by index sequence as well, so
+re-reading an unchanged document costs one KV lookup instead of downloading the
+chunked snapshot object again. Snapshot objects are immutable per sequence,
+which is what makes that cache safe.
 
 ## Snapshot leadership and compaction
 

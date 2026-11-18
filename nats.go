@@ -48,6 +48,12 @@ type natsClient struct {
 	// diagnostics dump can attribute deliveries to them.
 	subsMu  sync.Mutex
 	tracked []*nats.Subscription
+
+	// snapshotCache keeps recently materialized snapshots. Snapshot objects are
+	// immutable per sequence, so rediscovering the same index sequence can be
+	// answered without fetching the chunked object again.
+	snapMu    sync.Mutex
+	snapshots map[string]snapshotCacheEntry
 	// instanceID identifies this app run. Durable consumer names embed it so a
 	// restarted client starts a fresh consumer instead of competing with the one
 	// its predecessor left behind.
@@ -837,6 +843,53 @@ func (c *natsClient) writeCollabSnapshot(bucket, documentID string, sequence uin
 	return c.activateCollabSnapshot(bucket, documentID, name, sequence)
 }
 
+// snapshotCacheEntry is one cached materialized snapshot.
+type snapshotCacheEntry struct {
+	sequence uint64
+	data     []byte
+}
+
+const (
+	// snapshotCacheLimit bounds how many documents keep a snapshot in memory.
+	snapshotCacheLimit = 8
+	// snapshotCacheMaxBytes skips caching objects large enough to make the cache
+	// a memory problem rather than a roundtrip saving.
+	snapshotCacheMaxBytes = 4 << 20
+)
+
+func snapshotCacheKey(bucket, documentID string) string {
+	return bucket + "\x00" + documentID
+}
+
+// cachedSnapshot returns a snapshot only when it is the same immutable sequence.
+func (c *natsClient) cachedSnapshot(bucket, documentID string, sequence uint64) ([]byte, bool) {
+	c.snapMu.Lock()
+	defer c.snapMu.Unlock()
+	entry, ok := c.snapshots[snapshotCacheKey(bucket, documentID)]
+	if !ok || entry.sequence != sequence {
+		return nil, false
+	}
+	return entry.data, true
+}
+
+func (c *natsClient) cacheSnapshot(bucket, documentID string, sequence uint64, data []byte) {
+	if len(data) > snapshotCacheMaxBytes {
+		return
+	}
+	c.snapMu.Lock()
+	if c.snapshots == nil {
+		c.snapshots = map[string]snapshotCacheEntry{}
+	}
+	if len(c.snapshots) >= snapshotCacheLimit {
+		for key := range c.snapshots {
+			delete(c.snapshots, key)
+			break
+		}
+	}
+	c.snapshots[snapshotCacheKey(bucket, documentID)] = snapshotCacheEntry{sequence: sequence, data: data}
+	c.snapMu.Unlock()
+}
+
 func (c *natsClient) latestCollabSnapshot(bucket, documentID string) ([]byte, uint64, error) {
 	if !validDocumentID(documentID) {
 		return nil, 0, errors.New("invalid collaboration document id")
@@ -847,7 +900,11 @@ func (c *natsClient) latestCollabSnapshot(bucket, documentID string) ([]byte, ui
 	if index, err := c.readCollabSnapshotIndex(bucket, documentID); err == nil && index.Sequence > 0 && strings.HasPrefix(index.Name, prefix) {
 		var nameSequence uint64
 		if _, parseErr := fmt.Sscanf(strings.TrimPrefix(index.Name, prefix), "%d", &nameSequence); parseErr == nil && nameSequence == index.Sequence {
+			if data, ok := c.cachedSnapshot(bucket, documentID, index.Sequence); ok {
+				return data, index.Sequence, nil
+			}
 			if data, readErr := c.readObject(bucket, index.Name); readErr == nil && data != nil {
+				c.cacheSnapshot(bucket, documentID, index.Sequence, data)
 				return data, index.Sequence, nil
 			}
 		}
@@ -873,6 +930,7 @@ func (c *natsClient) latestCollabSnapshot(bucket, documentID string) ([]byte, ui
 	}
 	data, err := c.readObject(bucket, latestName)
 	if err == nil && data != nil {
+		c.cacheSnapshot(bucket, documentID, latest, data)
 		_ = c.updateCollabSnapshotIndex(bucket, documentID, collabSnapshotIndex{Name: latestName, Sequence: latest})
 	}
 	return data, latest, err
@@ -893,7 +951,11 @@ func (c *natsClient) collabSnapshotAfter(bucket, documentID string, after uint64
 		}
 		var nameSequence uint64
 		if _, parseErr := fmt.Sscanf(strings.TrimPrefix(index.Name, prefix), "%d", &nameSequence); parseErr == nil && nameSequence == index.Sequence {
+			if data, ok := c.cachedSnapshot(bucket, documentID, index.Sequence); ok {
+				return data, index.Sequence, nil
+			}
 			if data, readErr := c.readObject(bucket, index.Name); readErr == nil && data != nil {
+				c.cacheSnapshot(bucket, documentID, index.Sequence, data)
 				return data, index.Sequence, nil
 			}
 		}
