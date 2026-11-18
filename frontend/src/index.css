@@ -593,18 +593,18 @@ select,
   }
 }
 
-/* The finding + sorting row lives under the boards it acts on. It stays quiet
- * until touched and sticks to the bottom edge, so a long list cannot hide it. */
+/* The finding + sorting row heads the boards it acts on. It stays quiet until
+ * touched and sticks to the top edge, so a long list cannot hide it. */
 .tree-tools {
   position: sticky;
-  bottom: 0;
+  top: 0;
   z-index: 1;
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-top: 2px;
-  padding: 6px 4px 4px;
-  background: linear-gradient(to bottom, transparent, var(--sidebar-bg) 40%);
+  margin-bottom: 2px;
+  padding: 2px 4px 4px;
+  background: linear-gradient(to bottom, var(--sidebar-bg) 72%, transparent);
 }
 
 .tree-find {

@@ -977,7 +977,6 @@ function SourceTree({
         </div>
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
-            {children}
             <div className="tree-tools">
               <label className="tree-find">
                 <SearchIcon className="tree-find-icon" aria-hidden="true" />
@@ -1001,6 +1000,7 @@ function SourceTree({
                 {sortOrder === 'name' ? 'A–Z' : 'Newest'}
               </button>
             </div>
+            {children}
           </div>
         )}
       </div>
