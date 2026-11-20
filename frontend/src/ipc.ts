@@ -40,20 +40,21 @@ export type GroupInfo = { id: string; name: string; kind: 'folder' | 'bucket' }
 export type SourceInfo = { id: string; name: string; kind: 'local' | 'nats'; groups: GroupInfo[] }
 
 /**
- * A folder or bucket pinned open: its boards stay in the sidebar while another
- * group is active. The active group's entry carries an empty board list, since
- * its boards are already shown.
+ * A folder or bucket kept open: its boards stay in the sidebar while another
+ * group is active (only in "multi" mode). The active group's entry carries an
+ * empty board list, since its boards are already shown.
  */
-export type PinnedGroupInfo = { source: string; group: string; boards: BoardInfo[] }
+export type ExpandedGroupInfo = { source: string; group: string; boards: BoardInfo[] }
 
 /**
- * How one folder or bucket looks in the sidebar. The default (find box open, no
- * filter, list expanded) is not stored, so a group only appears once touched.
+ * How one folder or bucket looks in the sidebar. The find box is always shown
+ * for an open list, so it is not stored. The default (no filter, list expanded)
+ * is not stored, so a group only appears once touched.
  */
-export type GroupState = { source: string; group: string; query?: string; find: boolean; folded: boolean }
+export type GroupState = { source: string; group: string; query?: string; folded: boolean }
 
 /** A change to a group's sidebar state; omitted fields keep their value. */
-export type GroupStatePatch = { source: string; group: string; query?: string; find?: boolean; folded?: boolean }
+export type GroupStatePatch = { source: string; group: string; query?: string; folded?: boolean }
 
 /** A NATS server the user added (persisted in preferences). */
 export type NatsServerConfig = {
@@ -96,8 +97,10 @@ export type StoreSnapshot = {
   activeSource: string
   /** The active group id (a folder path or a bucket name). */
   activeGroup: string
-  /** Folders and buckets pinned open, with their boards. */
-  pinned: PinnedGroupInfo[]
+  /** Folders and buckets kept open, with their boards (empty in single mode). */
+  expanded: ExpandedGroupInfo[]
+  /** How folders open: "single" (one at a time) or "multi" (open freely). */
+  groupOpenMode: 'single' | 'multi'
   /** Sidebar state saved for the folders and buckets the user has touched. */
   tree: GroupState[]
   ai: AISettings
@@ -271,9 +274,11 @@ export const addBucket = (sourceId: string, bucket: string) => app().AddBucket(s
 export const deleteBucket = (sourceId: string, bucket: string) => app().DeleteBucket(sourceId, bucket)
 /** Switches the sidebar's active source/group (a local folder or a NATS bucket). */
 export const activateSource = (sourceId: string, groupId: string) => app().ActivateSource(sourceId, groupId)
-/** Pins a folder or bucket open so its boards stay visible beside the active group. */
-export const togglePinnedGroup = (sourceId: string, groupId: string) => app().TogglePinnedGroup(sourceId, groupId)
-/** Saves a folder or bucket's sidebar state (find box, filter, folded list). */
+/** Expands or collapses a folder or bucket so its boards stay beside the active group. */
+export const toggleGroupExpanded = (sourceId: string, groupId: string) => app().ToggleGroupExpanded(sourceId, groupId)
+/** Sets whether the sidebar opens one folder at a time or keeps several open. */
+export const setGroupOpenMode = (mode: 'single' | 'multi') => app().SetGroupOpenMode(mode)
+/** Saves a folder or bucket's sidebar state (filter, folded list). */
 export const setGroupState = (patch: GroupStatePatch) => app().SetGroupState(patch)
 /** Copies a board into another source/group (drag & drop between sources). */
 export const copyBoardToSource = (boardId: string, targetSource: string, targetGroup: string) =>

@@ -151,9 +151,9 @@ func (s *Store) removeNatsServer(id string) error {
 	}
 	removed := s.prefs.NatsServers[index]
 	s.prefs.NatsServers = append(s.prefs.NatsServers[:index], s.prefs.NatsServers[index+1:]...)
-	for _, pin := range append([]PinnedGroup(nil), s.prefs.Pinned...) {
+	for _, pin := range append([]ExpandedGroup(nil), s.prefs.Expanded...) {
 		if pin.Source == "nats:"+id {
-			s.unpinGroup(pin.Source, pin.Group)
+			s.collapseGroup(pin.Source, pin.Group)
 		}
 	}
 	for _, state := range append([]GroupState(nil), s.prefs.Tree...) {
@@ -225,7 +225,7 @@ func (s *Store) deleteBucket(sourceID, bucket string) error {
 			continue
 		}
 		server.Buckets = slices.DeleteFunc(server.Buckets, func(existing string) bool { return existing == bucket })
-		s.unpinGroup(sourceID, bucket)
+		s.collapseGroup(sourceID, bucket)
 		s.forgetGroup(sourceID, bucket)
 		if s.activeSource == sourceID && s.activeGroup == bucket {
 			if len(server.Buckets) > 0 {
@@ -414,7 +414,7 @@ func (s *Store) removeLocalFolder(folder string) error {
 	}
 	s.localFolders = slices.Delete(s.localFolders, index, index+1)
 	s.syncLocalFolderPrefs()
-	s.unpinGroup(localSourceID, folder)
+	s.collapseGroup(localSourceID, folder)
 	s.forgetGroup(localSourceID, folder)
 	if s.activeSource == localSourceID && s.activeGroup == folder {
 		return s.activateSource(localSourceID, s.localFolders[0])

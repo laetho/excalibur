@@ -111,6 +111,10 @@ Morgan le Fayl) or the split-pane button in the sidebar. Each pane can show a
 local boards folder or a bucket, and the panel is confined to those roots, so it
 never reaches outside them.
 
+In Settings → Boards, **Sidebar folders** controls how the sidebar opens folders
+and buckets: **One at a time** (the default) opens only the active one, while
+**Open freely** keeps several board lists open at once.
+
 Drag a selection onto the other pane (or onto a folder row) to **move** it, or
 hold **⌥/Alt** while dropping to **copy**. **Move over** and **Copy over** appear
 in the panel header as soon as a pane has a selection and do the same without

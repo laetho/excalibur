@@ -375,8 +375,16 @@ export function SetCollaborationNickname(nickname: string): $CancellablePromise<
 }
 
 /**
- * SetGroupState remembers how a folder or bucket looks in the sidebar: whether
- * its find box is open, what is typed in it, and whether its list is folded.
+ * SetGroupOpenMode sets whether the sidebar opens one folder at a time or lets
+ * several stay open, following the SetSort/SetShowThumbnails pattern.
+ */
+export function SetGroupOpenMode(mode: string): $CancellablePromise<void> {
+    return $Call.ByID(1971624865, mode);
+}
+
+/**
+ * SetGroupState remembers how a folder or bucket looks in the sidebar: what is
+ * typed in its find box, and whether its list is folded.
  */
 export function SetGroupState(patch: $models.GroupStatePatch): $CancellablePromise<void> {
     return $Call.ByID(676065207, patch);
@@ -407,11 +415,12 @@ export function ToggleFullscreen(): $CancellablePromise<void> {
 }
 
 /**
- * TogglePinnedGroup pins a folder or bucket so its boards stay visible while
- * another group is active.
+ * ToggleGroupExpanded expands or collapses a folder or bucket so its boards
+ * stay visible beside the active group. It is a no-op in single mode, where
+ * opening a folder means activating it.
  */
-export function TogglePinnedGroup(sourceID: string, groupID: string): $CancellablePromise<void> {
-    return $Call.ByID(3342281742, sourceID, groupID);
+export function ToggleGroupExpanded(sourceID: string, groupID: string): $CancellablePromise<void> {
+    return $Call.ByID(1281548229, sourceID, groupID);
 }
 
 /**

@@ -100,32 +100,34 @@ type Preferences struct {
 	NatsServers      []NatsServerConfig  `json:"natsServers"`
 	ActiveSource     string              `json:"activeSource,omitempty"`
 	ActiveGroup      string              `json:"activeGroup,omitempty"`
-	Pinned           []PinnedGroup       `json:"pinned,omitempty"`
+	Expanded         []ExpandedGroup     `json:"expanded,omitempty"`
+	GroupOpenMode    string              `json:"groupOpenMode,omitempty"`
 	Tree             []GroupState        `json:"tree,omitempty"`
 	AI               AIConfig            `json:"ai"`
 }
 
-// PinnedGroup is a folder or bucket kept open in the tree while another one is active.
-type PinnedGroup struct {
+// ExpandedGroup is a folder or bucket kept open in the tree while another one is
+// active, only relevant when GroupOpenMode is multi.
+type ExpandedGroup struct {
 	Source string `json:"source"`
 	Group  string `json:"group"`
 }
 
-// PinnedGroupInfo is a pinned group and the boards it holds.
-type PinnedGroupInfo struct {
+// ExpandedGroupInfo is an expanded group and the boards it holds.
+type ExpandedGroupInfo struct {
 	Source string      `json:"source"`
 	Group  string      `json:"group"`
 	Boards []BoardInfo `json:"boards"`
 }
 
-// GroupState is how one folder or bucket looked in the sidebar: whether its
-// find box is showing, what is typed in it, and whether the list is folded.
-// The default (find box open, list expanded, no filter) is not stored.
+// GroupState is how one folder or bucket looked in the sidebar: what is typed
+// in its find box, and whether the list is folded. The find box is always shown
+// for an open list, so it is not part of the stored state. The default (list
+// expanded, no filter) is not stored.
 type GroupState struct {
 	Source string `json:"source"`
 	Group  string `json:"group"`
 	Query  string `json:"query,omitempty"`
-	Find   bool   `json:"find"`
 	Folded bool   `json:"folded"`
 }
 
@@ -134,8 +136,24 @@ type GroupStatePatch struct {
 	Source string  `json:"source"`
 	Group  string  `json:"group"`
 	Query  *string `json:"query,omitempty"`
-	Find   *bool   `json:"find,omitempty"`
 	Folded *bool   `json:"folded,omitempty"`
+}
+
+// groupOpenSingle is the default: opening a folder activates it and closes the
+// previous one, so only one board list is ever open.
+const groupOpenSingle = "single"
+
+// groupOpenMulti lets several folders stay open at once; clicking a header
+// opens or closes that list without changing the active group.
+const groupOpenMulti = "multi"
+
+// normalizeGroupOpenMode maps a stored value to a known mode. Empty or unknown
+// values fall back to single so existing preference files need no migration.
+func normalizeGroupOpenMode(mode string) string {
+	if mode == groupOpenMulti {
+		return groupOpenMulti
+	}
+	return groupOpenSingle
 }
 
 type Board struct {
@@ -214,7 +232,8 @@ type StoreSnapshot struct {
 	NatsServers      []NatsServerSettings `json:"natsServers"`
 	ActiveSource     string               `json:"activeSource"`
 	ActiveGroup      string               `json:"activeGroup"`
-	Pinned           []PinnedGroupInfo    `json:"pinned"`
+	Expanded         []ExpandedGroupInfo  `json:"expanded"`
+	GroupOpenMode    string               `json:"groupOpenMode"`
 	Tree             []GroupState         `json:"tree"`
 	AI               AISettings           `json:"ai"`
 }

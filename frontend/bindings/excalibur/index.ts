@@ -14,6 +14,7 @@ export type {
     AppVersionInfo,
     BoardInfo,
     CollabJoinResult,
+    ExpandedGroupInfo,
     FileAction,
     FileConflict,
     FileEntry,
@@ -29,7 +30,6 @@ export type {
     NatsServerSettings,
     Notice,
     PickFileResult,
-    PinnedGroupInfo,
     SourceInfo,
     StoreSnapshot
 } from "./models.js";

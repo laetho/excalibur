@@ -40,9 +40,9 @@ type Store struct {
 	// dialNATS connects a server; tests replace it to observe dialling.
 	dialNATS func(config NatsServerConfig) (*natsClient, error)
 
-	// pinnedCache holds the last listing of each pinned group, keyed by
+	// expandedCache holds the last listing of each expanded group, keyed by
 	// source+"\x00"+group, so the 2 s sidebar refresh does not re-list buckets.
-	pinnedCache map[string]pinnedBoardsEntry
+	expandedCache map[string]expandedBoardsEntry
 }
 
 // preferencesPath migrates the former ExcaliWails preferences on first launch
@@ -76,7 +76,7 @@ func newStore(prefsPath, defaultFolder string) (*Store, error) {
 	s := &Store{
 		prefsPath: prefsPath,
 		prefs:     Preferences{Viewports: map[string]Viewport{}, SortOrder: "name", CanvasAppearance: "system", ShowThumbnails: &show},
-		details:   map[string]BoardDetails{}, detailStamp: map[string]string{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS, pinnedCache: map[string]pinnedBoardsEntry{},
+		details:   map[string]BoardDetails{}, detailStamp: map[string]string{}, known: map[string][]byte{}, knownStamp: map[string]string{}, natsClients: map[string]*natsClient{}, dialNATS: connectNATS, expandedCache: map[string]expandedBoardsEntry{},
 	}
 	if data, err := os.ReadFile(prefsPath); err == nil {
 		_ = json.Unmarshal(data, &s.prefs)
@@ -820,36 +820,41 @@ func (s *Store) refreshTexts() {
 	}
 }
 
-// pinnedBoardsTTL bounds how often a pinned bucket is re-listed; the sidebar
-// refreshes every couple of seconds and each listing is a round trip per board.
-const pinnedBoardsTTL = 5 * time.Second
+// expandedBoardsTTL bounds how often an expanded bucket is re-listed; the
+// sidebar refreshes every couple of seconds and each listing is a round trip
+// per board.
+const expandedBoardsTTL = 5 * time.Second
 
-type pinnedBoardsEntry struct {
+type expandedBoardsEntry struct {
 	at     time.Time
 	boards []BoardInfo
 }
 
-// pinnedBoards lists the boards of the pinned groups other than the active one,
-// so they stay visible while another folder or bucket is open. An unreachable
-// server keeps showing its last known listing.
-func (s *Store) pinnedBoards() []PinnedGroupInfo {
-	out := make([]PinnedGroupInfo, 0, len(s.prefs.Pinned))
-	for _, pin := range s.prefs.Pinned {
+// expandedBoards lists the boards of the expanded groups other than the active
+// one, so they stay visible while another folder or bucket is open. It returns
+// nothing at all in single mode: there only the active group's list is shown.
+// An unreachable server keeps showing its last known listing.
+func (s *Store) expandedBoards() []ExpandedGroupInfo {
+	if s.groupOpenMode() == groupOpenSingle {
+		return nil
+	}
+	out := make([]ExpandedGroupInfo, 0, len(s.prefs.Expanded))
+	for _, pin := range s.prefs.Expanded {
 		if pin.Source == s.activeSource && pin.Group == s.activeGroup {
 			// The active group already shows its boards, so only tell the sidebar
-			// that it is pinned.
-			out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: []BoardInfo{}})
+			// that it is expanded.
+			out = append(out, ExpandedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: []BoardInfo{}})
 			continue
 		}
 		key := pin.Source + "\x00" + pin.Group
-		if entry, ok := s.pinnedCache[key]; ok && time.Since(entry.at) < pinnedBoardsTTL {
-			out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
+		if entry, ok := s.expandedCache[key]; ok && time.Since(entry.at) < expandedBoardsTTL {
+			out = append(out, ExpandedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
 			continue
 		}
 		boards, err := s.listGroupBoards(pin.Source, pin.Group)
 		if err != nil {
-			if entry, ok := s.pinnedCache[key]; ok {
-				out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
+			if entry, ok := s.expandedCache[key]; ok {
+				out = append(out, ExpandedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: entry.boards})
 			}
 			continue
 		}
@@ -862,47 +867,52 @@ func (s *Store) pinnedBoards() []PinnedGroupInfo {
 			}
 			infos = append(infos, info)
 		}
-		s.pinnedCache[key] = pinnedBoardsEntry{at: time.Now(), boards: infos}
-		out = append(out, PinnedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: infos})
+		s.expandedCache[key] = expandedBoardsEntry{at: time.Now(), boards: infos}
+		out = append(out, ExpandedGroupInfo{Source: pin.Source, Group: pin.Group, Boards: infos})
 	}
 	return out
 }
 
-// togglePinnedGroup pins or unpins a folder or bucket and reports the new state.
-func (s *Store) togglePinnedGroup(sourceID, group string) bool {
-	for i, pin := range s.prefs.Pinned {
+// toggleGroupExpanded expands or collapses a folder or bucket and reports the
+// new state. In single mode it is a no-op that returns false: opening a folder
+// there means activating it, not keeping it open beside another.
+func (s *Store) toggleGroupExpanded(sourceID, group string) bool {
+	if s.groupOpenMode() == groupOpenSingle {
+		return false
+	}
+	for i, pin := range s.prefs.Expanded {
 		if pin.Source == sourceID && pin.Group == group {
-			s.prefs.Pinned = slices.Delete(s.prefs.Pinned, i, i+1)
-			delete(s.pinnedCache, sourceID+"\x00"+group)
+			s.prefs.Expanded = slices.Delete(s.prefs.Expanded, i, i+1)
+			delete(s.expandedCache, sourceID+"\x00"+group)
 			s.savePrefs()
 			return false
 		}
 	}
-	s.prefs.Pinned = append(s.prefs.Pinned, PinnedGroup{Source: sourceID, Group: group})
+	s.prefs.Expanded = append(s.prefs.Expanded, ExpandedGroup{Source: sourceID, Group: group})
 	s.savePrefs()
 	return true
 }
 
-// unpinGroup forgets a pin, e.g. when its folder or bucket is gone.
-func (s *Store) unpinGroup(sourceID, group string) {
-	for i, pin := range s.prefs.Pinned {
+// collapseGroup forgets an expanded group, e.g. when its folder or bucket is gone.
+func (s *Store) collapseGroup(sourceID, group string) {
+	for i, pin := range s.prefs.Expanded {
 		if pin.Source == sourceID && pin.Group == group {
-			s.prefs.Pinned = slices.Delete(s.prefs.Pinned, i, i+1)
-			delete(s.pinnedCache, sourceID+"\x00"+group)
+			s.prefs.Expanded = slices.Delete(s.prefs.Expanded, i, i+1)
+			delete(s.expandedCache, sourceID+"\x00"+group)
 			return
 		}
 	}
 }
 
 // groupState is how a folder or bucket looks in the tree. A group the user has
-// never touched shows its find box and an expanded list.
+// never touched shows an expanded list with no filter.
 func (s *Store) groupState(sourceID, group string) GroupState {
 	for _, state := range s.prefs.Tree {
 		if state.Source == sourceID && state.Group == group {
 			return state
 		}
 	}
-	return GroupState{Source: sourceID, Group: group, Find: true}
+	return GroupState{Source: sourceID, Group: group}
 }
 
 // applyGroupState stores a change to a folder or bucket's tree state, and drops
@@ -911,9 +921,6 @@ func (s *Store) applyGroupState(patch GroupStatePatch) {
 	state := s.groupState(patch.Source, patch.Group)
 	if patch.Query != nil {
 		state.Query = *patch.Query
-	}
-	if patch.Find != nil {
-		state.Find = *patch.Find
 	}
 	if patch.Folded != nil {
 		state.Folded = *patch.Folded
@@ -926,11 +933,27 @@ func (s *Store) applyGroupState(patch GroupStatePatch) {
 		}
 		tree = append(tree, existing)
 	}
-	if state.Query != "" || !state.Find || state.Folded {
+	if state.Query != "" || state.Folded {
 		tree = append(tree, state)
 	}
 	s.prefs.Tree = tree
 	s.savePrefs()
+}
+
+// groupOpenMode returns the normalized folder-open mode.
+func (s *Store) groupOpenMode() string {
+	return normalizeGroupOpenMode(s.prefs.GroupOpenMode)
+}
+
+// setGroupOpenMode stores the folder-open mode, rejecting anything that is not
+// a known value so a bad write cannot leave the tree in an undefined state.
+func (s *Store) setGroupOpenMode(mode string) error {
+	if mode != groupOpenSingle && mode != groupOpenMulti {
+		return errors.New("invalid group open mode")
+	}
+	s.prefs.GroupOpenMode = mode
+	s.savePrefs()
+	return nil
 }
 
 // forgetGroup drops the tree state of a folder or bucket that is gone.
@@ -972,7 +995,7 @@ func (s *Store) snapshot() StoreSnapshot {
 	for _, folder := range s.localFolders {
 		localGroups = append(localGroups, GroupInfo{ID: folder, Name: displayPath(folder), Kind: "folder"})
 	}
-	pinned := s.pinnedBoards()
+	expanded := s.expandedBoards()
 	sources := []SourceInfo{{ID: localSourceID, Name: "Local", Kind: "local", Groups: localGroups}}
 	natsServers := make([]NatsServerSettings, 0, len(s.prefs.NatsServers))
 	for _, server := range s.prefs.NatsServers {
@@ -988,7 +1011,7 @@ func (s *Store) snapshot() StoreSnapshot {
 		folder = displayPath(s.activeGroup)
 	}
 	ai := AISettings{Enabled: s.prefs.AI.Enabled, BaseURL: s.prefs.AI.BaseURL, Model: s.prefs.AI.Model, HasAPIKey: s.prefs.AI.APIKey != ""}
-	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, Pinned: pinned, Tree: append([]GroupState(nil), s.prefs.Tree...), AI: ai}
+	return StoreSnapshot{Folder: folder, Boards: boards, Selection: selection, SortOrder: s.prefs.SortOrder, ShowThumbnails: *s.prefs.ShowThumbnails, CanvasAppearance: s.prefs.CanvasAppearance, ApplicationZoom: s.prefs.ApplicationZoom, CollabNickname: s.prefs.CollabNickname, CollabColor: s.prefs.CollabColor, CollabAvatar: s.prefs.CollabAvatar, CollabAvatarOnly: s.prefs.CollabAvatarOnly, Alerts: append([]Notice(nil), s.alerts...), IsAlertPresented: len(s.alerts) > 0, Sources: sources, NatsServers: natsServers, ActiveSource: s.activeSource, ActiveGroup: s.activeGroup, Expanded: expanded, GroupOpenMode: s.groupOpenMode(), Tree: append([]GroupState(nil), s.prefs.Tree...), AI: ai}
 }
 
 func displayPath(path string) string {

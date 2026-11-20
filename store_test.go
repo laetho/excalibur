@@ -205,17 +205,17 @@ func TestMultipleLocalFolders(t *testing.T) {
 func TestGroupStateRememberedPerFolderAndDroppedAtDefaults(t *testing.T) {
 	store := testStore(t)
 	folder := store.activeGroup
-	// An untouched group shows its find box and an expanded list.
-	if state := store.groupState(localSourceID, folder); !state.Find || state.Folded || state.Query != "" {
+	// An untouched group shows an expanded list with no filter.
+	if state := store.groupState(localSourceID, folder); state.Folded || state.Query != "" {
 		t.Fatalf("default group state = %+v", state)
 	}
 
-	query, hidden := "planning", false
-	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &query, Find: &hidden})
+	query := "planning"
+	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &query})
 	if len(store.prefs.Tree) != 1 {
 		t.Fatalf("group state not stored: %+v", store.prefs.Tree)
 	}
-	if state := store.groupState(localSourceID, folder); state.Query != "planning" || state.Find {
+	if state := store.groupState(localSourceID, folder); state.Query != "planning" {
 		t.Fatalf("stored group state = %+v", state)
 	}
 	// The snapshot carries it, so a restarted window can restore the tree.
@@ -224,8 +224,8 @@ func TestGroupStateRememberedPerFolderAndDroppedAtDefaults(t *testing.T) {
 	}
 
 	// Back to the default: the entry goes, so untouched groups cannot pile up.
-	empty, shown := "", true
-	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &empty, Find: &shown})
+	empty := ""
+	store.applyGroupState(GroupStatePatch{Source: localSourceID, Group: folder, Query: &empty})
 	if len(store.prefs.Tree) != 0 {
 		t.Fatalf("default group state kept: %+v", store.prefs.Tree)
 	}
@@ -244,9 +244,9 @@ func TestGroupStateRememberedPerFolderAndDroppedAtDefaults(t *testing.T) {
 	}
 }
 
-func TestPinnedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
+func TestExpandedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
 	store := testStore(t)
-	if err := store.createBoard("Pinned"); err != nil {
+	if err := store.createBoard("Expanded"); err != nil {
 		t.Fatal(err)
 	}
 	background := store.activeGroup
@@ -258,43 +258,94 @@ func TestPinnedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !store.togglePinnedGroup(localSourceID, background) {
-		t.Fatal("togglePinnedGroup reported no pin")
+	// In single mode (the default) an expanded entry is ignored: opening a folder
+	// means activating it, so no extra board lists are shown, and toggling is a
+	// no-op.
+	store.prefs.Expanded = []ExpandedGroup{{Source: localSourceID, Group: background}}
+	if len(store.snapshot().Expanded) != 0 {
+		t.Fatalf("single mode showed expanded groups: %#v", store.snapshot().Expanded)
+	}
+	if store.toggleGroupExpanded(localSourceID, background) {
+		t.Fatal("toggleGroupExpanded expanded a group in single mode")
+	}
+
+	// Multi mode: the expanded group's boards stay visible beside the active one.
+	store.prefs.Expanded = nil
+	if err := store.setGroupOpenMode(groupOpenMulti); err != nil {
+		t.Fatal(err)
+	}
+	if !store.toggleGroupExpanded(localSourceID, background) {
+		t.Fatal("toggleGroupExpanded reported no expansion")
 	}
 	snapshot := store.snapshot()
-	if len(snapshot.Pinned) != 1 {
-		t.Fatalf("pinned groups = %#v", snapshot.Pinned)
+	if len(snapshot.Expanded) != 1 {
+		t.Fatalf("expanded groups = %#v", snapshot.Expanded)
 	}
-	if groups := snapshot.Pinned[0]; groups.Source != localSourceID || groups.Group != background {
-		t.Fatalf("pinned group = %s/%s", groups.Source, groups.Group)
+	if groups := snapshot.Expanded[0]; groups.Source != localSourceID || groups.Group != background {
+		t.Fatalf("expanded group = %s/%s", groups.Source, groups.Group)
 	}
-	if boards := snapshot.Pinned[0].Boards; len(boards) != 1 || boards[0].Name != "Pinned" {
-		t.Fatalf("pinned boards = %#v", boards)
+	if boards := snapshot.Expanded[0].Boards; len(boards) != 1 || boards[0].Name != "Expanded" {
+		t.Fatalf("expanded boards = %#v", boards)
 	}
 
-	// Pinning the folder that is already open only marks it: its boards are in
+	// Expanding the folder that is already open only marks it: its boards are in
 	// the active list, not a second one.
-	if !store.togglePinnedGroup(localSourceID, active) {
-		t.Fatal("togglePinnedGroup reported no pin for the active folder")
+	if !store.toggleGroupExpanded(localSourceID, active) {
+		t.Fatal("toggleGroupExpanded reported no expansion for the active folder")
 	}
 	snapshot = store.snapshot()
-	if len(snapshot.Pinned) != 2 || len(snapshot.Pinned[1].Boards) != 0 {
-		t.Fatalf("pinned groups with the active folder = %#v", snapshot.Pinned)
+	if len(snapshot.Expanded) != 2 || len(snapshot.Expanded[1].Boards) != 0 {
+		t.Fatalf("expanded groups with the active folder = %#v", snapshot.Expanded)
 	}
 
-	// Each listing is cached for the sidebar's refresh; unpinning drops it.
-	store.togglePinnedGroup(localSourceID, background)
-	if len(store.pinnedCache) != 0 {
-		t.Fatalf("pin cache after unpin = %#v", store.pinnedCache)
+	// Each listing is cached for the sidebar's refresh; collapsing drops it.
+	store.toggleGroupExpanded(localSourceID, background)
+	if len(store.expandedCache) != 0 {
+		t.Fatalf("expansion cache after collapse = %#v", store.expandedCache)
 	}
 
-	// A removed folder can't stay pinned.
-	store.togglePinnedGroup(localSourceID, background)
+	// A removed folder can't stay expanded.
+	store.toggleGroupExpanded(localSourceID, background)
 	if err := store.removeLocalFolder(background); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.prefs.Pinned) != 1 || store.prefs.Pinned[0].Group != active {
-		t.Fatalf("pins after removing a folder = %#v", store.prefs.Pinned)
+	if len(store.prefs.Expanded) != 1 || store.prefs.Expanded[0].Group != active {
+		t.Fatalf("expanded groups after removing a folder = %#v", store.prefs.Expanded)
+	}
+}
+
+func TestSetGroupOpenModePersistsAndValidates(t *testing.T) {
+	store := testStore(t)
+	if got := store.groupOpenMode(); got != groupOpenSingle {
+		t.Fatalf("default group open mode = %q, want %q", got, groupOpenSingle)
+	}
+	if err := store.setGroupOpenMode(groupOpenMulti); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.groupOpenMode(); got != groupOpenMulti {
+		t.Fatalf("group open mode = %q, want %q", got, groupOpenMulti)
+	}
+	// The snapshot reports the mode.
+	if got := store.snapshot().GroupOpenMode; got != groupOpenMulti {
+		t.Fatalf("snapshot group open mode = %q, want %q", got, groupOpenMulti)
+	}
+	// GetState reports the mode to the frontend.
+	app := newApp()
+	app.store = store
+	if state, err := app.GetState(); err != nil || state.GroupOpenMode != groupOpenMulti {
+		t.Fatalf("GetState group open mode = %q, err=%v", state.GroupOpenMode, err)
+	}
+	// Junk is rejected.
+	if err := store.setGroupOpenMode("sometimes"); err == nil {
+		t.Fatal("setGroupOpenMode accepted an unknown mode")
+	}
+	// The mode survives a reload.
+	reopened, err := newStore(store.prefsPath, filepath.Join(t.TempDir(), "default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.groupOpenMode(); got != groupOpenMulti {
+		t.Fatalf("reloaded group open mode = %q, want %q", got, groupOpenMulti)
 	}
 }
 

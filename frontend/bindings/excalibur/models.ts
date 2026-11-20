@@ -81,6 +81,15 @@ export interface CollabJoinResult {
 }
 
 /**
+ * ExpandedGroupInfo is an expanded group and the boards it holds.
+ */
+export interface ExpandedGroupInfo {
+    "source": string;
+    "group": string;
+    "boards": BoardInfo[] | null;
+}
+
+/**
  * FileAction is the user's decision for one colliding source path.
  */
 export interface FileAction {
@@ -241,15 +250,15 @@ export interface GroupInfo {
 }
 
 /**
- * GroupState is how one folder or bucket looked in the sidebar: whether its
- * find box is showing, what is typed in it, and whether the list is folded.
- * The default (find box open, list expanded, no filter) is not stored.
+ * GroupState is how one folder or bucket looked in the sidebar: what is typed
+ * in its find box, and whether the list is folded. The find box is always shown
+ * for an open list, so it is not part of the stored state. The default (list
+ * expanded, no filter) is not stored.
  */
 export interface GroupState {
     "source": string;
     "group": string;
     "query"?: string;
-    "find": boolean;
     "folded": boolean;
 }
 
@@ -260,7 +269,6 @@ export interface GroupStatePatch {
     "source": string;
     "group": string;
     "query"?: string | null;
-    "find"?: boolean | null;
     "folded"?: boolean | null;
 }
 
@@ -299,15 +307,6 @@ export interface PickFileResult {
     "dataUrl": string;
 }
 
-/**
- * PinnedGroupInfo is a pinned group and the boards it holds.
- */
-export interface PinnedGroupInfo {
-    "source": string;
-    "group": string;
-    "boards": BoardInfo[] | null;
-}
-
 export interface SourceInfo {
     "id": string;
     "name": string;
@@ -333,7 +332,8 @@ export interface StoreSnapshot {
     "natsServers": NatsServerSettings[] | null;
     "activeSource": string;
     "activeGroup": string;
-    "pinned": PinnedGroupInfo[] | null;
+    "expanded": ExpandedGroupInfo[] | null;
+    "groupOpenMode": string;
     "tree": GroupState[] | null;
     "ai": AISettings;
 }

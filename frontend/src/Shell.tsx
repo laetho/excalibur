@@ -16,7 +16,6 @@ import {
   LogoMark,
   InfoIcon,
   MinusIcon,
-  ExpandIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
@@ -62,10 +61,11 @@ import {
   setAISettings,
   setShowThumbnails,
   setGroupState,
+  setGroupOpenMode,
   setSort,
   setWindowTitle,
   showAlert,
-  togglePinnedGroup,
+  toggleGroupExpanded,
   trashBoard,
   type BoardInfo,
   type BoardSortOrder,
@@ -75,7 +75,7 @@ import {
   type AIModel,
   type NatsServerConfig,
   type NatsServerSettings,
-  type PinnedGroupInfo,
+  type ExpandedGroupInfo,
   type SourceInfo,
   type StoreSnapshot,
 } from './ipc'
@@ -182,9 +182,7 @@ export default function Shell() {
   const [snapshot, setSnapshot] = useState<StoreSnapshot | null>(null)
   /** The find filter per folder or bucket, so each group returns to its own search. */
   const [queries, setQueries] = useState<Record<string, string>>({})
-  /** Whether a group's find box is showing; hidden keeps the tree quiet when not searching. */
-  const [findOpen, setFindOpen] = useState<Record<string, boolean>>({})
-  /** Groups whose board list is folded away, pinned or active. */
+  /** Groups whose board list is folded away, expanded or active. */
   const [folded, setFolded] = useState<Record<string, boolean>>({})
   /** Groups already seeded from the saved state, so typing is never overwritten. */
   const seededGroups = useRef(new Set<string>())
@@ -425,14 +423,13 @@ export default function Shell() {
       if (seededGroups.current.has(key)) continue
       seededGroups.current.add(key)
       setQueries((previous) => (key in previous ? previous : { ...previous, [key]: state.query ?? '' }))
-      setFindOpen((previous) => (key in previous ? previous : { ...previous, [key]: state.find }))
       setFolded((previous) => (key in previous ? previous : { ...previous, [key]: state.folded }))
     }
   }, [snapshot?.tree])
 
   /** Remember a group's tree state; a failure costs the memory, never the UI. */
   const saveGroupState = useCallback(
-    (sourceId: string, groupId: string, patch: { query?: string; find?: boolean; folded?: boolean }) => {
+    (sourceId: string, groupId: string, patch: { query?: string; folded?: boolean }) => {
       setGroupState({ source: sourceId, group: groupId, ...patch }).catch((error) =>
         log('error', `Could not save the tree state: ${String(error)}`),
       )
@@ -440,7 +437,7 @@ export default function Shell() {
     [],
   )
 
-  // Every open list keeps its own filter: the active group's and each pinned one's.
+  // Every open list keeps its own filter: the active group's and each expanded one's.
   // The filter is saved after a pause in typing, not on every keystroke.
   const setQuery = useCallback(
     (sourceId: string, groupId: string, value: string) => {
@@ -454,16 +451,6 @@ export default function Shell() {
       }, 400)
     },
     [saveGroupState],
-  )
-
-  const toggleFind = useCallback(
-    (sourceId: string, groupId: string) => {
-      const key = groupKey(sourceId, groupId)
-      const next = !(findOpen[key] ?? true)
-      setFindOpen((previous) => ({ ...previous, [key]: next }))
-      saveGroupState(sourceId, groupId, { find: next })
-    },
-    [findOpen, saveGroupState],
   )
 
   const toggleFolded = useCallback(
@@ -485,10 +472,10 @@ export default function Shell() {
     })
   }, [snapshot, query])
 
-  /** Folders and buckets pinned open, keyed the way the tree keys a group. */
-  const pinnedByKey = useMemo(
-    () => new Map((snapshot?.pinned ?? []).map((pin) => [groupKey(pin.source, pin.group), pin])),
-    [snapshot?.pinned],
+  /** Folders and buckets kept open, keyed the way the tree keys a group. */
+  const expandedByKey = useMemo(
+    () => new Map((snapshot?.expanded ?? []).map((pin) => [groupKey(pin.source, pin.group), pin])),
+    [snapshot?.expanded],
   )
 
   const handleDrop = useCallback(async (event: React.DragEvent) => {
@@ -513,9 +500,9 @@ export default function Shell() {
     }
   }, [])
 
-  /** Pins a folder or bucket open so its boards stay beside the active group. */
-  const handleTogglePin = useCallback((sourceId: string, groupId: string) => {
-    togglePinnedGroup(sourceId, groupId).catch((err: unknown) => log('error', `Could not change the group's expansion: ${String(err)}`))
+  /** Expands or collapses a folder or bucket so its boards stay beside the active group. */
+  const handleToggleExpanded = useCallback((sourceId: string, groupId: string) => {
+    toggleGroupExpanded(sourceId, groupId).catch((err: unknown) => log('error', `Could not change the group's expansion: ${String(err)}`))
   }, [])
 
   /** Re-lists the buckets on every configured NATS server. */
@@ -543,7 +530,7 @@ export default function Shell() {
   const activeNatsSource = snapshot.activeSource.startsWith('nats:') ? snapshot.sources.find((s) => s.id === snapshot.activeSource) : undefined
 
   /**
-   * The board list under a group: the active group's boards carry the filter and the empty states; a pinned
+   * The board list under a group: the active group's boards carry the filter and the empty states; an expanded
    * group shows its own boards, unwatched, and opening one switches to that group first.
    */
   const renderBoards = (sourceId: string, groupId: string): ReactNode => {
@@ -586,9 +573,9 @@ export default function Shell() {
         />
       ))
     }
-    const boards = pinnedByKey.get(groupKey(sourceId, groupId))?.boards ?? []
+    const boards = expandedByKey.get(groupKey(sourceId, groupId))?.boards ?? []
     const term = (queries[groupKey(sourceId, groupId)] ?? '').trim()
-    // Pinned boards come without text, so their filter matches names only.
+    // Expanded boards come without text, so their filter matches names only.
     const sorted = sortBoards(boards, snapshot.sortOrder)
     const shown: { board: BoardInfo; match: Match | null }[] = term
       ? sorted.flatMap((board) => {
@@ -680,8 +667,6 @@ export default function Shell() {
               refreshing={refreshingSources}
               queries={queries}
               onQueryChange={setQuery}
-              findOpen={findOpen}
-              onToggleFind={toggleFind}
               folded={folded}
               onToggleFolded={toggleFolded}
               sortOrder={snapshot.sortOrder}
@@ -704,8 +689,9 @@ export default function Shell() {
                 event.preventDefault()
                 setBucketMenu({ x: event.clientX, y: event.clientY, source, group })
               }}
-              pinned={snapshot.pinned}
-              onTogglePin={handleTogglePin}
+              groupOpenMode={snapshot.groupOpenMode}
+              expanded={snapshot.expanded}
+              onToggleExpanded={handleToggleExpanded}
               renderBoards={renderBoards}
             />
           </>
@@ -955,7 +941,7 @@ function BoardRow({
   /** Only boards of the active group can be dragged: copying reads them from there. */
   draggable?: boolean
   onSelect: () => void
-  /** Board actions act on the active group, so a pinned group's rows have no menu. */
+  /** Board actions act on the active group, so an expanded group's rows have no menu. */
   onContextMenu?: (event: React.MouseEvent) => void
 }) {
   return (
@@ -1008,8 +994,8 @@ const groupKey = (sourceId: string, groupId: string) => `${sourceId}\u0000${grou
 /**
  * The navigation tree. Sources (this computer, each NATS server) are headings; under each, its folders or
  * buckets are accordions. The active group opens with its boards nested beneath it; opening another group
- * switches to it. A group pinned open also lists its boards, so several stay in view at once, each pinned
- * one from the backend (the active group is the only one the backend fully loads).
+ * switches to it. In multi mode a group kept open also lists its boards, so several stay in view at once,
+ * each from the backend (the active group is the only one the backend fully loads).
  *
  * A switch is shown at once: the clicked group takes the highlight and opens with a spinner, and its boards
  * appear as soon as the backend reports them (the previous group's boards are never shown under it).
@@ -1022,8 +1008,6 @@ function SourceTree({
   refreshing,
   queries,
   onQueryChange,
-  findOpen,
-  onToggleFind,
   folded,
   onToggleFolded,
   sortOrder,
@@ -1037,8 +1021,9 @@ function SourceTree({
   onNewBucket,
   onSourceMenu,
   onBucketMenu,
-  pinned,
-  onTogglePin,
+  groupOpenMode,
+  expanded,
+  onToggleExpanded,
   renderBoards,
 }: {
   sources: SourceInfo[]
@@ -1050,9 +1035,6 @@ function SourceTree({
   /** The find filter per group, keyed like the tree keys a group. */
   queries: Record<string, string>
   onQueryChange: (sourceId: string, groupId: string, value: string) => void
-  /** Whether a group's find box is showing, keyed like the tree keys a group. */
-  findOpen: Record<string, boolean>
-  onToggleFind: (sourceId: string, groupId: string) => void
   /** Groups whose board list is folded away. */
   folded: Record<string, boolean>
   onToggleFolded: (sourceId: string, groupId: string) => void
@@ -1067,14 +1049,16 @@ function SourceTree({
   onNewBucket: (source: SourceInfo) => void
   onSourceMenu: (event: React.MouseEvent, source: SourceInfo) => void
   onBucketMenu: (event: React.MouseEvent, source: SourceInfo, group: GroupInfo) => void
-  /** Folders and buckets pinned open, with their boards. */
-  pinned: PinnedGroupInfo[]
-  onTogglePin: (sourceId: string, groupId: string) => void
-  /** The boards of a group: filtered for the active one, plain for a pinned one. */
+  /** How folders open: one at a time, or several at once. */
+  groupOpenMode: 'single' | 'multi'
+  /** Folders and buckets kept open, with their boards. */
+  expanded: ExpandedGroupInfo[]
+  onToggleExpanded: (sourceId: string, groupId: string) => void
+  /** The boards of a group: filtered for the active one, plain for an expanded one. */
   renderBoards: (sourceId: string, groupId: string) => React.ReactNode
 }) {
   const [dragOver, setDragOver] = useState<string | null>(null)
-  const pinnedKeys = useMemo(() => new Set(pinned.map((pin) => groupKey(pin.source, pin.group))), [pinned])
+  const expandedKeys = useMemo(() => new Set(expanded.map((pin) => groupKey(pin.source, pin.group))), [expanded])
   const loadedKey = groupKey(activeSource, activeGroup)
   /** The group the user is on: the one being switched to, else the loaded one. */
   const currentKey = switchingSource ?? loadedKey
@@ -1089,20 +1073,16 @@ function SourceTree({
     const key = groupKey(source.id, group.id)
     const current = key === currentKey
     const loading = current && key !== loadedKey
-    const isPinned = pinnedKeys.has(key)
-    const pinnedOpen = !current && isPinned
+    const isExpanded = expandedKeys.has(key)
     const filter = queries[key] ?? ''
-    const showFind = findOpen[key] ?? true
-    // The search icon lights up whenever the box is not in its default state:
-    // hidden, or holding a filter that is narrowing the list.
-    const searchLit = !showFind || filter !== ''
     const isFolded = folded[key] ?? false
-    // The active group opens unless folded; a pinned one opens unless it was folded on its own.
-    const open = (current ? !loading : pinnedOpen) && !isFolded
+    // The active group opens unless folded; in multi mode an expanded one opens
+    // too, unless it was folded on its own.
+    const open = (current ? !loading : groupOpenMode === 'multi' && isExpanded) && !isFolded
     return (
       <div
         key={key}
-        className={`tree-group${current ? ' active' : ''}${pinnedOpen ? ' pinned' : ''}${dragOver === key ? ' drag-over' : ''}`}
+        className={`tree-group${current ? ' active' : ''}${isExpanded ? ' expanded' : ''}${dragOver === key ? ' drag-over' : ''}`}
       >
         {/* The header is the group's handle: drop a board on it to copy it here; right-click for options. */}
         <div
@@ -1136,14 +1116,16 @@ function SourceTree({
             aria-busy={loading}
             onClick={() => {
               if (current && !loading) {
+                // The open group's own header folds or unfolds its list.
                 onToggleFolded(source.id, group.id)
-              } else if (isPinned) {
-                onToggleFolded(source.id, group.id)
-              } else {
-                // Activating a group opens it, even if it was folded while kept expanded.
-                if (isFolded) onToggleFolded(source.id, group.id)
-                onActivateSource(source.id, group.id)
+                return
               }
+              // Activating a group opens it, even if it was folded while open.
+              if (isFolded) onToggleFolded(source.id, group.id)
+              // One at a time closes the previous group by construction; opening
+              // freely keeps the previous ones open, so this one joins them.
+              if (groupOpenMode === 'multi' && !isExpanded) onToggleExpanded(source.id, group.id)
+              onActivateSource(source.id, group.id)
             }}
           >
             <ChevronDownIcon className="tree-chevron" aria-hidden="true" />
@@ -1153,28 +1135,6 @@ function SourceTree({
             <span className="tree-spinner" role="status" aria-label="Loading boards" />
           ) : (
             <span className="row-actions">
-              <button
-                className={`icon-button row-action find${searchLit ? ' on' : ''}`}
-                onClick={() => onToggleFind(source.id, group.id)}
-                title={showFind ? 'Hide board search' : 'Search boards'}
-                aria-label={showFind ? `Hide search in ${label}` : `Search boards in ${label}`}
-                aria-pressed={showFind}
-              >
-                <SearchIcon />
-              </button>
-              <button
-                className={`icon-button row-action pin${isPinned ? ' on' : ''}`}
-                onClick={() => {
-                  onTogglePin(source.id, group.id)
-                  // "Keep expanded" means expanded now too, not just next time.
-                  if (!isPinned && isFolded) onToggleFolded(source.id, group.id)
-                }}
-                title={isPinned ? 'Collapse this group when another is active' : 'Keep this group expanded'}
-                aria-label={isPinned ? `Let ${label} collapse when inactive` : `Keep ${label} expanded`}
-                aria-pressed={isPinned}
-              >
-                <ExpandIcon />
-              </button>
               {/* The + closes the row: the one control every container has sits furthest right. */}
               {current && (
                 <button className="icon-button row-action" onClick={onNewBoard} title="New Board (⌘N)" aria-label={`New Board in ${label}`}>
@@ -1186,37 +1146,35 @@ function SourceTree({
         </div>
         {open && (
           <div id={panelId} className="tree-boards" role="group" aria-label={`Boards in ${label}`}>
-            <div className={`tree-tools${showFind ? '' : ' bare'}`}>
-              {showFind && (
-                <div className="tree-find">
-                  <SearchIcon className="tree-find-icon" aria-hidden="true" />
-                  <input
-                    type="search"
-                    value={filter}
-                    placeholder="Find board"
-                    aria-label={`Find a board in ${label}`}
-                    onChange={(event) => onQueryChange(source.id, group.id, event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') onQueryChange(source.id, group.id, '')
+            <div className="tree-tools">
+              <div className="tree-find">
+                <SearchIcon className="tree-find-icon" aria-hidden="true" />
+                <input
+                  type="search"
+                  value={filter}
+                  placeholder="Find board"
+                  aria-label={`Find a board in ${label}`}
+                  onChange={(event) => onQueryChange(source.id, group.id, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') onQueryChange(source.id, group.id, '')
+                  }}
+                />
+                {filter !== '' && (
+                  <button
+                    type="button"
+                    className="tree-find-clear"
+                    title="Clear"
+                    aria-label="Clear the filter"
+                    onClick={(event) => {
+                      onQueryChange(source.id, group.id, '')
+                      // Keep typing in the field, not on the button that just emptied it.
+                      event.currentTarget.parentElement?.querySelector('input')?.focus()
                     }}
-                  />
-                  {filter !== '' && (
-                    <button
-                      type="button"
-                      className="tree-find-clear"
-                      title="Clear"
-                      aria-label="Clear the filter"
-                      onClick={(event) => {
-                        onQueryChange(source.id, group.id, '')
-                        // Keep typing in the field, not on the button that just emptied it.
-                        event.currentTarget.parentElement?.querySelector('input')?.focus()
-                      }}
-                    >
-                      <CloseIcon />
-                    </button>
-                  )}
-                </div>
-              )}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </div>
               <button
                 className="tree-sort"
                 title={sortOrder === 'name' ? 'Sorted by name. Switch to newest first.' : 'Newest first. Switch to name.'}
@@ -2468,6 +2426,28 @@ function BoardsSettings({ snapshot }: { snapshot: StoreSnapshot }) {
                 aria-checked={snapshot.sortOrder === order}
                 className={snapshot.sortOrder === order ? 'active' : ''}
                 onClick={() => setSort(order)}
+              >
+                {title}
+              </button>
+            ))}
+          </div>
+        </SettingsField>
+      </div>
+      <div className="settings-group">
+        <SettingsField label="Sidebar folders" help="One folder opens at a time, or keep as many open as you like.">
+          <div className="segmented" role="radiogroup" aria-label="Sidebar folders">
+            {(
+              [
+                ['single', 'One at a time'],
+                ['multi', 'Open freely'],
+              ] as const
+            ).map(([mode, title]) => (
+              <button
+                key={mode}
+                role="radio"
+                aria-checked={snapshot.groupOpenMode === mode}
+                className={snapshot.groupOpenMode === mode ? 'active' : ''}
+                onClick={() => setGroupOpenMode(mode)}
               >
                 {title}
               </button>

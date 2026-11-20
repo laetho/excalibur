@@ -553,20 +553,19 @@ select,
   font-weight: 500;
 }
 
-/* The container row's icons stay grey until their toggle is on: a pin that is
- * set, or a search that is hidden or filtering, reads white instead. */
+/* The container row's icon stays grey until hovered, so the row reads quietly
+ * beside its name. */
 .tree-group .row-action {
   color: var(--text-secondary);
   opacity: 0.7;
 }
 
-.tree-group .row-action:hover,
-.tree-group .row-action.on {
+.tree-group .row-action:hover {
   color: var(--text);
   opacity: 1;
 }
 
-.tree-group.pinned .tree-group-name {
+.tree-group.expanded .tree-group-name {
   color: var(--text);
 }
 
@@ -622,12 +621,6 @@ select,
   margin-bottom: 2px;
   padding: 2px 4px 5px;
   background: linear-gradient(to bottom, var(--sidebar-bg) 85%, transparent);
-}
-
-/* With the find box hidden only the sort toggle is left; keep it on the right
- * so the row still reads as the head of the list. */
-.tree-tools.bare {
-  justify-content: flex-end;
 }
 
 .tree-find {

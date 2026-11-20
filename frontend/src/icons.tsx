@@ -139,18 +139,6 @@ export function ChevronDownIcon(props: IconProps) {
   )
 }
 
-/** A pushpin: pins a folder or bucket open in the sidebar. */
-/** A panel whose top is pushed open: the container stays expanded in the tree. */
-export function ExpandIcon(props: IconProps) {
-  return (
-    <Icon data-icon="expand" {...props}>
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M3 9h18" />
-      <path d="m15 14-3-3-3 3" />
-    </Icon>
-  )
-}
-
 /** A window with its sidebar marked off: the collapse/expand sidebar control. */
 export function SidebarIcon(props: IconProps) {
   return (

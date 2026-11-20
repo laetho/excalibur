@@ -667,22 +667,35 @@ func (a *App) SetSort(order string) error {
 	return nil
 }
 
-// TogglePinnedGroup pins a folder or bucket so its boards stay visible while
-// another group is active.
-func (a *App) TogglePinnedGroup(sourceID, groupID string) error {
+// ToggleGroupExpanded expands or collapses a folder or bucket so its boards
+// stay visible beside the active group. It is a no-op in single mode, where
+// opening a folder means activating it.
+func (a *App) ToggleGroupExpanded(sourceID, groupID string) error {
 	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(groupID) == "" {
-		return errors.New("a pinned group needs a source and a group")
+		return errors.New("an expanded group needs a source and a group")
 	}
 	a.savePending()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.store.togglePinnedGroup(sourceID, groupID)
+	a.store.toggleGroupExpanded(sourceID, groupID)
 	a.emitSnapshotLocked()
 	return nil
 }
 
-// SetGroupState remembers how a folder or bucket looks in the sidebar: whether
-// its find box is open, what is typed in it, and whether its list is folded.
+// SetGroupOpenMode sets whether the sidebar opens one folder at a time or lets
+// several stay open, following the SetSort/SetShowThumbnails pattern.
+func (a *App) SetGroupOpenMode(mode string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.store.setGroupOpenMode(mode); err != nil {
+		return err
+	}
+	a.emitSnapshotLocked()
+	return nil
+}
+
+// SetGroupState remembers how a folder or bucket looks in the sidebar: what is
+// typed in its find box, and whether its list is folded.
 func (a *App) SetGroupState(patch GroupStatePatch) error {
 	if strings.TrimSpace(patch.Source) == "" || strings.TrimSpace(patch.Group) == "" {
 		return errors.New("a group state needs a source and a group")
