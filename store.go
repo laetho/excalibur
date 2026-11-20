@@ -835,10 +835,13 @@ type expandedBoardsEntry struct {
 // nothing at all in single mode: there only the active group's list is shown.
 // An unreachable server keeps showing its last known listing.
 func (s *Store) expandedBoards() []ExpandedGroupInfo {
-	if s.groupOpenMode() == groupOpenSingle {
-		return nil
-	}
 	out := make([]ExpandedGroupInfo, 0, len(s.prefs.Expanded))
+	if s.groupOpenMode() == groupOpenSingle {
+		// One at a time shows only the active group's list. This is an empty
+		// slice rather than nil: the snapshot is JSON, where nil becomes null and
+		// the sidebar expects a list it can map over.
+		return out
+	}
 	for _, pin := range s.prefs.Expanded {
 		if pin.Source == s.activeSource && pin.Group == s.activeGroup {
 			// The active group already shows its boards, so only tell the sidebar

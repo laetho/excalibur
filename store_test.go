@@ -265,6 +265,13 @@ func TestExpandedGroupsShowTheirBoardsBesideTheActiveFolder(t *testing.T) {
 	if len(store.snapshot().Expanded) != 0 {
 		t.Fatalf("single mode showed expanded groups: %#v", store.snapshot().Expanded)
 	}
+	// The snapshot crosses the bridge as JSON, so an empty list must still be a
+	// list: null would break the sidebar as soon as it maps over it.
+	if data, err := json.Marshal(store.snapshot()); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(data), `"expanded":[]`) {
+		t.Fatalf("single mode snapshot has no empty expanded array: %s", data)
+	}
 	if store.toggleGroupExpanded(localSourceID, background) {
 		t.Fatal("toggleGroupExpanded expanded a group in single mode")
 	}
