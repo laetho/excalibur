@@ -3021,7 +3021,6 @@ body {
 .fm-row-header button {
   font: inherit;
   color: inherit;
-  text-align: left;
   padding: 0;
 }
 
@@ -3029,9 +3028,12 @@ body {
   color: var(--text);
 }
 
+/* Each header label follows its column's alignment: names read left, numbers
+ * read right, so the label sits over the digits it heads. */
 .fm-col-name {
   flex: 1;
   min-width: 0;
+  text-align: left;
 }
 
 .fm-col-size,
