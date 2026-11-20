@@ -161,6 +161,97 @@ export function SidebarIcon(props: IconProps) {
   )
 }
 
+/** Two panes side by side: the Morgan le Fayl toggle in the sidebar. */
+export function FilesIcon(props: IconProps) {
+  return (
+    <Icon data-icon="files" {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="12" y1="4" x2="12" y2="20" />
+    </Icon>
+  )
+}
+
+/** A 2×2 grid of cards: the grid view toggle. */
+export function GridIcon(props: IconProps) {
+  return (
+    <Icon data-icon="grid" {...props}>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </Icon>
+  )
+}
+
+/** A bulleted list: the list view toggle. */
+export function ListIcon(props: IconProps) {
+  return (
+    <Icon data-icon="list" {...props}>
+      <line x1="9" y1="6" x2="21" y2="6" />
+      <line x1="9" y1="12" x2="21" y2="12" />
+      <line x1="9" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
+    </Icon>
+  )
+}
+
+/** A list with a right-hand column: the details toggle. */
+export function DetailsIcon(props: IconProps) {
+  return (
+    <Icon data-icon="details" {...props}>
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+      <line x1="14" y1="6" x2="14" y2="18" />
+    </Icon>
+  )
+}
+
+/** Two arrows swapping left and right: the swap-panes control. */
+export function SwapIcon(props: IconProps) {
+  return (
+    <Icon data-icon="swap" {...props}>
+      <path d="M16 3l4 4-4 4" />
+      <path d="M20 7H7" />
+      <path d="M8 21l-4-4 4-4" />
+      <path d="M4 17h13" />
+    </Icon>
+  )
+}
+
+/** A folder with a plus: the add-folder action. */
+export function FolderPlusIcon(props: IconProps) {
+  return (
+    <Icon data-icon="folder-plus" {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <line x1="12" y1="11" x2="12" y2="17" />
+      <line x1="9" y1="14" x2="15" y2="14" />
+    </Icon>
+  )
+}
+
+/** A plain document: the generic file icon. */
+export function FileIcon(props: IconProps) {
+  return (
+    <Icon data-icon="file" {...props}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 3 14 8 19 8" />
+    </Icon>
+  )
+}
+
+/** An eye: the show-hidden toggle. */
+export function EyeIcon(props: IconProps) {
+  return (
+    <Icon data-icon="eye" {...props}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </Icon>
+  )
+}
+
 /**
  * The Excalibur mark (excalibur.svg) redrawn for small sizes: heavier strokes, and the finest details (grip
  * wrap, inner frame, crossguard gem) left out so it stays legible at 20–24px. Line art in `currentColor`

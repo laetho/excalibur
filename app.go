@@ -63,13 +63,18 @@ const (
 )
 
 type App struct {
-	ctx           context.Context
-	wailsApp      *application.App
-	window        application.Window
-	mu            sync.Mutex
-	store         *Store
-	pending       sync.Map
-	thumbnails    sync.Map
+	ctx        context.Context
+	wailsApp   *application.App
+	window     application.Window
+	mu         sync.Mutex
+	store      *Store
+	pending    sync.Map
+	thumbnails sync.Map
+	// thumbMu guards thumbCache, the in-memory Morgan le Fayl preview cache
+	// keyed by path and invalidated by mtime+size. It is separate from mu so a
+	// slow renderer round-trip does not stall other store operations.
+	thumbMu       sync.Mutex
+	thumbCache    map[string]thumbCacheEntry
 	subMu         sync.Mutex
 	subscriptions map[string]*nats.Subscription
 	// Durable collaboration messages are acknowledged only after the renderer
@@ -97,6 +102,7 @@ func newApp() *App {
 		subscriptions: map[string]*nats.Subscription{},
 		collabPending: map[string]*nats.Msg{},
 		collabOutbox:  map[string]collabOutboxEntry{},
+		thumbCache:    map[string]thumbCacheEntry{},
 		outboxWake:    make(chan struct{}, 1),
 		stop:          make(chan struct{}),
 	}
@@ -1869,6 +1875,8 @@ func mimeForPath(path string) string {
 		return "image/svg+xml"
 	case ".bmp":
 		return "image/bmp"
+	case ".avif":
+		return "image/avif"
 	case ".excalidraw", ".excalidrawlib", ".json":
 		return "application/json"
 	default:

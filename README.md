@@ -103,6 +103,30 @@ renders a small markdown subset (headings, bullets, numbered steps, bold, italic
 and inline code) itself, so the model never has to emit HTML and the chat needs
 no markdown dependency.
 
+## Morgan le Fayl
+
+Morgan le Fayl is a two-pane file manager for the boards folders on this
+computer and the NATS buckets in the sidebar. Toggle it with **⌘F** (View →
+Morgan le Fayl) or the split-pane button in the sidebar. Each pane can show a
+local boards folder or a bucket, and the panel is confined to those roots, so it
+never reaches outside them.
+
+Drag a selection onto the other pane (or onto a folder row) to **move** it, or
+hold **⌥/Alt** while dropping to **copy**. **Move over** and **Copy over** appear
+in the panel header as soon as a pane has a selection and do the same without
+dragging. The same actions are in the right-click menu, along with rename, new
+folder, reveal, and trash. Drag and drop works across local and remote: a move
+into a bucket copies the file and trashes the local source, while a move out of a
+bucket deletes the remote object permanently (there is no Trash in a bucket, so
+the right-click action is "Delete Permanently…" with a confirm dialog). Deleting
+a local file moves it to the OS Trash, never removing it outright. Name
+collisions prompt per-file Skip / Overwrite / Rename choices.
+
+The folder button in a pane's header works inside that pane: in a local folder it
+creates a subfolder there, and in a bucket it creates a new bucket on the same
+server (a bucket is the only folder a NATS source has), then opens it. It only
+asks for a name.
+
 ## Platform builds
 
 Wails v3 can produce the desktop targets below. The macOS task uses Wails'

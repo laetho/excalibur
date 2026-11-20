@@ -75,6 +75,14 @@ export function ChangeApplicationZoom(delta: number): $CancellablePromise<void> 
     return $Call.ByID(3490820114, delta);
 }
 
+/**
+ * CheckFileTransfer reports which of the sources would collide in the target.
+ * It only checks for existing targets and never writes anything.
+ */
+export function CheckFileTransfer(sources: $models.FileLocation[] | null, target: $models.FileLocation): $CancellablePromise<$models.FileConflict[] | null> {
+    return $Call.ByID(1774709218, sources, target);
+}
+
 export function ChooseImport(): $CancellablePromise<void> {
     return $Call.ByID(3562449701);
 }
@@ -212,6 +220,15 @@ export function DuplicateBoard(id: string): $CancellablePromise<void> {
     return $Call.ByID(3010073222, id);
 }
 
+/**
+ * FileThumbnail returns a data URL preview for a file, or "" when it has none.
+ * .excalidraw reuses the renderer's exportToCanvas round-trip; images are
+ * base64 data URLs. Results are cached in memory by location+mtime+size.
+ */
+export function FileThumbnail(location: $models.FileLocation): $CancellablePromise<string> {
+    return $Call.ByID(2380404161, location);
+}
+
 export function GetState(): $CancellablePromise<$models.StoreSnapshot> {
     return $Call.ByID(2490316256);
 }
@@ -224,8 +241,24 @@ export function ImportPaths(paths: string[] | null): $CancellablePromise<void> {
     return $Call.ByID(4265040680, paths);
 }
 
+/**
+ * ListFiles lists one directory inside the configured boards folders, or one
+ * NATS bucket's objects.
+ */
+export function ListFiles(location: $models.FileLocation): $CancellablePromise<$models.FileListing | null> {
+    return $Call.ByID(3557170708, location);
+}
+
 export function Log(level: string, message: string): $CancellablePromise<void> {
     return $Call.ByID(3928828201, level, message);
+}
+
+/**
+ * NewFolder creates one folder inside dir. Buckets have no folder structure, so
+ * a NATS location is refused.
+ */
+export function NewFolder(location: $models.FileLocation, name: string): $CancellablePromise<void> {
+    return $Call.ByID(1787362873, location, name);
 }
 
 export function OpenLink(rawURL: string): $CancellablePromise<void> {
@@ -238,6 +271,17 @@ export function PendingResult(requestID: string, name: string | null, jsonText: 
 
 export function PickFile(extensions: string[] | null): $CancellablePromise<$models.PickFileResult | null> {
     return $Call.ByID(1801910934, extensions);
+}
+
+/**
+ * RefreshBoards rescans the active source so the sidebar reflects files Morgan
+ * le Fayl touched. It takes the store lock the same way the existing rescan and
+ * emit handlers do. Note that store.scan() only rescans the active group, so
+ * changes made in a non-active root appear in the sidebar only when that group
+ * is activated.
+ */
+export function RefreshBoards(): $CancellablePromise<void> {
+    return $Call.ByID(1388885589);
 }
 
 /**
@@ -262,6 +306,17 @@ export function RemoveNatsServer(id: string): $CancellablePromise<void> {
 
 export function RenameBoard(id: string, name: string): $CancellablePromise<void> {
     return $Call.ByID(3410792209, id, name);
+}
+
+/**
+ * RenameFilePath renames one file or folder in place. It rejects separators,
+ * ".", "..", names starting with a period (unless the file already is hidden),
+ * and existing names. For a bucket object it mirrors Store.renameBoard's remote
+ * branch: read, write the new name, carry the document id across, delete the
+ * old name.
+ */
+export function RenameFilePath(location: $models.FileLocation, name: string): $CancellablePromise<void> {
+    return $Call.ByID(330639142, location, name);
 }
 
 export function ResetApplicationZoom(): $CancellablePromise<void> {
@@ -359,8 +414,26 @@ export function TogglePinnedGroup(sourceID: string, groupID: string): $Cancellab
     return $Call.ByID(3342281742, sourceID, groupID);
 }
 
+/**
+ * TransferFiles moves or copies sources into the target, applying Actions on
+ * collisions. Every source and the target are validated before anything is
+ * touched, and one failing path never aborts the batch.
+ */
+export function TransferFiles(request: $models.FileTransferRequest): $CancellablePromise<$models.FileTransferResult[] | null> {
+    return $Call.ByID(1042757393, request);
+}
+
 export function TrashBoard(id: string): $CancellablePromise<void> {
     return $Call.ByID(218553747, id);
+}
+
+/**
+ * TrashFilePath moves one file or folder to the OS Trash using the existing
+ * moveToTrash helper, never os.Remove. For a bucket object it is a permanent
+ * delete, because there is no Trash in a bucket.
+ */
+export function TrashFilePath(location: $models.FileLocation): $CancellablePromise<void> {
+    return $Call.ByID(4141504156, location);
 }
 
 export function UpdateNatsServer(config: $models.NatsServerConfig, keepPassword: boolean): $CancellablePromise<void> {

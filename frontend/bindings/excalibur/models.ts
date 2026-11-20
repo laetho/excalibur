@@ -80,6 +80,160 @@ export interface CollabJoinResult {
     "pendingLocalUpdates": number;
 }
 
+/**
+ * FileAction is the user's decision for one colliding source path.
+ */
+export interface FileAction {
+    "source": FileLocation;
+
+    /**
+     * "skip" | "overwrite" | "rename"
+     */
+    "action": string;
+}
+
+/**
+ * FileConflict is a source file whose name already exists in the target.
+ */
+export interface FileConflict {
+    "source": FileLocation;
+    "name": string;
+
+    /**
+     * display-only description of what is in the way
+     */
+    "target": string;
+}
+
+/**
+ * FileEntry is one row or card in Morgan le Fayl.
+ */
+export interface FileEntry {
+    "name": string;
+    "location": FileLocation;
+    "isDir": boolean;
+    "size": number;
+
+    /**
+     * unix seconds
+     */
+    "modified": number;
+    "isLink": boolean;
+
+    /**
+     * symlink target, display only
+     */
+    "target": string;
+
+    /**
+     * "folder" | "excalidraw" | "image" | "file"
+     */
+    "kind": string;
+    "hidden": boolean;
+}
+
+/**
+ * FileListing is one pane's directory or bucket listing.
+ */
+export interface FileListing {
+    "location": FileLocation;
+
+    /**
+     * nil at a local root and always for a bucket
+     */
+    "parent": FileLocation | null;
+    "entries": FileEntry[] | null;
+    "roots": FileRoot[] | null;
+}
+
+/**
+ * FileLocation identifies one pane location or one entry: a local path, or an
+ * object in a NATS bucket. A pane is either a local directory (Kind "local",
+ * Path set) or a bucket's object namespace (Kind "nats", Server and Bucket set).
+ * An entry inside a bucket carries its object name in Name; a local entry keeps
+ * its full path in Path.
+ */
+export interface FileLocation {
+    /**
+     * "local" | "nats"
+     */
+    "kind": string;
+
+    /**
+     * local: absolute path; nats: ""
+     */
+    "path": string;
+
+    /**
+     * nats: configured server id; local: ""
+     */
+    "server": string;
+
+    /**
+     * nats: bucket; local: ""
+     */
+    "bucket": string;
+
+    /**
+     * nats: object name; local: ""
+     */
+    "name": string;
+}
+
+/**
+ * FileRoot is one pickable location in a pane's picker.
+ */
+export interface FileRoot {
+    "location": FileLocation;
+
+    /**
+     * "~/Whiteboards" or the bucket name
+     */
+    "label": string;
+
+    /**
+     * "Local" or the server's display name (optgroup)
+     */
+    "group": string;
+}
+
+/**
+ * FileTransferRequest moves or copies a selection into a target.
+ */
+export interface FileTransferRequest {
+    "sources": FileLocation[] | null;
+
+    /**
+     * a directory or a bucket
+     */
+    "target": FileLocation;
+    "copy": boolean;
+
+    /**
+     * optional; missing entries on a collision default to "skip"
+     */
+    "actions": FileAction[] | null;
+}
+
+/**
+ * FileTransferResult is the outcome for one source path.
+ */
+export interface FileTransferResult {
+    "source": FileLocation;
+
+    /**
+     * nil when skipped
+     */
+    "target": FileLocation | null;
+    "name": string;
+
+    /**
+     * "moved" | "copied" | "skipped" | "overwritten" | "renamed"
+     */
+    "action": string;
+    "error": string;
+}
+
 export interface GroupInfo {
     "id": string;
     "name": string;

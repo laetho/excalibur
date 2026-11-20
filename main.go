@@ -158,6 +158,8 @@ func nativeMenu(app *App) *application.Menu {
 	view.AddSeparator()
 	view.AddCheckbox("Show Thumbnails", true).OnClick(emit("show-thumbnails"))
 	view.AddSeparator()
+	add(view, "Morgan le Fayl", "CmdOrCtrl+F", "file-manager")
+	view.AddSeparator()
 	view.Add("Zoom In").SetAccelerator("CmdOrCtrl+plus").OnClick(func(*application.Context) { _ = app.ChangeApplicationZoom(applicationZoomStep) })
 	view.Add("Zoom Out").SetAccelerator("CmdOrCtrl+-").OnClick(func(*application.Context) { _ = app.ChangeApplicationZoom(-applicationZoomStep) })
 	view.Add("Actual Size").SetAccelerator("CmdOrCtrl+0").OnClick(func(*application.Context) { _ = app.ResetApplicationZoom() })

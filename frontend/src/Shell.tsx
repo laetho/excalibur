@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Canvas, { PERSISTENCE_LABELS, type SyncStatus } from './Canvas'
 import { AVATAR_EMOJIS, COLOR_PRESETS, peerColor } from './collabIdentity'
+import FileManager from './FileManager'
+import NewBucketDialog from './NewBucketDialog'
 import { RemoteCursor } from './RemoteCursors'
 import { useToolbarRoom } from './toolbarRoom'
 import {
@@ -9,6 +11,7 @@ import {
   ChevronDownIcon,
   CloseIcon,
   CloudIcon,
+  FilesIcon,
   FolderIcon,
   LogoMark,
   InfoIcon,
@@ -23,7 +26,6 @@ import {
 } from './icons'
 import {
   activateSource,
-  addBucket,
   addNatsServer,
   aiChat,
   addLocalFolder,
@@ -222,6 +224,8 @@ export default function Shell() {
   const [removingServer, setRemovingServer] = useState<SourceInfo | null>(null)
   const [aiOpen, setAIOpen] = useState(false)
   const closeAI = useCallback(() => setAIOpen(false), [])
+  /** Whether the Morgan le Fayl file manager panel is open over the canvas. */
+  const [fileManagerOpen, setFileManagerOpen] = useState(false)
 
   // Menu handlers and drop handlers read the latest snapshot without re-subscribing.
   const snapshotRef = useRef<StoreSnapshot | null>(null)
@@ -322,6 +326,9 @@ export default function Shell() {
         break
       case 'show-thumbnails':
         setShowThumbnails(!current.showThumbnails)
+        break
+      case 'file-manager':
+        setFileManagerOpen((open) => !open)
         break
       case 'settings':
         setSettingsOpen(true)
@@ -643,6 +650,9 @@ export default function Shell() {
           )}
           {!sidebarCollapsed && (
             <span className="row-actions">
+              <button className="icon-button row-action" onClick={() => setFileManagerOpen((open) => !open)} title="Morgan le Fayl (⌘F)" aria-label="Morgan le Fayl">
+                <FilesIcon />
+              </button>
               <button className="icon-button row-action" onClick={() => setCollapsed(true)} title="Hide Sidebar" aria-label="Hide Sidebar">
                 <SidebarIcon />
               </button>
@@ -651,6 +661,9 @@ export default function Shell() {
         </div>
         {sidebarCollapsed && (
           <div className="rail-actions">
+            <button className="icon-button row-action" onClick={() => setFileManagerOpen((open) => !open)} title="Morgan le Fayl (⌘F)" aria-label="Morgan le Fayl">
+              <FilesIcon />
+            </button>
             <button className="icon-button row-action" onClick={() => setCreating(true)} title="New Board (⌘N)" aria-label="New Board">
               <PlusIcon />
             </button>
@@ -701,17 +714,21 @@ export default function Shell() {
 
       <main className="main">
         <div className="canvas-stage" data-canvas-appearance={snapshot.canvasAppearance}>
-          <Canvas
-            canvasAppearance={snapshot.canvasAppearance}
-            collaborationNickname={snapshot.collaborationNickname}
-            collaborationColor={snapshot.collaborationColor}
-            collaborationAvatar={snapshot.collaborationAvatar}
-            collaborationAvatarOnly={snapshot.collaborationAvatarOnly}
-            onSyncStatusHidden={setSidebarSyncStatus}
-            boardId={snapshot.selection}
-            collab={collab}
-          />
-          {snapshot.selection == null && (
+          {/* The canvas stays mounted (and inert) while Morgan le Fayl covers it, so the board
+              is never torn down and its size is not churned on the way back. */}
+          <div className="canvas-surface" inert={fileManagerOpen} aria-hidden={fileManagerOpen}>
+            <Canvas
+              canvasAppearance={snapshot.canvasAppearance}
+              collaborationNickname={snapshot.collaborationNickname}
+              collaborationColor={snapshot.collaborationColor}
+              collaborationAvatar={snapshot.collaborationAvatar}
+              collaborationAvatarOnly={snapshot.collaborationAvatarOnly}
+              onSyncStatusHidden={setSidebarSyncStatus}
+              boardId={snapshot.selection}
+              collab={collab}
+            />
+          </div>
+          {!fileManagerOpen && snapshot.selection == null && (
             <div className="no-selection">
               <p className="empty-title">No Board Selected</p>
               <p className="empty-description">Select a board in the sidebar, or create a new one.</p>
@@ -721,7 +738,8 @@ export default function Shell() {
             </div>
           )}
           {/* Only with a board open, and, like the Library trigger, gone while its panel is open. */}
-          {snapshot.ai.enabled && openBoard && !aiOpen && <MerlinTrigger onOpen={() => setAIOpen(true)} />}
+          {!fileManagerOpen && snapshot.ai.enabled && openBoard && !aiOpen && <MerlinTrigger onOpen={() => setAIOpen(true)} />}
+          {fileManagerOpen && <FileManager onClose={() => setFileManagerOpen(false)} />}
         </div>
         {snapshot.ai.enabled && (
           <aside className={`merlin-sidebar${aiOpen && openBoard ? ' open' : ''}`} aria-label="Merlin assistant">
@@ -2099,78 +2117,6 @@ function EditServerDialog({ server, onClose }: { server: NatsServerSettings; onC
           </button>
           <button className="primary" disabled={problem !== null || busy} onClick={() => void confirm()}>
             {busy ? 'Connecting…' : 'Save Changes'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** Dialog for creating a bucket on a NATS server (boards are stored in buckets). */
-function NewBucketDialog({ source, onClose }: { source: SourceInfo; onClose: () => void }) {
-  const [name, setName] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
-
-  const trimmed = name.trim()
-  // Mirrors BoardStore::bucket_name_problem (JetStream Object Store bucket names).
-  const problem = !trimmed
-    ? 'Enter a bucket name.'
-    : !/^[A-Za-z0-9_-]+$/.test(trimmed)
-      ? 'Bucket names can only contain letters, digits, “-” and “_”.'
-      : trimmed.length > 64
-        ? 'That bucket name is too long.'
-        : source.groups.some((g) => g.id === trimmed)
-          ? 'That bucket already exists.'
-          : null
-
-  const confirm = async () => {
-    if (problem || busy) return
-    setBusy(true)
-    setError(null)
-    try {
-      await addBucket(source.id, trimmed)
-      // Open the new bucket so the next "New Board" goes there.
-      await activateSource(source.id, trimmed)
-      onClose()
-    } catch (err) {
-      setError(String(err))
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose()
-      }}
-    >
-      <div className="modal" role="dialog" aria-modal="true">
-        <h2>New Bucket on {source.name}</h2>
-        <input
-          ref={inputRef}
-          value={name}
-          placeholder="e.g. team-boards"
-          onChange={(event) => setName(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') confirm()
-            if (event.key === 'Escape' && !busy) onClose()
-          }}
-        />
-        <p className={error || (trimmed && problem) ? 'problem' : 'hint'}>
-          {error ?? (trimmed && problem) ?? 'Boards in a bucket are shared with everyone using this server.'}
-        </p>
-        <div className="modal-actions">
-          <button className="secondary" disabled={busy} onClick={onClose}>
-            Cancel
-          </button>
-          <button className="primary" disabled={problem !== null || busy} onClick={confirm}>
-            {busy ? 'Creating…' : 'Create Bucket'}
           </button>
         </div>
       </div>

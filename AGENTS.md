@@ -18,11 +18,14 @@ read and edit the canvas through tool calls.
 | `main.go` | App entry point; embeds `frontend/dist`. |
 | `app.go` | Wails service (`App`) exposed to the frontend. |
 | `store.go`, `store_sources.go`, `models.go` | Board store, sources (local folders / NATS buckets), shared types. |
+| `filemanager.go` | Morgan le Fayl: listing, thumbnails, and file transfer within the boards folders. |
 | `nats.go` | NATS JetStream storage and collaboration (outbox, replay, snapshots, presence). |
 | `ai.go` | Dramallama chat harness and canvas tools. |
 | `version*.go` | Version info; `version_dev.go` / `version_production.go` are selected by the `production` build tag. |
 | `cmd/devnats/` | Local JetStream-enabled NATS server for development. |
 | `frontend/src/` | React UI (`Shell.tsx`, `Canvas.tsx`, `backend.ts`, `ipc.ts`, ...). |
+| `frontend/src/FileManager.tsx` | The Morgan le Fayl two-pane panel (list/grid, drag & drop, dialogs). |
+| `frontend/src/NewBucketDialog.tsx` | Creates a bucket on a NATS server (sidebar and Morgan le Fayl). |
 | `frontend/bindings/` | Generated Wails bindings. Do not edit by hand. |
 | `build/` | Wails platform build config and Taskfiles. `build/config.yml` holds the app version. |
 | `docs/nats-collaboration.md` | Collaboration architecture. Read before changing `nats.go`. |

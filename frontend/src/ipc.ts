@@ -110,6 +110,99 @@ export type OpenRequest = {
   snapshotSequence: string
 }
 
+// MARK: - Morgan le Fayl types (mirror of the Go structs)
+
+/**
+ * One pane location or one entry: a local path, or an object in a NATS bucket.
+ * A pane is either a local directory (Kind "local", Path set) or a bucket's
+ * object namespace (Kind "nats", Server and Bucket set). An entry inside a
+ * bucket carries its object name in Name; a local entry keeps its full path in
+ * Path.
+ */
+export type FileLocation = {
+  /** "local" | "nats". */
+  kind: string
+  /** local: absolute path; nats: "". */
+  path: string
+  /** nats: configured server id; local: "". */
+  server: string
+  /** nats: bucket; local: "". */
+  bucket: string
+  /** nats: object name; local: "". */
+  name: string
+}
+
+/** One pickable location in a pane's picker. */
+export type FileRoot = {
+  location: FileLocation
+  /** "~/Whiteboards" or the bucket name. */
+  label: string
+  /** "Local" or the server's display name (optgroup). */
+  group: string
+}
+
+/** One row or card in Morgan le Fayl. */
+export type FileEntry = {
+  name: string
+  location: FileLocation
+  isDir: boolean
+  size: number
+  /** Last modified, unix seconds. */
+  modified: number
+  isLink: boolean
+  /** Symlink target, display only. */
+  target: string
+  /** "folder" | "excalidraw" | "image" | "file". */
+  kind: string
+  hidden: boolean
+}
+
+/** One pane's directory or bucket listing. */
+export type FileListing = {
+  location: FileLocation
+  /** nil at a local root and always for a bucket. */
+  parent: FileLocation | null
+  entries: FileEntry[]
+  /** Every pickable root, for the pane's location picker. */
+  roots: FileRoot[]
+}
+
+/** A source file whose name already exists in the target. */
+export type FileConflict = {
+  source: FileLocation
+  name: string
+  /** Display-only description of what is in the way. */
+  target: string
+}
+
+/** The user's decision for one colliding source. */
+export type FileAction = {
+  source: FileLocation
+  /** "skip" | "overwrite" | "rename". */
+  action: string
+}
+
+/** Moves or copies a selection into a target. */
+export type FileTransferRequest = {
+  sources: FileLocation[]
+  /** A directory or a bucket. */
+  target: FileLocation
+  copy: boolean
+  /** Optional; missing entries on a collision default to "skip". */
+  actions: FileAction[]
+}
+
+/** The outcome for one source. */
+export type FileTransferResult = {
+  source: FileLocation
+  /** nil when skipped. */
+  target: FileLocation | null
+  name: string
+  /** "moved" | "copied" | "skipped" | "overwritten" | "renamed". */
+  action: string
+  error: string
+}
+
 // MARK: - Commands (JS → Rust)
 
 export const getState = () => app().GetState() as Promise<StoreSnapshot>
@@ -208,6 +301,25 @@ export const collabAcquireLock = (sourceId: string, bucket: string, documentId: 
 export const collabRenewLock = (sourceId: string, bucket: string, documentId: string, owner: string, ttlSeconds: number) => app().CollabRenewLock(sourceId, bucket, documentId, owner, ttlSeconds)
 /** Drops the leader lease (only if this client still owns it). */
 export const collabReleaseLock = (sourceId: string, bucket: string, documentId: string, owner: string) => app().CollabReleaseLock(sourceId, bucket, documentId, owner)
+
+// MARK: - Morgan le Fayl commands (JS → Go)
+
+/** Lists one directory inside the configured boards folders, or one NATS bucket's objects. */
+export const listFiles = (location: FileLocation) => app().ListFiles(location) as Promise<FileListing>
+/** Returns a data URL preview for a file, or "" when it has none. */
+export const fileThumbnail = (location: FileLocation) => app().FileThumbnail(location) as Promise<string>
+/** Reports which of the sources would collide in the target. */
+export const checkFileTransfer = (sources: FileLocation[], target: FileLocation) => app().CheckFileTransfer(sources, target) as Promise<FileConflict[]>
+/** Moves or copies sources into the target, applying Actions on collisions. */
+export const transferFiles = (request: FileTransferRequest) => app().TransferFiles(request) as Promise<FileTransferResult[]>
+/** Renames one file or folder in place. */
+export const renameFilePath = (location: FileLocation, name: string) => app().RenameFilePath(location, name)
+/** Creates one folder inside dir. Buckets have no folder structure, so a NATS location is refused. */
+export const newFolder = (location: FileLocation, name: string) => app().NewFolder(location, name)
+/** Moves one file or folder to the OS Trash, or permanently deletes a bucket object. */
+export const trashFilePath = (location: FileLocation) => app().TrashFilePath(location)
+/** Rescans the active source so the sidebar reflects files Morgan le Fayl touched. */
+export const refreshBoards = () => app().RefreshBoards()
 
 // MARK: - Events (Rust → JS)
 
