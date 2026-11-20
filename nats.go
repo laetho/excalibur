@@ -1081,17 +1081,21 @@ func (c *natsClient) watchLibrary(onChange func([]byte)) error {
 		return err
 	}
 	consumer := libraryWatchConsumerName(c.instanceID)
-	// A consumer created here replays one message per stored object. Those are
-	// the baseline this client already read on startup, so they must not be
-	// reported as changes. A consumer that already exists is being resumed
-	// instead, and whatever is still pending is a real update missed while the
-	// client was offline.
-	created := true
-	if _, infoErr := c.js.ConsumerInfo(stream, consumer); infoErr == nil {
-		created = false
+	// A consumer that already exists is being resumed, so whatever is still
+	// pending is a real update missed while the client was offline. A consumer
+	// created here replays the library object that is current right now, and this
+	// client already read that on startup, so it must not be reported as a change.
+	//
+	// The replay is identified by the object's digest instead of a "replaying"
+	// flag that lasts until the first message arrives: an empty library replays
+	// nothing at all, and such a flag would then swallow the first real update
+	// from another client. An empty digest means there is nothing to ignore.
+	var replayDigest atomic.Value // string
+	if _, infoErr := c.js.ConsumerInfo(stream, consumer); infoErr != nil {
+		if data, readErr := c.readObject(libraryBucket, libraryName); readErr == nil && data != nil {
+			replayDigest.Store(objectDigest(data))
+		}
 	}
-	var replaying atomic.Bool
-	replaying.Store(created)
 	opts := []nats.SubOpt{
 		nats.BindStream(stream),
 		nats.Durable(consumer),
@@ -1109,14 +1113,9 @@ func (c *natsClient) watchLibrary(onChange func([]byte)) error {
 		if err := json.Unmarshal(msg.Data, &info); err != nil {
 			return
 		}
-		meta, metaErr := msg.Metadata()
-		if metaErr != nil {
-			return
-		}
-		if replaying.Load() {
-			if meta.NumPending == 0 {
-				replaying.Store(false) // end of the initial replay; only live changes follow
-			}
+		if want, _ := replayDigest.Load().(string); want != "" && want == info.Digest {
+			// The library object this client already had; only live changes follow.
+			replayDigest.Store("")
 			return
 		}
 		if info.Deleted || info.Name != libraryName {

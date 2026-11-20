@@ -660,6 +660,19 @@ func resolveTestNATS(t *testing.T, url string) string {
 	return fmt.Sprintf("nats://127.0.0.1:%d", port)
 }
 
+// waitLibraryChange returns the next shared-library change a watcher reports, or
+// fails the test when none arrives in time.
+func waitLibraryChange(t *testing.T, changes <-chan string) string {
+	t.Helper()
+	select {
+	case got := <-changes:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("library change did not reach the other client")
+		return ""
+	}
+}
+
 func TestSharedLibrarySyncsAcrossBuckets(t *testing.T) {
 	serverURL := os.Getenv("EXCALIBUR_TEST_NATS_URL")
 	if serverURL == "" {
@@ -697,18 +710,17 @@ func TestSharedLibrarySyncsAcrossBuckets(t *testing.T) {
 	if err != nil || library == nil || *library != "legacy" {
 		t.Fatalf("legacy library not adopted: %v, %v", library, err)
 	}
+	// The watcher reports the library as it is when it handles an announcement, not
+	// the content of that announcement, so each write has to be observed before the
+	// next one is made; two back-to-back writes can legitimately coalesce into one.
+	if got := waitLibraryChange(t, changes); got != "legacy" {
+		t.Fatalf("watcher saw %q, want %q", got, "legacy")
+	}
 	if err := store.saveLibrary("shared"); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"legacy", "shared"} {
-		select {
-		case got := <-changes:
-			if got != want {
-				t.Fatalf("watcher saw %q, want %q", got, want)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("library change %q did not reach the other client", want)
-		}
+	if got := waitLibraryChange(t, changes); got != "shared" {
+		t.Fatalf("watcher saw %q, want %q", got, "shared")
 	}
 	store.activeGroup = "bucket-b"
 	if library, err = store.library(); err != nil || library == nil || *library != "shared" {
@@ -721,6 +733,59 @@ func TestSharedLibrarySyncsAcrossBuckets(t *testing.T) {
 	}
 	if buckets, err := clients[0].listBuckets(); err != nil || slices.Contains(buckets, libraryBucket) {
 		t.Fatalf("library bucket leaked into bucket list: %v, %v", buckets, err)
+	}
+}
+
+// TestSharedLibraryWatcherIgnoresBaseline covers the other half of the replay
+// rule: a watcher that starts when the shared library already exists must not
+// report that existing value as a change (it is the value the client reads on
+// startup), while the next real update must still arrive. An empty library, by
+// contrast, has nothing to replay, so the first live update must not be eaten by
+// a "replaying" flag (see TestSharedLibrarySyncsAcrossBuckets).
+func TestSharedLibraryWatcherIgnoresBaseline(t *testing.T) {
+	serverURL := os.Getenv("EXCALIBUR_TEST_NATS_URL")
+	if serverURL == "" {
+		t.Skip("set EXCALIBUR_TEST_NATS_URL to a server URL or 'spawn' to run the JetStream integration test")
+	}
+	serverURL = resolveTestNATS(t, serverURL)
+	var clients [2]*natsClient
+	for i := range clients {
+		id := fmt.Sprintf("base-%d", i)
+		var err error
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if clients[i], err = connectNATS(NatsServerConfig{ID: id, Name: id, URL: serverURL}); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(clients[i].close)
+	}
+	// Seed the library first, so the second client's watcher starts with a
+	// baseline object to replay.
+	if err := clients[0].writeSharedLibrary([]byte("baseline")); err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan string, 4)
+	if err := clients[1].watchLibrary(func(data []byte) { changes <- string(data) }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-changes:
+		t.Fatalf("watcher reported the baseline %q as a change", got)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := clients[0].writeSharedLibrary([]byte("next")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-changes:
+		if got != "next" {
+			t.Fatalf("watcher saw %q, want %q", got, "next")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("live library update did not reach the watcher")
 	}
 }
 
