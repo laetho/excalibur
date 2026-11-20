@@ -2750,12 +2750,17 @@ body {
 }
 
 .fm-title {
+  /* The title and the toolbar share the bar's spare width equally, so whatever
+     sits between them (the transfer actions) lands in the middle. */
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
   font-weight: 600;
   font-size: 14px;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .fm-title svg {
@@ -2770,7 +2775,6 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 8px;
 }
 
 .fm-transfer-actions button {
@@ -2781,9 +2785,11 @@ body {
 }
 
 .fm-toolbar {
-  margin-left: auto;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
 }
 
